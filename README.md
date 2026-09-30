@@ -1,0 +1,53 @@
+# CSV Viewer
+
+A read-only table viewer for CSV/TSV files in VS Code and its forks (Cursor, Windsurf).
+
+*(screenshot placeholder — add a GIF or PNG of the table + detail view here before publishing)*
+
+## Features
+
+- **Table + detail view.** Each column is either shown in the table or moved to a per-row detail panel. Click a row's chevron (or the row itself) to expand it and see the detail-only fields as key/value pairs. Use the **Columns** button to choose which columns are in the table, with a search box and Show all / Hide all.
+- **Filtering.** A quick search box filters across every column. The **Filters** panel adds rules per column (or "any column") with operators — contains, equals, starts with, ends with, regex, is empty, and numeric `>`, `<`, `>=`, `<=` — each rule set to Include or Exclude, with case sensitivity and an enable checkbox. Right-click a cell to quick-add an include/exclude rule for that value.
+- **Sorting.** Click a column header to cycle ascending → descending → none. Shift+click adds a secondary sort key (shown with a priority number). Use the **Sort by…** dropdown to sort by a detail-only column that has no visible header.
+- **Fast on large files.** Rows render in chunks and load more as you scroll, so the view stays responsive even at 100k+ rows. Files over 50 MB show a warning but still open.
+- **Live reload.** Editing the file on disk or in another editor refreshes the view automatically.
+- Column visibility, filter rules, and sort order are remembered per file.
+
+## Opening a file
+
+- Right-click a `.csv`/`.tsv`/`.tab` file in the Explorer and choose **Open in CSV Viewer**.
+- Or use the icon in the editor title bar, or the **Open in CSV Viewer** command from the Command Palette.
+- The text editor stays the default; CSV Viewer is offered as an alternate editor. To make it the default for these extensions, set `csvViewer.openByDefault` to `true`, or configure `workbench.editorAssociations` yourself (e.g. `"*.csv": "csvViewer.table"`).
+- From inside the viewer, use **Open as Text** to switch back to the plain text editor for the same file.
+
+## Settings
+
+| Setting                          | Default | Description                                                                 |
+| --------------------------------- | ------- | ----------------------------------------------------------------------------- |
+| `csvViewer.defaultTableColumns`   | `8`     | Number of leading columns shown in the table by default on first open.       |
+| `csvViewer.openByDefault`         | `false` | Open `.csv`/`.tsv`/`.tab` files in CSV Viewer instead of the text editor.     |
+
+## Installing from a `.vsix`
+
+Build the package with `npm run package`, which produces `csv-viewer-0.1.0.vsix`.
+
+**VS Code:** Extensions view → `···` menu → **Install from VSIX…** → select the file. Or from the command line: `code --install-extension csv-viewer-0.1.0.vsix`.
+
+**Cursor:** Extensions view → `···` menu → **Install from VSIX…** → select the file. Or from the command line: `cursor --install-extension csv-viewer-0.1.0.vsix`.
+
+## Development
+
+```sh
+npm install
+npm run compile          # tsc + esbuild bundles for extension host and webview
+npm run typecheck:webview
+npm test                 # vitest unit tests for src/core
+npm run test:webview     # Playwright e2e tests against the built webview bundle
+npm run package          # produces the .vsix
+```
+
+A sample file with quoted commas, embedded newlines, numbers, and empty cells is at `samples/people.csv` for manual testing.
+
+## License
+
+MIT

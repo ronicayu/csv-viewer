@@ -1,0 +1,278 @@
+/* Uses only VS Code theme variables (--vscode-*), so it renders correctly in
+   light, dark, and high-contrast themes without any custom palette. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+button {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+button:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+input,
+select {
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 2px;
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+input:focus,
+select:focus,
+button:focus,
+th:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  flex-wrap: wrap;
+}
+
+#quick-search {
+  min-width: 220px;
+}
+
+.sort-by-label,
+.header-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.popover,
+.panel {
+  position: absolute;
+  z-index: 20;
+  top: 42px;
+  right: 8px;
+  min-width: 260px;
+  max-width: 420px;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  padding: 8px;
+  border-radius: 3px;
+}
+
+.panel {
+  left: 8px;
+  right: 8px;
+}
+
+.popover-actions {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.columns-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.column-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+
+.column-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+#filter-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px;
+  border-radius: 2px;
+}
+
+.rule-row.rule-error {
+  outline: 1px solid var(--vscode-errorForeground);
+}
+
+.rule-error-text {
+  color: var(--vscode-errorForeground);
+  font-size: 0.9em;
+}
+
+.inline-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.status-bar {
+  padding: 4px 8px;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-size: 0.9em;
+}
+
+.table-scroll {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: auto;
+}
+
+thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--vscode-editor-background);
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--vscode-panel-border);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+th.sortable:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.sort-indicator {
+  margin-left: 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.chevron-col {
+  width: 20px;
+  min-width: 20px;
+  text-align: center;
+}
+
+.chevron {
+  cursor: pointer;
+  display: inline-block;
+  width: 1em;
+}
+
+tr.data-row {
+  cursor: pointer;
+}
+
+tr.data-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+tr.detail-row td {
+  white-space: normal;
+  background: var(--vscode-editor-background);
+  border-bottom: 2px solid var(--vscode-panel-border);
+}
+
+.detail-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 4px 0;
+  max-width: 900px;
+}
+
+.detail-fields dt {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.detail-fields dd {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.context-menu {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  border-radius: 3px;
+  padding: 2px;
+}
+
+.context-menu button {
+  background: transparent;
+  border: none;
+  text-align: left;
+  padding: 4px 10px;
+  color: var(--vscode-editor-foreground);
+}
+
+.context-menu button:hover {
+  background: var(--vscode-list-hoverBackground);
+}

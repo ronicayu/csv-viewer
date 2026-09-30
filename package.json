@@ -1,0 +1,112 @@
+{
+  "name": "csv-viewer",
+  "displayName": "CSV Viewer",
+  "description": "Read-only table viewer for CSV/TSV files, with column visibility, filtering, and sorting.",
+  "version": "0.1.0",
+  "publisher": "ronica",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "csv",
+    "tsv",
+    "table",
+    "viewer",
+    "data"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "csvViewer.open",
+        "title": "Open in CSV Viewer",
+        "icon": "$(table)"
+      },
+      {
+        "command": "csvViewer.openAsText",
+        "title": "CSV Viewer: Open as Text"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "csvViewer.table",
+        "displayName": "CSV Viewer",
+        "selector": [
+          { "filenamePattern": "*.csv" },
+          { "filenamePattern": "*.tsv" },
+          { "filenamePattern": "*.tab" }
+        ],
+        "priority": "option"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "csvViewer.open",
+          "when": "resourceExtname == .csv || resourceExtname == .tsv || resourceExtname == .tab",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "csvViewer.open",
+          "when": "resourceExtname == .csv || resourceExtname == .tsv || resourceExtname == .tab",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "csvViewer.open",
+          "when": "resourceExtname == .csv || resourceExtname == .tsv || resourceExtname == .tab"
+        },
+        {
+          "command": "csvViewer.openAsText",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CSV Viewer",
+      "properties": {
+        "csvViewer.defaultTableColumns": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "description": "Number of leading columns shown in the table by default when a file is first opened. Remaining columns start as detail-only."
+        },
+        "csvViewer.openByDefault": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open .csv/.tsv/.tab files in CSV Viewer by default instead of the text editor. You can also set this per-extension with the workbench.editorAssociations setting."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p . && npm run bundle:extension && npm run bundle:webview",
+    "watch": "tsc -w -p .",
+    "bundle:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=out/extension.js --sourcemap",
+    "bundle:webview": "esbuild src/webview/main.ts --bundle --platform=browser --format=iife --target=es2020 --outfile=out/webview/main.js --sourcemap && node -e \"require('fs').copyFileSync('src/webview/main.css','out/webview/main.css')\"",
+    "typecheck:webview": "tsc -p tsconfig.webview.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:webview": "npm run compile && tsc -p tsconfig.e2e.json --noEmit && playwright test",
+    "package": "vsce package --no-dependencies",
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.9.0",
+    "vitest": "^1.6.0"
+  }
+}

@@ -1,0 +1,57 @@
+id,first_name,last_name,email,department,title,salary,start_date,manager,office,phone,notes,projects,rating,active
+1,Alice,Johnson,alice.johnson@example.com,Sales,VP,41234,2016-02-02,,SF,+1-555-0101,,"""Special, Project 1""",3.6,true
+2,Bob,Lee,bob.lee@example.com,Marketing,Engineer,42468,2017-03-03,,Remote,+1-555-0102,,"Project 2, Project 3",1.1,true
+3,Charlie,Brown,charlie.brown@example.com,Support,Specialist,43702,2018-04-04,,London,+1-555-0103,"Quick note about Charlie, includes a comma, right there.","""Special, Project 3""",2.1,true
+4,Dana,Garcia,dana.garcia@example.com,Finance,Engineer,44936,2019-05-05,Alice,Berlin,+1-555-0104,,"Project 4, Project 5",1.9,false
+5,Eve,Martinez,eve.martinez@example.com,HR,Specialist,46170,2020-06-06,Bob,,+1-555-0105,"Line one for Eve.
+Line two: follow-up needed.
+Line three: done.","""Special, Project 5""",3.9,true
+6,Frank,Davis,frank.davis@example.com,"Legal,Compliance",Engineer,47404,2021-07-07,Charlie,NYC,,"Quick note about Frank, includes a comma, right there.","Project 6, Project 7",3.7,true
+7,Grace,Clark,grace.clark@example.com,Product,Specialist,48638,2022-08-08,Dana,SF,+1-555-0107,,"""Special, Project 7""",,true
+8,Heidi,Lewis,heidi.lewis@example.com,Engineering,Manager,49872,2023-09-09,Eve,Remote,+1-555-0108,,"Project 8, Project 9",4.6,false
+9,Ivan,Walker,,Sales,Specialist,51106,2024-10-10,Frank,London,+1-555-0109,"Quick note about Ivan, includes a comma, right there.","""Special, Project 9""",1.3,true
+10,Judy,Smith,judy.smith@example.com,Marketing,Engineer,52340,2015-11-11,Grace,Berlin,+1-555-0110,"Line one for Judy.
+Line two: follow-up needed.
+Line three: done.","Project 10, Project 11",2.7,true
+11,Kevin,Johnson,kevin.johnson@example.com,Support,Specialist,53574,2016-12-12,Heidi,,+1-555-0111,,"""Special, Project 11""",1.1,true
+12,Laura,Lee,laura.lee@example.com,Finance,Engineer,54808,2017-01-13,Ivan,NYC,,"Quick note about Laura, includes a comma, right there.","Project 12, Project 13",1.9,false
+13,Mallory,Brown,mallory.brown@example.com,HR,Specialist,,2018-02-14,Judy,SF,+1-555-0113,,"""Special, Project 13""",3.0,true
+14,Niaj,Garcia,niaj.garcia@example.com,"Legal,Compliance",Engineer,57276,2019-03-15,Kevin,Remote,+1-555-0114,,"Project 14, Project 15",,true
+15,Olivia,Martinez,olivia.martinez@example.com,Product,Specialist,58510,2020-04-16,Laura,London,+1-555-0115,"Line one for Olivia.
+Line two: follow-up needed.
+Line three: done.","""Special, Project 15""",1.1,true
+16,Peggy,Davis,peggy.davis@example.com,Engineering,Manager,59744,2021-05-17,Mallory,Berlin,+1-555-0116,,"Project 16, Project 17",1.8,false
+17,Quentin,Clark,quentin.clark@example.com,Sales,Specialist,60978,2022-06-18,Niaj,,+1-555-0117,,"""Special, Project 17""",3.6,true
+18,Ruth,Lewis,,Marketing,Engineer,62212,2023-07-19,Olivia,NYC,,"Quick note about Ruth, includes a comma, right there.","Project 18, Project 19",3.2,true
+19,Sybil,Walker,sybil.walker@example.com,Support,Specialist,63446,2024-08-20,Peggy,SF,+1-555-0119,,"""Special, Project 19""",1.9,true
+20,Trent,Smith,trent.smith@example.com,Finance,Engineer,64680,2015-09-21,Quentin,Remote,+1-555-0120,"Line one for Trent.
+Line two: follow-up needed.
+Line three: done.","Project 20, Project 21",3.4,false
+21,Uma,Johnson,uma.johnson@example.com,HR,Specialist,65914,2016-10-22,Ruth,London,+1-555-0121,"Quick note about Uma, includes a comma, right there.","""Special, Project 21""",,true
+22,Victor,Lee,victor.lee@example.com,"Legal,Compliance",Engineer,67148,2017-11-23,Sybil,Berlin,+1-555-0122,,"Project 22, Project 23",4.2,true
+23,Wendy,Brown,wendy.brown@example.com,Product,Specialist,68382,2018-12-24,Trent,,+1-555-0123,,"""Special, Project 23""",1.0,true
+24,Xavier,Garcia,xavier.garcia@example.com,Engineering,Manager,69616,2019-01-25,Uma,NYC,,"Quick note about Xavier, includes a comma, right there.","Project 24, Project 25",4.2,false
+25,Yara,Martinez,yara.martinez@example.com,Sales,Specialist,70850,2020-02-26,Victor,SF,+1-555-0125,"Line one for Yara.
+Line two: follow-up needed.
+Line three: done.","""Special, Project 25""",3.8,true
+26,Zach,Davis,zach.davis@example.com,Marketing,Engineer,,2021-03-27,Wendy,Remote,+1-555-0126,,"Project 26, Project 27",2.4,true
+27,Amir,Clark,,Support,Specialist,73318,2022-04-28,Xavier,London,+1-555-0127,"Quick note about Amir, includes a comma, right there.","""Special, Project 27""",1.6,true
+28,Bella,Lewis,bella.lewis@example.com,Finance,Engineer,74552,2023-05-01,Yara,Berlin,+1-555-0128,,"Project 28, Project 29",,false
+29,Carlos,Walker,carlos.walker@example.com,HR,Specialist,75786,2024-06-02,Zach,,+1-555-0129,,"""Special, Project 29""",4.8,true
+30,Dina,Smith,dina.smith@example.com,"Legal,Compliance",Engineer,77020,2015-07-03,Amir,NYC,,"Line one for Dina.
+Line two: follow-up needed.
+Line three: done.","Project 30, Project 31",2.3,true
+31,Ethan,Johnson,ethan.johnson@example.com,Product,Specialist,78254,2016-08-04,Bella,SF,+1-555-0131,,"""Special, Project 31""",1.4,true
+32,Fiona,Lee,fiona.lee@example.com,Engineering,Manager,79488,2017-09-05,Carlos,Remote,+1-555-0132,,"Project 32, Project 33",1.4,false
+33,George,Brown,george.brown@example.com,Sales,Specialist,80722,2018-10-06,Dina,London,+1-555-0133,"Quick note about George, includes a comma, right there.","""Special, Project 33""",4.4,true
+34,Hana,Garcia,hana.garcia@example.com,Marketing,Engineer,81956,2019-11-07,Ethan,Berlin,+1-555-0134,,"Project 34, Project 35",3.4,true
+35,Isla,Martinez,isla.martinez@example.com,Support,Specialist,83190,2020-12-08,Fiona,,+1-555-0135,"Line one for Isla.
+Line two: follow-up needed.
+Line three: done.","""Special, Project 35""",,true
+36,Jack,Davis,,Finance,Engineer,84424,2021-01-09,George,NYC,,"Quick note about Jack, includes a comma, right there.","Project 36, Project 37",4.2,false
+37,Kira,Clark,kira.clark@example.com,HR,Specialist,85658,2022-02-10,Hana,SF,+1-555-0137,,"""Special, Project 37""",3.9,true
+38,Liam,Lewis,liam.lewis@example.com,"Legal,Compliance",Engineer,86892,2023-03-11,Isla,Remote,+1-555-0138,,"Project 38, Project 39",3.1,true
+39,Mona,Walker,mona.walker@example.com,Product,Specialist,,2024-04-12,Jack,London,+1-555-0139,"Quick note about Mona, includes a comma, right there.","""Special, Project 39""",4.9,true
+40,Noah,Smith,noah.smith@example.com,Engineering,Manager,89360,2015-05-13,Kira,Berlin,+1-555-0140,"Line one for Noah.
+Line two: follow-up needed.
+Line three: done.","Project 40, Project 41",2.5,false

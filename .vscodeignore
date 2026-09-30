@@ -1,0 +1,19 @@
+.vscode/**
+src/**
+node_modules/**
+# tsc emits one .js per source file into out/ as a side effect of type
+# checking; only the two esbuild bundles (out/extension.js, out/webview/*)
+# are ever loaded at runtime.
+out/core/**
+out/test/**
+tsconfig.json
+tsconfig.webview.json
+tsconfig.e2e.json
+vitest.config.ts
+playwright.config.ts
+playwright-report/**
+test-results/**
+.gitignore
+docs/**
+package-lock.json
+**/*.vsix
