@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "ronica",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ronicayu/csv-viewer.git"
+  },
+  "homepage": "https://github.com/ronicayu/csv-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/ronicayu/csv-viewer/issues"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
