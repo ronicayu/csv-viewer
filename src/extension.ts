@@ -361,6 +361,7 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
       // the webview once it knows the parsed headers.
       stored.pageSize = normalizePageSize(stored.pageSize);
       stored.delimiter = typeof stored.delimiter === "string" ? stored.delimiter : "";
+      stored.quotes = typeof stored.quotes === "boolean" ? stored.quotes : true;
       return stored;
     }
 
