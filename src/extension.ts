@@ -16,6 +16,8 @@ const HARD_LIMIT_BYTES = 512 * 1024 * 1024;
  * disk, so a burst of rapid writes (or a save that touches the file
  * multiple times) coalesces into one reload instead of one per write. */
 const RELOAD_DEBOUNCE_MS = 300;
+/** How long to wait after a delete event before treating the file as gone. */
+const DELETE_GRACE_MS = 500;
 
 // ---- BEGIN TEST HOOK (CSV_VIEWER_TEST_HOOKS) ------------------------------
 // Test-only instrumentation for src/test/integration. Completely inert
@@ -193,16 +195,32 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
     // and in untrusted/virtual workspaces — see docs/spec.md), decodes it,
     // and posts the same `load` message shape the webview has always
     // expected. Parsing still happens in the webview (unchanged).
-    const postLoad = async (): Promise<void> => {
+    // Size + mtime of the bytes last posted. Watcher events that don't
+    // change either (e.g. the create event a new watcher fires for an
+    // existing file) are skipped instead of re-reading the whole file.
+    let lastLoaded: { size: number; mtime: number } | undefined;
+    let warnedLarge = false;
+
+    const reportReadError = (err: unknown): void => {
+      const msg = `CSV Viewer: could not read "${basename(uri)}": ${err instanceof Error ? err.message : String(err)}`;
+      if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "error", message: msg });
+      void vscode.window.showErrorMessage(msg);
+    };
+
+    /** `force` is set for the webview's `ready` request, which always needs
+     * a load; watcher-driven reloads skip unchanged files. */
+    const postLoad = async (force: boolean): Promise<void> => {
       let stat: vscode.FileStat;
       try {
         stat = await vscode.workspace.fs.stat(uri);
-      } catch {
-        // Transient (e.g. mid-write, or raced with a delete): the
-        // FileSystemWatcher will either fire onDidChange again or
-        // onDidDelete, which is handled separately below.
+      } catch (err) {
+        // On a watcher-driven reload this is usually transient (mid-write,
+        // or raced with a delete, which onDidDelete handles). Only the
+        // initial load has nothing else to show, so report it there.
+        if (force) reportReadError(err);
         return;
       }
+      if (!force && lastLoaded && lastLoaded.size === stat.size && lastLoaded.mtime === stat.mtime) return;
 
       if (stat.size > HARD_LIMIT_BYTES) {
         const msg = `CSV Viewer: "${basename(uri)}" is larger than 512 MB and was not loaded.`;
@@ -210,7 +228,8 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
         void vscode.window.showErrorMessage(msg);
         return;
       }
-      if (stat.size > LARGE_FILE_BYTES) {
+      if (stat.size > LARGE_FILE_BYTES && !warnedLarge) {
+        warnedLarge = true;
         const msg = `CSV Viewer: "${basename(uri)}" is larger than 50 MB. Loading it may be slow.`;
         if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
         void vscode.window.showWarningMessage(msg);
@@ -219,9 +238,11 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
       let bytes: Uint8Array;
       try {
         bytes = await vscode.workspace.fs.readFile(uri);
-      } catch {
+      } catch (err) {
+        if (force) reportReadError(err);
         return;
       }
+      lastLoaded = { size: stat.size, mtime: stat.mtime };
       // BOM handling stays in parseCsv (src/core/csvParse.ts) — the decoder
       // here just turns bytes into a string.
       const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
@@ -254,23 +275,34 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
       if (reloadDebounceHandle) clearTimeout(reloadDebounceHandle);
       reloadDebounceHandle = setTimeout(() => {
         reloadDebounceHandle = undefined;
-        void postLoad();
+        void postLoad(false);
       }, RELOAD_DEBOUNCE_MS);
     };
 
     const changeSub = watcher.onDidChange(scheduleReload);
     const createSub = watcher.onDidCreate(scheduleReload);
+    // Editors with atomic saves (write temp file, delete, rename) produce a
+    // delete immediately followed by a create, so check again after a short
+    // grace period before telling the user the file is gone. Either way the
+    // webview keeps showing the last loaded contents.
+    let deleteCheckHandle: ReturnType<typeof setTimeout> | undefined;
     const deleteSub = watcher.onDidDelete(() => {
-      // Don't try to reload — there's nothing to read. Keep whatever was
-      // last rendered in the webview (it already holds the parsed data in
-      // memory) and just tell the user, non-modally.
       if (reloadDebounceHandle) {
         clearTimeout(reloadDebounceHandle);
         reloadDebounceHandle = undefined;
       }
-      const msg = "CSV Viewer: File was deleted — showing last loaded contents.";
-      if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
-      void vscode.window.showWarningMessage(msg);
+      if (deleteCheckHandle) clearTimeout(deleteCheckHandle);
+      deleteCheckHandle = setTimeout(async () => {
+        deleteCheckHandle = undefined;
+        try {
+          await vscode.workspace.fs.stat(uri);
+          scheduleReload();
+        } catch {
+          const msg = "CSV Viewer: File was deleted — showing last loaded contents.";
+          if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
+          void vscode.window.showWarningMessage(msg);
+        }
+      }, DELETE_GRACE_MS);
     });
 
     const viewStateSub = webviewPanel.onDidChangeViewState((e) => {
@@ -285,7 +317,7 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
       }
       switch (message.type) {
         case "ready":
-          void postLoad();
+          void postLoad(true);
           break;
         case "saveState":
           this.saveState(fileKey, message.state);
@@ -298,6 +330,7 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
 
     webviewPanel.onDidDispose(() => {
       if (reloadDebounceHandle) clearTimeout(reloadDebounceHandle);
+      if (deleteCheckHandle) clearTimeout(deleteCheckHandle);
       changeSub.dispose();
       createSub.dispose();
       deleteSub.dispose();

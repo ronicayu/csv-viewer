@@ -55,6 +55,45 @@ suite("Live reload", () => {
     await sleep(500);
   });
 
+  test("opening a file loads it exactly once (watcher start-up events don't trigger a second read)", async () => {
+    const filePath = path.join(await freshDir("live-once-dir"), "live-once.csv");
+    await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n");
+    const uri = vscode.Uri.file(filePath);
+    await openInViewer(uri);
+    const api = await getTestApi();
+    const key = fileKeyFor(uri);
+    await waitForRender(api, key);
+    // Longer than the reload debounce, so a spurious reload would have landed.
+    await sleep(1500);
+    assert.strictEqual(renderCount(api, key), 1, "expected exactly one render after opening an unchanged file");
+  });
+
+  test("an atomic save (delete, then recreate) reloads without a 'deleted' warning", async () => {
+    const filePath = path.join(await freshDir("live-atomic-dir"), "live-atomic.csv");
+    await fsp.writeFile(filePath, "id,val\n1,a\n");
+    const uri = vscode.Uri.file(filePath);
+    await openInViewer(uri);
+    const api = await getTestApi();
+    const key = fileKeyFor(uri);
+    await waitForRender(api, key);
+    const notificationsBefore = api.getNotifications().length;
+
+    await fsp.unlink(filePath);
+    await sleep(50);
+    await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n3,c\n");
+
+    await waitFor(
+      () => {
+        const renders = api.getMessages(key).filter((m) => m.type === "rendered") as { rowCount: number }[];
+        return renders[renders.length - 1]?.rowCount === 3;
+      },
+      { timeoutMs: 8000, message: "the recreated file's content was never reflected" },
+    );
+    await sleep(800); // past the delete grace period
+    const newNotes = api.getNotifications().slice(notificationsBefore).map((n) => n.message);
+    assert.ok(!newNotes.some((m) => m.includes("deleted")), `unexpected notifications: ${JSON.stringify(newNotes)}`);
+  });
+
   test("20 rapid on-disk writes are debounced: far fewer reloads than writes, final render matches the last write", async () => {
     const filePath = path.join(await freshDir("live-rapid-dir"), "live-rapid.csv");
     await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n");
