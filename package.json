@@ -2,7 +2,7 @@
   "name": "csv-viewer",
   "displayName": "CSV Viewer",
   "description": "Read-only table viewer for CSV/TSV files, with column visibility, filtering, sorting, and pagination.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "ronica",
   "license": "MIT",
   "repository": {
@@ -112,10 +112,14 @@
   "devDependencies": {
     "@playwright/test": "^1.62.0",
     "@types/node": "^20.11.0",
+    "@types/papaparse": "^5.5.2",
     "@types/vscode": "^1.80.0",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.0",
     "typescript": "^5.9.0",
     "vitest": "^1.6.0"
+  },
+  "dependencies": {
+    "papaparse": "^5.7.0"
   }
 }

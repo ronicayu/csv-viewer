@@ -54,6 +54,12 @@ export interface ViewState {
    * missing/invalid value (state saved before pagination existed) is
    * normalized to 100 via core/paging's normalizePageSize. */
   pageSize: number;
+  /**
+   * Per-file separator choice. `""` means auto-detect. Stored values from
+   * before this field existed lack it entirely — treated the same as `""`
+   * (normalized in the webview on load).
+   */
+  delimiter: string;
 }
 
 export function createDefaultViewState(): ViewState {
@@ -64,6 +70,7 @@ export function createDefaultViewState(): ViewState {
     sortKeys: [],
     firstRowIsHeader: true,
     pageSize: 100,
+    delimiter: "",
   };
 }
 
@@ -72,10 +79,17 @@ export function createDefaultViewState(): ViewState {
 export interface LoadMessage {
   type: "load";
   fileKey: string;
-  headers: string[];
-  rows: string[][];
+  /** The whole document text, unparsed — parsing happens in the webview
+   * (see docs/spec.md's Architecture section) so a large file is only
+   * serialized across the postMessage boundary once, as a single string,
+   * instead of parsed twice on the host and shipped as `string[][]`. */
+  text: string;
   state: ViewState;
   defaultTableColumns: number;
+  /** Delimiter to use when `state.delimiter` is `""` (auto): `"\t"` for
+   * .tsv/.tab files, otherwise `""` (meaning fall through to real
+   * auto-detection in parseCsv). */
+  defaultDelimiter: string;
 }
 
 export interface ReadyMessage {

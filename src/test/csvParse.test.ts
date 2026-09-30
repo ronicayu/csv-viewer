@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectDelimiter, parseCsv, stripBom } from "../core/csvParse";
+import { parseCsv, stripBom } from "../core/csvParse";
 
 describe("stripBom", () => {
   it("removes a leading BOM", () => {
@@ -36,6 +36,18 @@ describe("parseCsv basics", () => {
     const result = parseCsv("a,b\n1,2");
     expect(result.rows).toEqual([["1", "2"]]);
   });
+
+  it("skips a fully blank line in the middle of the file rather than producing an empty row", () => {
+    // Documented behavior: skipEmptyLines drops lines with no characters at
+    // all, anywhere in the file (trailing or interior). A line that has
+    // content but only delimiters (e.g. ",,,") is a real row of empty
+    // fields and is NOT dropped — only a line with nothing on it at all is.
+    const result = parseCsv("a,b\n1,2\n\n3,4\n");
+    expect(result.rows).toEqual([
+      ["1", "2"],
+      ["3", "4"],
+    ]);
+  });
 });
 
 describe("quoted fields", () => {
@@ -57,6 +69,37 @@ describe("quoted fields", () => {
   it("preserves embedded CRLF inside a quoted field", () => {
     const result = parseCsv('a,b\n"line1\r\nline2",x');
     expect(result.rows).toEqual([["line1\r\nline2", "x"]]);
+  });
+
+  it("preserves a quoted field containing a newline followed by a comma", () => {
+    const result = parseCsv('a,b\n"line1,\nline2",x');
+    expect(result.rows).toEqual([["line1,\nline2", "x"]]);
+  });
+});
+
+describe("stray mid-field quote regression (the bug Papa Parse fixes)", () => {
+  // Bug being fixed: a stray `"` inside an *unquoted* field used to flip the
+  // hand-written tokenizer into quoted mode and swallow the rest of the
+  // file into one cell. Papa Parse only treats a `"` as starting a quoted
+  // field when it is the first character of the field.
+  it("parses an inch mark inside an unquoted field as literal text, not a quote-open", () => {
+    const result = parseCsv('name,size,type\nWidget,5" screen,TV\nGadget,10" screen,Monitor');
+    expect(result.headers).toEqual(["name", "size", "type"]);
+    expect(result.headers.length).toBe(3);
+    expect(result.rows).toEqual([
+      ["Widget", '5" screen', "TV"],
+      ["Gadget", '10" screen', "Monitor"],
+    ]);
+  });
+
+  it("parses a stray quote mid-field with a following comma without swallowing the rest of the file", () => {
+    const result = parseCsv('a,b\n1,5" screen,TV');
+    expect(result.rows).toEqual([["1", '5" screen', "TV"]]);
+  });
+
+  it('parses `He said "hi" there` mid-field as literal text', () => {
+    const result = parseCsv('a,b\n1,He said "hi" there,x');
+    expect(result.rows).toEqual([["1", 'He said "hi" there', "x"]]);
   });
 });
 
@@ -120,34 +163,61 @@ describe("headers", () => {
   });
 });
 
-describe("detectDelimiter", () => {
+describe("delimiter auto-detection (via parseCsv's returned delimiter)", () => {
+  // detectDelimiter() as a standalone export was removed along with the old
+  // line-based tokenizer — Papa Parse's quote-aware guessing now runs
+  // inside parseCsv itself, and the delimiter it settled on comes back on
+  // the result so the UI can show it (e.g. "Auto (;)").
   it("detects comma", () => {
-    expect(detectDelimiter("a,b,c\n1,2,3\n4,5,6")).toBe(",");
+    expect(parseCsv("a,b,c\n1,2,3\n4,5,6").delimiter).toBe(",");
   });
 
   it("detects semicolon", () => {
-    expect(detectDelimiter("a;b;c\n1;2;3\n4;5;6")).toBe(";");
+    expect(parseCsv("a;b;c\n1;2;3\n4;5;6").delimiter).toBe(";");
   });
 
   it("detects tab", () => {
-    expect(detectDelimiter("a\tb\tc\n1\t2\t3")).toBe("\t");
+    expect(parseCsv("a\tb\tc\n1\t2\t3").delimiter).toBe("\t");
   });
 
   it("detects pipe", () => {
-    expect(detectDelimiter("a|b|c\n1|2|3")).toBe("|");
+    expect(parseCsv("a|b|c\n1|2|3").delimiter).toBe("|");
   });
 
   it("defaults to comma for empty input", () => {
-    expect(detectDelimiter("")).toBe(",");
+    expect(parseCsv("").delimiter).toBe(",");
   });
 
   it("prefers the delimiter with the most consistent count across lines", () => {
     // Semicolons appear exactly once on every line (fully consistent).
-    // Commas appear a varying number of times on only some lines. Comma's
-    // raw occurrence count is higher on one line, but semicolon should
-    // still win because consistency is weighted above raw frequency.
+    // Commas appear inside what would, under a semicolon split, be a single
+    // field on some lines — Papa's quote-unaware sampling here still favors
+    // the delimiter that splits the file most consistently.
     const text = "a;b\n1,1;2\n3;4,4,4\n5;6";
-    expect(detectDelimiter(text)).toBe(";");
+    expect(parseCsv(text).delimiter).toBe(";");
+  });
+
+  it("detects semicolon correctly even when a quoted field contains many semicolons", () => {
+    const text = 'a;b;c\n1;"x;y;z;w";3\n4;"p;q;r;s";6';
+    const result = parseCsv(text);
+    expect(result.delimiter).toBe(";");
+    expect(result.rows).toEqual([
+      ["1", "x;y;z;w", "3"],
+      ["4", "p;q;r;s", "6"],
+    ]);
+  });
+
+  it("parses semicolon-delimited European decimals without splitting on the decimal comma", () => {
+    const result = parseCsv('1;1,50;"A"', { firstRowIsHeader: false });
+    expect(result.delimiter).toBe(";");
+    expect(result.headers).toEqual(["column_1", "column_2", "column_3"]);
+    expect(result.rows).toEqual([["1", "1,50", "A"]]);
+  });
+
+  it("still reports the single detectable delimiter for a single-column file", () => {
+    const result = parseCsv("a\n1\n2\n3");
+    expect(result.headers).toEqual(["a"]);
+    expect(result.rows).toEqual([["1"], ["2"], ["3"]]);
   });
 });
 
@@ -156,5 +226,23 @@ describe("explicit delimiter option", () => {
     const result = parseCsv("a\tb\n1\t2", { delimiter: "\t" });
     expect(result.headers).toEqual(["a", "b"]);
     expect(result.rows).toEqual([["1", "2"]]);
+  });
+
+  it("treats an empty-string delimiter the same as undefined (auto-detect)", () => {
+    const result = parseCsv("a;b\n1;2", { delimiter: "" });
+    expect(result.delimiter).toBe(";");
+    expect(result.rows).toEqual([["1", "2"]]);
+  });
+
+  it("supports a multi-character custom delimiter", () => {
+    const result = parseCsv("a||b||c\n1||2||3", { delimiter: "||" });
+    expect(result.delimiter).toBe("||");
+    expect(result.headers).toEqual(["a", "b", "c"]);
+    expect(result.rows).toEqual([["1", "2", "3"]]);
+  });
+
+  it("returns the delimiter actually used so the UI can show it", () => {
+    expect(parseCsv("a,b\n1,2").delimiter).toBe(",");
+    expect(parseCsv("a\tb\n1\t2", { delimiter: "\t" }).delimiter).toBe("\t");
   });
 });

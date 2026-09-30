@@ -2,11 +2,19 @@
 // runtime dependencies. Receives parsed rows from the extension host and
 // owns filtering, sorting, column visibility, and pagination.
 
+import { parseCsv } from "../core/csvParse";
 import { applyFilters, isValidRule } from "../core/filter";
 import { sortRows, cycleSortForColumn } from "../core/sort";
 import { detailFieldsFor, reconcileVisibility, visibleColumns } from "../core/columns";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
-import type { FilterOperator, FilterRule, HostToWebviewMessage, ViewState, WebviewToHostMessage } from "../core/types";
+import type {
+  ColumnVisibilityMap,
+  FilterOperator,
+  FilterRule,
+  HostToWebviewMessage,
+  ViewState,
+  WebviewToHostMessage,
+} from "../core/types";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: WebviewToHostMessage): void;
@@ -17,6 +25,21 @@ declare function acquireVsCodeApi(): {
 const vscode = acquireVsCodeApi();
 
 const SEARCH_DEBOUNCE_MS = 150;
+const SEPARATOR_DEBOUNCE_MS = 300;
+
+/** Presets for the "Separator" toolbar dropdown, in display order. Tab is
+ * labeled with the word "Tab" rather than a literal tab character. */
+const PRESET_DELIMITERS: { value: string; label: string }[] = [
+  { value: ",", label: "Comma ," },
+  { value: ";", label: "Semicolon ;" },
+  { value: "\t", label: "Tab" },
+  { value: "|", label: "Pipe |" },
+];
+const CUSTOM_SENTINEL = "custom";
+
+function delimiterDisplay(d: string): string {
+  return d === "\t" ? "Tab" : d;
+}
 
 interface RowWithId {
   id: number;
@@ -25,6 +48,13 @@ interface RowWithId {
 
 interface AppState {
   fileKey: string;
+  /** The whole document text, held onto so the "first row is header"
+   * toggle and separator changes can re-parse locally without a host
+   * round-trip. */
+  text: string;
+  /** `"\t"` for .tsv/.tab, else `""` — the delimiter to fall back to when
+   * `view.delimiter` is `""` (auto). */
+  defaultDelimiter: string;
   headers: string[];
   rows: RowWithId[];
   view: ViewState;
@@ -33,6 +63,10 @@ interface AppState {
   filtered: RowWithId[];
   /** 1-based. Not persisted — only pageSize is. */
   page: number;
+  /** The delimiter parseCsv actually used on the last parse — shown in the
+   * "Auto (…)" option even when it was forced by defaultDelimiter rather
+   * than truly auto-detected. */
+  detectedDelimiter: string;
 }
 
 let state: AppState | null = null;
@@ -56,6 +90,10 @@ app.innerHTML = `
       <input id="first-row-header" type="checkbox" checked />
       First row is header
     </label>
+    <label class="separator-label">Separator
+      <select id="separator-select" aria-label="Separator"></select>
+    </label>
+    <input id="separator-custom" type="text" maxlength="5" placeholder="e.g. ||" aria-label="Custom separator" hidden />
     <button id="open-as-text-btn" type="button">Open as Text</button>
   </div>
   <div id="columns-popover" class="popover" hidden>
@@ -102,6 +140,8 @@ const collapseAllBtn = document.getElementById("collapse-all-btn") as HTMLButton
 const sortBySelect = document.getElementById("sort-by-select") as HTMLSelectElement;
 const sortDirBtn = document.getElementById("sort-dir-btn") as HTMLButtonElement;
 const firstRowHeaderCheckbox = document.getElementById("first-row-header") as HTMLInputElement;
+const separatorSelect = document.getElementById("separator-select") as HTMLSelectElement;
+const separatorCustomInput = document.getElementById("separator-custom") as HTMLInputElement;
 const openAsTextBtn = document.getElementById("open-as-text-btn") as HTMLButtonElement;
 const columnsPopover = document.getElementById("columns-popover") as HTMLDivElement;
 const columnsSearch = document.getElementById("columns-search") as HTMLInputElement;
@@ -141,38 +181,106 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
 
 vscode.postMessage({ type: "ready" });
 
-function onLoad(message: HostToWebviewMessage): void {
-  const rows: RowWithId[] = message.rows.map((cells, id) => ({ id, cells }));
+/** Resolve the delimiter option to pass to parseCsv: the per-file stored
+ * choice takes precedence, then the host's defaultDelimiter (tab for
+ * .tsv/.tab), else undefined (real auto-detection inside parseCsv). */
+function resolveDelimiterOption(stateDelimiter: string, defaultDelimiter: string): string | undefined {
+  if (stateDelimiter !== "") return stateDelimiter;
+  if (defaultDelimiter !== "") return defaultDelimiter;
+  return undefined;
+}
+
+function sameColumnVisibility(a: ColumnVisibilityMap, b: ColumnVisibilityMap): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => a[k] === b[k]);
+}
+
+/** Yield one frame so a "Loading…" placeholder actually paints before a
+ * potentially expensive parse blocks the main thread. */
+function yieldFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+
+async function onLoad(message: HostToWebviewMessage): Promise<void> {
   const view = message.state;
-  // Defense in depth: the host already reconciles column visibility and
-  // normalizes pageSize before sending, but re-applying the same pure rules
-  // here means a bare message (e.g. a test pushing one directly) still gets
-  // sane defaults instead of silently misbehaving.
-  view.columnVisibility = reconcileVisibility(message.headers, view.columnVisibility, message.defaultTableColumns);
+  // Defense in depth: normalize fields that might be missing from state
+  // saved before they existed (or a bare message a test pushes directly)
+  // instead of silently misbehaving.
   view.pageSize = normalizePageSize(view.pageSize);
+  view.delimiter = typeof view.delimiter === "string" ? view.delimiter : "";
 
   // A `load` for the same file the webview is already showing is a live
-  // reload (the document changed on disk, or "first row is header" was
-  // toggled and the host re-parsed) — keep the current page instead of
-  // jumping back to page 1. It gets clamped to the new page count below.
+  // reload (the document changed on disk) — keep the current page instead
+  // of jumping back to page 1. It gets clamped to the new page count below.
   const isReload = state !== null && state.fileKey === message.fileKey;
   const previousPage = isReload ? state!.page : 1;
 
+  statusBar.textContent = "Loading…";
+  await yieldFrame();
+
+  const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
+  const parsed = parseCsv(message.text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader });
+
+  const previousVisibility = view.columnVisibility;
+  const reconciled = reconcileVisibility(parsed.headers, previousVisibility, message.defaultTableColumns);
+  const visibilityChanged = !sameColumnVisibility(previousVisibility, reconciled);
+  view.columnVisibility = reconciled;
+
   state = {
     fileKey: message.fileKey,
-    headers: message.headers,
-    rows,
+    text: message.text,
+    defaultDelimiter: message.defaultDelimiter,
+    headers: parsed.headers,
+    rows: parsed.rows.map((cells, id) => ({ id, cells })),
     view,
     defaultTableColumns: message.defaultTableColumns,
     expanded: new Set<number>(),
     filtered: [],
     page: previousPage,
+    detectedDelimiter: parsed.delimiter,
   };
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
   quickSearchInput.value = state.view.quickSearch;
   renderColumnsPopover();
   renderFilterPanel();
+  renderSeparatorControl();
   recomputeAndRender();
+
+  // Only write state back if reconciliation actually changed the stored
+  // visibility map — a plain reopen of a file whose visibility is already
+  // settled shouldn't cause a write on every open.
+  if (visibilityChanged) saveState();
+}
+
+/**
+ * Re-parse `state.text` with the current view options (separator, "first
+ * row is header") without a host round-trip, reconciling column visibility
+ * against the new headers. Used by both the separator control and the
+ * "first row is header" toggle.
+ */
+function reparseFromText(options: { resetPage: boolean }): void {
+  if (!state) return;
+  const delimiterOption = resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter);
+  const parsed = parseCsv(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader });
+
+  state.headers = parsed.headers;
+  state.rows = parsed.rows.map((cells, id) => ({ id, cells }));
+  state.detectedDelimiter = parsed.delimiter;
+  state.view.columnVisibility = reconcileVisibility(parsed.headers, state.view.columnVisibility, state.defaultTableColumns);
+  // Row identity is re-tokenized from scratch, so previously expanded rows
+  // (tracked by id) no longer correspond to the same content — reset, same
+  // as a live reload does.
+  state.expanded = new Set<number>();
+
+  renderColumnsPopover();
+  renderFilterPanel();
+  renderSeparatorControl();
+  recomputeAndRender({ resetPage: options.resetPage });
 }
 
 function newRuleId(): string {
@@ -459,7 +567,73 @@ quickSearchInput.addEventListener("input", () => {
 firstRowHeaderCheckbox.addEventListener("change", () => {
   if (!state) return;
   state.view.firstRowIsHeader = firstRowHeaderCheckbox.checked;
-  saveState(); // host re-parses and sends a fresh `load` on this change
+  // Re-parses locally from the text already held in state (no host round
+  // trip); keeps the current page, same as the old host-driven reload did.
+  reparseFromText({ resetPage: false });
+  saveState();
+});
+
+// ---- Separator ----------------------------------------------------------
+
+/** Render the Separator dropdown's options (including the live "Auto (…)"
+ * label) and select the value matching the current state, revealing the
+ * custom input when the stored delimiter isn't one of the presets. */
+function renderSeparatorControl(): void {
+  if (!state) return;
+  separatorSelect.innerHTML = "";
+
+  const autoOption = document.createElement("option");
+  autoOption.value = "";
+  autoOption.textContent = `Auto (${delimiterDisplay(state.detectedDelimiter)})`;
+  separatorSelect.appendChild(autoOption);
+
+  for (const preset of PRESET_DELIMITERS) {
+    const option = document.createElement("option");
+    option.value = preset.value;
+    option.textContent = preset.label;
+    separatorSelect.appendChild(option);
+  }
+
+  const customOption = document.createElement("option");
+  customOption.value = CUSTOM_SENTINEL;
+  customOption.textContent = "Custom…";
+  separatorSelect.appendChild(customOption);
+
+  const current = state.view.delimiter;
+  const isPreset = current === "" || PRESET_DELIMITERS.some((p) => p.value === current);
+  separatorSelect.value = isPreset ? current : CUSTOM_SENTINEL;
+  separatorCustomInput.hidden = isPreset;
+  if (!isPreset) separatorCustomInput.value = current;
+}
+
+function applySeparatorChange(delimiter: string): void {
+  if (!state) return;
+  state.view.delimiter = delimiter;
+  reparseFromText({ resetPage: true });
+  saveState();
+}
+
+separatorSelect.addEventListener("change", () => {
+  if (!state) return;
+  const value = separatorSelect.value;
+  if (value === CUSTOM_SENTINEL) {
+    // Reveal the input but don't reparse until the user actually types a
+    // custom delimiter — picking "Custom…" alone changes nothing yet.
+    separatorCustomInput.hidden = false;
+    separatorCustomInput.value = "";
+    separatorCustomInput.focus();
+    return;
+  }
+  applySeparatorChange(value);
+});
+
+let separatorDebounceHandle: number | undefined;
+separatorCustomInput.addEventListener("input", () => {
+  window.clearTimeout(separatorDebounceHandle);
+  separatorDebounceHandle = window.setTimeout(() => {
+    // An empty custom value falls back to Auto.
+    applySeparatorChange(separatorCustomInput.value.trim());
+  }, SEPARATOR_DEBOUNCE_MS);
 });
 
 // ---- Open as text ----------------------------------------------------------

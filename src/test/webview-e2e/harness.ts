@@ -4,6 +4,7 @@
 // extension host would, and then drive the rendered UI.
 
 import * as path from "path";
+import Papa from "papaparse";
 import { expect, type Page } from "@playwright/test";
 import type { LoadMessage, ViewState } from "../../core/types";
 
@@ -66,15 +67,86 @@ export function defaultViewState(overrides: Partial<ViewState> = {}): ViewState 
     sortKeys: [],
     firstRowIsHeader: true,
     pageSize: 100,
+    delimiter: "",
     ...overrides,
   };
 }
 
-/** Boot the shell and push a `load` message, exactly as the host would. */
-export async function bootAndLoad(page: Page, data: Omit<LoadMessage, "type">): Promise<void> {
+/**
+ * Fixture data for a `load` message, in the convenient `headers`/`rows`
+ * shape specs have always used. The real host now sends `text` (the whole
+ * document), not parsed `headers`/`rows` — parsing moved into the webview
+ * for performance — so this is serialized to CSV text (quoting handled by
+ * Papa.unparse, the same library the webview parses with) before posting.
+ */
+export interface FixtureLoad {
+  fileKey: string;
+  headers: string[];
+  rows: string[][];
+  state: ViewState;
+  defaultTableColumns: number;
+  /** Defaults to "" (auto), same as the host would send for a .csv file. */
+  defaultDelimiter?: string;
+}
+
+/** A `load` message built from raw CSV/TSV text instead of headers/rows —
+ * for specs that need to exercise parsing itself (delimiter detection,
+ * quoting edge cases) rather than starting from already-tabular data. */
+export interface TextLoad {
+  fileKey: string;
+  text: string;
+  state: ViewState;
+  defaultTableColumns: number;
+  defaultDelimiter?: string;
+}
+
+function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
+  const text = Papa.unparse({ fields: data.headers, data: data.rows });
+  return {
+    fileKey: data.fileKey,
+    text,
+    state: data.state,
+    defaultTableColumns: data.defaultTableColumns,
+    defaultDelimiter: data.defaultDelimiter ?? "",
+  };
+}
+
+function toTextLoadMessage(data: TextLoad): Omit<LoadMessage, "type"> {
+  return {
+    fileKey: data.fileKey,
+    text: data.text,
+    state: data.state,
+    defaultTableColumns: data.defaultTableColumns,
+    defaultDelimiter: data.defaultDelimiter ?? "",
+  };
+}
+
+/** Push a `load` message built from headers/rows into an already-booted page. */
+export async function pushLoad(page: Page, data: FixtureLoad): Promise<void> {
+  const message = { type: "load" as const, ...toLoadMessage(data) };
+  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
+}
+
+/** Push a `load` message built from raw text into an already-booted page. */
+export async function pushLoadText(page: Page, data: TextLoad): Promise<void> {
+  const message = { type: "load" as const, ...toTextLoadMessage(data) };
+  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
+}
+
+/** Boot the shell and push a `load` message built from headers/rows, exactly
+ * as specs have always specified fixtures — just serialized to CSV text
+ * under the hood, matching what the real host now sends. */
+export async function bootAndLoad(page: Page, data: FixtureLoad): Promise<void> {
   await bootShell(page);
-  await page.evaluate((msg) => window.postMessage(msg, "*"), { type: "load", ...data });
+  await pushLoad(page, data);
   // Wait for the table to actually render this file's headers before the
   // spec starts interacting with it.
+  await expect(page.locator("#table-head th")).not.toHaveCount(0);
+}
+
+/** Boot the shell and push a `load` message built from raw text. */
+export async function bootAndLoadText(page: Page, data: TextLoad): Promise<void> {
+  await bootShell(page);
+  await pushLoadText(page, data);
   await expect(page.locator("#table-head th")).not.toHaveCount(0);
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { awaitPosted, bootAndLoad, clearPosted, defaultViewState } from "./harness";
+import { awaitPosted, bootAndLoad, clearPosted, defaultViewState, pushLoad } from "./harness";
 import { largeFixture } from "./fixtures";
 
 // 250 rows @ the default page size of 100 -> 3 pages (100, 100, 50). Enough
@@ -97,17 +97,13 @@ test("changing the page size posts saveState with the new pageSize", async ({ pa
 });
 
 test("loading with state.pageSize = 50 shows 50 rows per page", async ({ page }) => {
-  await page.evaluate(
-    (msg) => window.postMessage(msg, "*"),
-    {
-      type: "load",
-      fileKey: "file:///medium-50.csv",
-      headers: fixture.headers,
-      rows: fixture.rows,
-      state: defaultViewState({ pageSize: 50 }),
-      defaultTableColumns: 5,
-    },
-  );
+  await pushLoad(page, {
+    fileKey: "file:///medium-50.csv",
+    headers: fixture.headers,
+    rows: fixture.rows,
+    state: defaultViewState({ pageSize: 50 }),
+    defaultTableColumns: 5,
+  });
   await expect(page.locator("tr.data-row")).toHaveCount(50);
   await expect(page.locator("#pager-page-count")).toHaveText("5");
 });
@@ -119,17 +115,13 @@ test("a reload `load` for the same fileKey keeps the page, clamped to the new pa
   // Same fileKey, but now only 120 rows (2 pages at size 100) -> page 3 no
   // longer exists, so this must clamp down to page 2 rather than reset to 1.
   const smaller = largeFixture(120);
-  await page.evaluate(
-    (msg) => window.postMessage(msg, "*"),
-    {
-      type: "load",
-      fileKey: "file:///medium.csv",
-      headers: smaller.headers,
-      rows: smaller.rows,
-      state: defaultViewState(),
-      defaultTableColumns: 5,
-    },
-  );
+  await pushLoad(page, {
+    fileKey: "file:///medium.csv",
+    headers: smaller.headers,
+    rows: smaller.rows,
+    state: defaultViewState(),
+    defaultTableColumns: 5,
+  });
   await expect(page.locator("#pager-page-input")).toHaveValue("2");
   await expect(page.locator("tr.data-row")).toHaveCount(20);
 });
@@ -138,16 +130,12 @@ test("a `load` for a different fileKey resets to page 1", async ({ page }) => {
   await page.locator("#pager-next-btn").click();
   await expect(page.locator("#pager-page-input")).toHaveValue("2");
 
-  await page.evaluate(
-    (msg) => window.postMessage(msg, "*"),
-    {
-      type: "load",
-      fileKey: "file:///other.csv",
-      headers: fixture.headers,
-      rows: fixture.rows,
-      state: defaultViewState(),
-      defaultTableColumns: 5,
-    },
-  );
+  await pushLoad(page, {
+    fileKey: "file:///other.csv",
+    headers: fixture.headers,
+    rows: fixture.rows,
+    state: defaultViewState(),
+    defaultTableColumns: 5,
+  });
   await expect(page.locator("#pager-page-input")).toHaveValue("1");
 });

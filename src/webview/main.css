@@ -79,11 +79,16 @@ th:focus {
 }
 
 .sort-by-label,
-.header-toggle-label {
+.header-toggle-label,
+.separator-label {
   display: flex;
   align-items: center;
   gap: 4px;
   color: var(--vscode-descriptionForeground);
+}
+
+#separator-custom {
+  width: 60px;
 }
 
 .popover,

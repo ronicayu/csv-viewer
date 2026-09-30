@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { awaitPosted, bootAndLoad, clearPosted, defaultViewState } from "./harness";
+import { awaitPosted, bootAndLoad, clearPosted, defaultViewState, pushLoad } from "./harness";
 import { smallFixture } from "./fixtures";
 
 test.beforeEach(async ({ page }) => {
@@ -71,17 +71,13 @@ test("a rule added after reloading persisted rules gets a distinct id", async ({
     caseSensitive: false,
     enabled: true,
   };
-  await page.evaluate(
-    (msg) => window.postMessage(msg, "*"),
-    {
-      type: "load",
-      fileKey: "file:///people.csv",
-      headers: smallFixture.headers,
-      rows: smallFixture.rows,
-      state: defaultViewState({ filterRules: [persisted] }),
-      defaultTableColumns: 4,
-    },
-  );
+  await pushLoad(page, {
+    fileKey: "file:///people.csv",
+    headers: smallFixture.headers,
+    rows: smallFixture.rows,
+    state: defaultViewState({ filterRules: [persisted] }),
+    defaultTableColumns: 4,
+  });
   await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 5 rows");
 
   await page.locator("#filters-btn").click();

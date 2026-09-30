@@ -1,12 +1,14 @@
 import * as vscode from "vscode";
-import { parseCsv } from "./core/csvParse";
-import { defaultVisibility, reconcileVisibility } from "./core/columns";
 import { normalizePageSize } from "./core/paging";
 import { createDefaultViewState, type HostToWebviewMessage, type ViewState, type WebviewToHostMessage } from "./core/types";
 
 const VIEW_TYPE = "csvViewer.table";
 const STATE_PREFIX = "csvViewer.state:";
 const LARGE_FILE_BYTES = 50 * 1024 * 1024;
+/** Debounce for re-sending the document text on `onDidChangeTextDocument`,
+ * so typing in a side-by-side text editor doesn't re-send a large file on
+ * every keystroke. */
+const CHANGE_DEBOUNCE_MS = 300;
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new CsvEditorProvider(context);
@@ -69,34 +71,40 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     const fileKey = document.uri.toString();
     CsvEditorProvider.activeUri = document.uri;
 
-    if (Buffer.byteLength(document.getText(), "utf8") > LARGE_FILE_BYTES) {
+    // `document.getText().length` (UTF-16 code units) is a cheaper stand-in
+    // for the file's byte size than `Buffer.byteLength(..., "utf8")` — good
+    // enough for a "this might be slow" warning.
+    if (document.getText().length > LARGE_FILE_BYTES) {
       void vscode.window.showWarningMessage(
         `CSV Viewer: "${basename(document.uri)}" is larger than 50 MB. Loading it may be slow.`,
       );
     }
 
+    // Parsing now happens in the webview (see docs/spec.md): the host just
+    // ships the whole document text once per load/reload, plus enough
+    // context (defaultDelimiter, defaultTableColumns) for the webview to
+    // parse and reconcile column visibility itself.
     const postLoad = (): void => {
-      const state = this.loadOrCreateState(fileKey, document);
-      const parsed = parseCsv(document.getText(), {
-        delimiter: this.delimiterFor(document.uri),
-        firstRowIsHeader: state.firstRowIsHeader,
-      });
-      state.columnVisibility = reconcileVisibility(parsed.headers, state.columnVisibility, this.defaultTableColumns());
-      this.saveState(fileKey, state);
-
+      const state = this.loadOrCreateState(fileKey);
       const message: HostToWebviewMessage = {
         type: "load",
         fileKey,
-        headers: parsed.headers,
-        rows: parsed.rows,
+        text: document.getText(),
         state,
         defaultTableColumns: this.defaultTableColumns(),
+        defaultDelimiter: this.delimiterFor(document.uri) ?? "",
       };
       void webview.postMessage(message);
     };
 
+    let changeDebounceHandle: ReturnType<typeof setTimeout> | undefined;
     const changeSub = vscode.workspace.onDidChangeTextDocument((e) => {
-      if (e.document.uri.toString() === document.uri.toString()) postLoad();
+      if (e.document.uri.toString() !== document.uri.toString()) return;
+      if (changeDebounceHandle) clearTimeout(changeDebounceHandle);
+      changeDebounceHandle = setTimeout(() => {
+        changeDebounceHandle = undefined;
+        postLoad();
+      }, CHANGE_DEBOUNCE_MS);
     });
 
     const viewStateSub = webviewPanel.onDidChangeViewState((e) => {
@@ -108,14 +116,12 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
         case "ready":
           postLoad();
           break;
-        case "saveState": {
-          const previous = this.context.workspaceState.get<ViewState>(STATE_PREFIX + fileKey);
+        case "saveState":
+          // Separator changes and the "first row is header" toggle now
+          // re-parse locally in the webview from the text it already
+          // holds, so saving state here never needs to trigger a re-send.
           this.saveState(fileKey, message.state);
-          // Toggling "first row is header" changes how the document must be
-          // re-parsed; parsing lives in the host, so re-send on that change.
-          if (!previous || previous.firstRowIsHeader !== message.state.firstRowIsHeader) postLoad();
           break;
-        }
         case "openAsText":
           void vscode.commands.executeCommand("vscode.openWith", document.uri, "default");
           break;
@@ -123,6 +129,7 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     });
 
     webviewPanel.onDidDispose(() => {
+      if (changeDebounceHandle) clearTimeout(changeDebounceHandle);
       changeSub.dispose();
       viewStateSub.dispose();
       messageSub.dispose();
@@ -139,20 +146,20 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     return undefined;
   }
 
-  private loadOrCreateState(fileKey: string, document: vscode.TextDocument): ViewState {
+  private loadOrCreateState(fileKey: string): ViewState {
     const stored = this.context.workspaceState.get<ViewState>(STATE_PREFIX + fileKey);
     if (stored) {
-      // Backward compatibility: state saved before pagination existed has no
-      // pageSize (or, in principle, a corrupted one) — normalize it rather
-      // than shipping `undefined` down to the webview.
+      // Backward compatibility: state saved before pagination/separator
+      // support existed may have no pageSize/delimiter (or, in principle, a
+      // corrupted pageSize) — normalize rather than shipping `undefined`
+      // down to the webview. Column visibility defaults are reconciled in
+      // the webview once it knows the parsed headers.
       stored.pageSize = normalizePageSize(stored.pageSize);
+      stored.delimiter = typeof stored.delimiter === "string" ? stored.delimiter : "";
       return stored;
     }
 
-    const parsed = parseCsv(document.getText(), { delimiter: this.delimiterFor(document.uri), firstRowIsHeader: true });
-    const state = createDefaultViewState();
-    state.columnVisibility = defaultVisibility(parsed.headers, this.defaultTableColumns());
-    return state;
+    return createDefaultViewState();
   }
 
   private saveState(fileKey: string, state: ViewState): void {
