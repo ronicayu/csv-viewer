@@ -1,22 +1,20 @@
-// Covers docs/spec.md's "Large files" section: the >50MB warning, timing
-// to first render, extension-host memory, and whether VS Code itself
-// balks at opening something this big — for large multi-row files and a
-// single-line file.
+// Covers docs/spec.md's "Large files" section: the >50MB "may be slow"
+// warning, the >512MB hard limit, timing to first render, and extension-
+// host memory — for large multi-row files and a single-line file.
 //
-// IMPORTANT FINDING (see the final report): bisecting empirically found
-// that VS Code 1.139.1 itself refuses to resolve ANY custom editor —
-// ours included — for a file at or above ~50MB, regardless of workspace
-// membership: 49MB opens fine (confirmed with a stopwatch below); 50MB
-// fails immediately with "Unable to retrieve document from URI ..."
-// logged to the Extension Host console, and resolveCustomTextEditor()
-// never runs. That means extension.ts's own `LARGE_FILE_BYTES` warning
-// path (docs/spec.md: ">50MB: show a warning and still try") is
-// unreachable for files at/above VS Code's own ceiling in this
-// environment — VS Code's gate fires first. This is expressed below as
-// fast, deterministic, clearly-labelled assertions of the CURRENT
-// behavior (a short wait proving nothing renders), not as multi-minute
-// timeouts — an earlier version of this suite waited the full 150s/220s/
-// 90s timeouts for exactly this reason and took ~8 minutes to fail.
+// FIXED (see docs/spec.md / final report): this used to be a
+// CustomTextEditorProvider, and VS Code 1.139.1 itself refuses to sync ANY
+// text document at or above ~50MB to a CustomTextEditorProvider ("Unable to
+// retrieve document from URI ...", logged to the Extension Host console;
+// resolveCustomTextEditor() never ran) — regardless of workspace
+// membership. That made the extension's own ">50MB: warn and still try"
+// path (docs/spec.md) unreachable for files at/above VS Code's own text-
+// sync ceiling. Switching to CustomReadonlyEditorProvider, which reads
+// bytes itself via vscode.workspace.fs.readFile() instead of waiting for a
+// synced TextDocument, sidesteps that ceiling entirely: 51MB and 120MB now
+// open and render, same as 49MB. A new, deliberate hard limit at 512MB
+// (comfortably above anything exercised here) shows an error and does not
+// load at all, so an enormous file can't wedge the extension host.
 
 import * as assert from "assert";
 import * as vscode from "vscode";
@@ -56,7 +54,7 @@ async function measure(label: string, uri: vscode.Uri, bytes: number, opts: { ex
   } else {
     try {
       await waitForRender(api, fileKeyFor(uri), 1, { timeoutMs: opts.timeoutMs });
-      outcome = "rendered"; // would mean the BUG is fixed
+      outcome = "rendered"; // would mean the hard limit isn't actually enforced
     } catch {
       outcome = "failed-to-open";
     }
@@ -85,7 +83,7 @@ async function measure(label: string, uri: vscode.Uri, bytes: number, opts: { ex
 }
 
 suite("Large files", function () {
-  this.timeout(120000);
+  this.timeout(300000);
 
   suiteSetup(async () => {
     await getTestApi();
@@ -100,7 +98,7 @@ suite("Large files", function () {
     console.log("[largeFiles] summary:\n" + measurements.map((m) => JSON.stringify(m)).join("\n"));
   });
 
-  test("49MB file (just under VS Code's own open-file ceiling): crosses the extension's 50MB warning threshold... almost — opens and renders", async function () {
+  test("49MB file: under the 50MB warning threshold, opens and renders without a warning", async function () {
     this.timeout(60000);
     const { filePath, bytes } = await writeLargeCsv("fortynine.csv", 49 * 1024 * 1024, 12);
     const uri = vscode.Uri.file(filePath);
@@ -110,38 +108,48 @@ suite("Large files", function () {
     assert.strictEqual(m.outcome, "rendered");
     assert.ok(m.rowCount! > 0, "expected at least one parsed row");
 
-    // 49MB is just under the extension's own 50MB LARGE_FILE_BYTES
-    // threshold, so no warning is expected here — this test's job is to
-    // establish that the extension's own code path (independent of
-    // VS Code's ceiling) works and is reasonably fast for a large file.
     const warned = api.getNotifications().some((n) => n.level === "warning" && /larger than 50 ?MB/i.test(n.message));
     assert.strictEqual(warned, false, "49MB is under the 50MB threshold; no warning expected");
   });
 
-  test("BUG: a 51MB file fails to open via the custom editor at all in this environment", async function () {
-    this.timeout(30000);
+  test("FIXED: a 51MB file now opens and renders via the readonly custom editor (reads bytes directly, bypassing VS Code's text-sync ceiling), with the >50MB warning shown", async function () {
+    this.timeout(60000);
     const { filePath, bytes } = await writeLargeCsv("fiftyone.csv", 51 * 1024 * 1024, 12);
     const uri = vscode.Uri.file(filePath);
+    const api = await getTestApi();
 
-    // BUG (see file header comment for the full bisection): VS Code
-    // 1.139.1 refuses to resolve ANY custom editor for a file this large
-    // ("Unable to retrieve document from URI ...", logged to the
-    // Extension Host console; resolveCustomTextEditor() never runs). The
-    // extension's own >50MB warning in extension.ts is unreachable here.
-    const m = await measure("51MB/12col", uri, bytes, { expectRender: false, timeoutMs: 5000 });
-    assert.strictEqual(m.outcome, "failed-to-open", "documenting CURRENT (buggy) behavior — update this test if VS Code's ceiling ever changes");
+    const m = await measure("51MB/12col", uri, bytes, { expectRender: true, timeoutMs: 45000 });
+    assert.strictEqual(m.outcome, "rendered");
+    assert.ok(m.rowCount! > 0, "expected at least one parsed row");
+
+    const warned = api.getNotifications().some((n) => n.level === "warning" && /larger than 50 ?MB/i.test(n.message));
+    assert.strictEqual(warned, true, "51MB is over the 50MB threshold; the 'may be slow' warning is expected");
   });
 
-  test("BUG: a 120MB file fails to open via the custom editor at all in this environment (same VS Code ceiling)", async function () {
-    this.timeout(30000);
+  test("FIXED: a 120MB file now opens and renders via the readonly custom editor, well under the 512MB hard limit", async function () {
+    this.timeout(90000);
     const { filePath, bytes } = await writeLargeCsv("onetwenty.csv", 120 * 1024 * 1024, 12);
     const uri = vscode.Uri.file(filePath);
 
-    const m = await measure("120MB/12col", uri, bytes, { expectRender: false, timeoutMs: 5000 });
-    assert.strictEqual(m.outcome, "failed-to-open", "documenting CURRENT (buggy) behavior — update this test if VS Code's ceiling ever changes");
+    const m = await measure("120MB/12col", uri, bytes, { expectRender: true, timeoutMs: 75000 });
+    assert.strictEqual(m.outcome, "rendered");
+    assert.ok(m.rowCount! > 0, "expected at least one parsed row");
 
     // The extension host itself must still be alive and responsive.
     await vscode.commands.executeCommand("workbench.action.files.saveAll");
+  });
+
+  test("a file over the 512MB hard limit shows an error and is not loaded", async function () {
+    this.timeout(280000);
+    const { filePath, bytes } = await writeLargeCsv("waytoobig.csv", 513 * 1024 * 1024, 12);
+    const uri = vscode.Uri.file(filePath);
+    const api = await getTestApi();
+
+    const m = await measure("513MB/12col (hard limit)", uri, bytes, { expectRender: false, timeoutMs: 8000 });
+    assert.strictEqual(m.outcome, "failed-to-open", "expected the hard limit to prevent any render");
+
+    const errored = api.getNotifications().some((n) => n.level === "error" && /larger than 512 ?MB/i.test(n.message));
+    assert.strictEqual(errored, true, "expected an error notification naming the 512MB hard limit");
   });
 
   test("single line, 2MB long: one row, opens without throwing", async function () {
@@ -153,10 +161,11 @@ suite("Large files", function () {
     assert.strictEqual(m.rowCount, 1, "expected exactly one data row");
   });
 
-  // BUG (severe): a single pathologically long line is drastically slower
-  // than a normal multi-row file of the *same total byte size* — and gets
-  // worse faster than the byte count does. Measured by hand while writing
-  // this suite (not re-run here to keep the suite fast and non-flaky):
+  // BUG (severe, unrelated to this fix — pre-existing and still true): a
+  // single pathologically long line is drastically slower than a normal
+  // multi-row file of the *same total byte size* — and gets worse faster
+  // than the byte count does. Measured by hand while writing this suite
+  // (not re-run here to keep the suite fast and non-flaky):
   //   1MB  single line -> ~2.6s to render
   //   5MB  single line -> ~12s to render
   //   15MB single line -> ~37s to render, and VS Code's own responsiveness
@@ -171,7 +180,9 @@ suite("Large files", function () {
   // worse) in either VS Code's own single-line handling or this
   // extension's DOM rendering of one massive table cell
   // (`td.textContent = value` in src/webview/main.ts's buildRowTr/
-  // buildDetailTr, for a `value` that is itself multiple megabytes).
+  // buildDetailTr, for a `value` that is itself multiple megabytes). Not in
+  // scope for this fix (webview DOM rendering is owned by a parallel
+  // agent) — left as documented, still-skipped coverage.
   test.skip("single line, 20MB long: one row (SKIPPED — see BUG comment above; risks hanging the whole test host)", async function () {
     const { filePath } = await writeSingleLongLineCsv("longline-20mb.csv", 20 * 1024 * 1024);
     const uri = vscode.Uri.file(filePath);

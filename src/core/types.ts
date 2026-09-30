@@ -9,8 +9,7 @@ export interface ParseResult {
   /**
    * Data-row numbers (1-based, as the user sees them in the table) where
    * Papa reported a quote-related parse error (InvalidQuotes/MissingQuotes
-   * etc.) — or, for a malformed pattern Papa's own error reporting misses,
-   * a cheap fallback heuristic (see src/core/csvParse.ts). Capped at the
+   * etc.). Capped at the
    * first ~20. Empty when `quotes` parsing was off (see ParseOptions) or
    * when nothing looked malformed.
    */
