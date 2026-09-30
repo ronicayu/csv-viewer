@@ -16,6 +16,12 @@
   "engines": {
     "vscode": "^1.80.0"
   },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
   "categories": [
     "Visualization",
     "Other"
@@ -47,13 +53,13 @@
         "displayName": "CSV Viewer",
         "selector": [
           {
-            "filenamePattern": "*.csv"
+            "filenamePattern": "*.[cC][sS][vV]"
           },
           {
-            "filenamePattern": "*.tsv"
+            "filenamePattern": "*.[tT][sS][vV]"
           },
           {
-            "filenamePattern": "*.tab"
+            "filenamePattern": "*.[tT][aA][bB]"
           }
         ],
         "priority": "option"
@@ -63,21 +69,21 @@
       "explorer/context": [
         {
           "command": "csvViewer.open",
-          "when": "resourceExtname == .csv || resourceExtname == .tsv || resourceExtname == .tab",
+          "when": "resourceExtname =~ /^\\.(csv|tsv|tab)$/i",
           "group": "navigation"
         }
       ],
       "editor/title": [
         {
           "command": "csvViewer.open",
-          "when": "resourceExtname == .csv || resourceExtname == .tsv || resourceExtname == .tab",
+          "when": "resourceExtname =~ /^\\.(csv|tsv|tab)$/i",
           "group": "navigation"
         }
       ],
       "commandPalette": [
         {
           "command": "csvViewer.open",
-          "when": "resourceExtname == .csv || resourceExtname == .tsv || resourceExtname == .tab"
+          "when": "resourceExtname =~ /^\\.(csv|tsv|tab)$/i"
         },
         {
           "command": "csvViewer.openAsText",

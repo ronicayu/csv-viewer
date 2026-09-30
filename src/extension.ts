@@ -10,10 +10,12 @@ import {
 const VIEW_TYPE = "csvViewer.table";
 const STATE_PREFIX = "csvViewer.state:";
 const LARGE_FILE_BYTES = 50 * 1024 * 1024;
-/** Debounce for re-sending the document text on `onDidChangeTextDocument`,
- * so typing in a side-by-side text editor doesn't re-send a large file on
- * every keystroke. */
-const CHANGE_DEBOUNCE_MS = 300;
+/** Hard ceiling: above this we refuse to load at all (see docs/spec.md). */
+const HARD_LIMIT_BYTES = 512 * 1024 * 1024;
+/** Debounce for re-reading and re-sending the file after it changes on
+ * disk, so a burst of rapid writes (or a save that touches the file
+ * multiple times) coalesces into one reload instead of one per write. */
+const RELOAD_DEBOUNCE_MS = 300;
 
 // ---- BEGIN TEST HOOK (CSV_VIEWER_TEST_HOOKS) ------------------------------
 // Test-only instrumentation for src/test/integration. Completely inert
@@ -39,6 +41,10 @@ export interface CsvViewerTestApi {
   getNotifications(): { level: "warning" | "error"; message: string }[];
   /** Number of currently-live CSV Viewer panels (for disposal/leak checks). */
   panelCount(): number;
+  /** Every `csvViewer.state:*` key currently in workspaceState, for
+   * verifying the rename-migration behavior (see onDidRenameFiles below)
+   * directly rather than only inferring it from webview messages. */
+  getWorkspaceStateKeys(): string[];
 }
 // ---- END TEST HOOK setup ---------------------------------------------------
 
@@ -73,6 +79,21 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
     }),
   );
 
+  // Renaming a file (or a folder containing one) moves it to a new URI, but
+  // per-file view state (column visibility, filters, sort, ...) is keyed by
+  // the URI string in workspaceState. Without this, that state is silently
+  // orphaned forever under the old key. Fires for both a single-file rename
+  // and a folder rename (VS Code reports one {oldUri,newUri} pair for the
+  // renamed folder itself, not one per descendant) — migrateWorkspaceState
+  // handles both by also moving every key nested under the old prefix.
+  context.subscriptions.push(
+    vscode.workspace.onDidRenameFiles((e) => {
+      for (const { oldUri, newUri } of e.files) {
+        migrateWorkspaceState(context, oldUri, newUri);
+      }
+    }),
+  );
+
   if (TEST_HOOKS_ENABLED) {
     return {
       getMessages: (fileKey) => (testHookMessages.get(fileKey) ?? []).slice(),
@@ -84,6 +105,7 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
       },
       getNotifications: () => testHookNotifications.slice(),
       panelCount: () => testHookPanels.size,
+      getWorkspaceStateKeys: () => context.workspaceState.keys().filter((k) => k.startsWith(STATE_PREFIX)),
     };
   }
   return undefined;
@@ -91,10 +113,41 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
 
 export function deactivate(): void {
   // No teardown needed: everything is disposed via context.subscriptions
-  // and per-panel listeners registered in resolveCustomTextEditor.
+  // and per-panel listeners registered in resolveCustomEditor.
 }
 
-class CsvEditorProvider implements vscode.CustomTextEditorProvider {
+/** Moves every workspaceState entry keyed under `oldUri` (exactly, or
+ * nested under it as a folder prefix) to the equivalent key under
+ * `newUri`, deleting the old key(s). A plain file rename only ever matches
+ * the exact-key branch; a folder rename matches the nested-prefix branch
+ * for every file that lived under it. */
+function migrateWorkspaceState(context: vscode.ExtensionContext, oldUri: vscode.Uri, newUri: vscode.Uri): void {
+  const oldKey = STATE_PREFIX + oldUri.toString();
+  const oldFolderPrefix = oldKey + "/";
+  const newKey = STATE_PREFIX + newUri.toString();
+
+  for (const key of context.workspaceState.keys()) {
+    let migratedKey: string | undefined;
+    if (key === oldKey) migratedKey = newKey;
+    else if (key.startsWith(oldFolderPrefix)) migratedKey = newKey + "/" + key.slice(oldFolderPrefix.length);
+    if (migratedKey === undefined) continue;
+
+    const value = context.workspaceState.get(key);
+    void context.workspaceState.update(migratedKey, value);
+    void context.workspaceState.update(key, undefined);
+  }
+}
+
+/** Minimal CustomDocument for the readonly provider: just carries the uri.
+ * All the real per-panel state (watcher, debounce timer, message/view-state
+ * listeners) lives in resolveCustomEditor, scoped to the webviewPanel,
+ * exactly as it did when this was a CustomTextEditorProvider. */
+class CsvDocument implements vscode.CustomDocument {
+  constructor(readonly uri: vscode.Uri) {}
+  dispose(): void {}
+}
+
+class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocument> {
   /** Tracks the most recently focused CSV Viewer panel's document, so the
    * "Open as Text" command (invokable outside the webview too) knows what
    * to act on. */
@@ -102,8 +155,21 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
-  async resolveCustomTextEditor(
-    document: vscode.TextDocument,
+  openCustomDocument(
+    uri: vscode.Uri,
+    _openContext: vscode.CustomDocumentOpenContext,
+    _token: vscode.CancellationToken,
+  ): CsvDocument {
+    // No I/O here: VS Code no longer hands us a synced TextDocument (that's
+    // exactly the bug this fixes — it never sent files >= its own text-sync
+    // ceiling), so *we* read the bytes ourselves, in resolveCustomEditor,
+    // where size checks and read failures can all go through the same
+    // notification/test-hook pipeline.
+    return new CsvDocument(uri);
+  }
+
+  async resolveCustomEditor(
+    document: CsvDocument,
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
@@ -117,49 +183,98 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     };
     webview.html = this.buildHtml(webview);
 
-    const fileKey = document.uri.toString();
-    CsvEditorProvider.activeUri = document.uri;
+    const uri = document.uri;
+    const fileKey = uri.toString();
+    CsvEditorProvider.activeUri = uri;
     if (TEST_HOOKS_ENABLED) testHookPanels.set(fileKey, webviewPanel);
 
-    // `document.getText().length` (UTF-16 code units) is a cheaper stand-in
-    // for the file's byte size than `Buffer.byteLength(..., "utf8")` — good
-    // enough for a "this might be slow" warning.
-    if (document.getText().length > LARGE_FILE_BYTES) {
-      const msg = `CSV Viewer: "${basename(document.uri)}" is larger than 50 MB. Loading it may be slow.`;
-      if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
-      void vscode.window.showWarningMessage(msg);
-    }
+    // Reads the file fresh from disk via workspace.fs (works for files of
+    // any size VS Code will let us stat/read, and outside the workspace,
+    // and in untrusted/virtual workspaces — see docs/spec.md), decodes it,
+    // and posts the same `load` message shape the webview has always
+    // expected. Parsing still happens in the webview (unchanged).
+    const postLoad = async (): Promise<void> => {
+      let stat: vscode.FileStat;
+      try {
+        stat = await vscode.workspace.fs.stat(uri);
+      } catch {
+        // Transient (e.g. mid-write, or raced with a delete): the
+        // FileSystemWatcher will either fire onDidChange again or
+        // onDidDelete, which is handled separately below.
+        return;
+      }
 
-    // Parsing now happens in the webview (see docs/spec.md): the host just
-    // ships the whole document text once per load/reload, plus enough
-    // context (defaultDelimiter, defaultTableColumns) for the webview to
-    // parse and reconcile column visibility itself.
-    const postLoad = (): void => {
+      if (stat.size > HARD_LIMIT_BYTES) {
+        const msg = `CSV Viewer: "${basename(uri)}" is larger than 512 MB and was not loaded.`;
+        if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "error", message: msg });
+        void vscode.window.showErrorMessage(msg);
+        return;
+      }
+      if (stat.size > LARGE_FILE_BYTES) {
+        const msg = `CSV Viewer: "${basename(uri)}" is larger than 50 MB. Loading it may be slow.`;
+        if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
+        void vscode.window.showWarningMessage(msg);
+      }
+
+      let bytes: Uint8Array;
+      try {
+        bytes = await vscode.workspace.fs.readFile(uri);
+      } catch {
+        return;
+      }
+      // BOM handling stays in parseCsv (src/core/csvParse.ts) — the decoder
+      // here just turns bytes into a string.
+      const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+
       const state = this.loadOrCreateState(fileKey);
       const message: HostToWebviewMessage = {
         type: "load",
         fileKey,
-        text: document.getText(),
+        text,
         state,
         defaultTableColumns: this.defaultTableColumns(),
-        defaultDelimiter: this.delimiterFor(document.uri) ?? "",
+        defaultDelimiter: this.delimiterFor(uri) ?? "",
         testHooks: TEST_HOOKS_ENABLED,
       };
       void webview.postMessage(message);
     };
 
-    let changeDebounceHandle: ReturnType<typeof setTimeout> | undefined;
-    const changeSub = vscode.workspace.onDidChangeTextDocument((e) => {
-      if (e.document.uri.toString() !== document.uri.toString()) return;
-      if (changeDebounceHandle) clearTimeout(changeDebounceHandle);
-      changeDebounceHandle = setTimeout(() => {
-        changeDebounceHandle = undefined;
-        postLoad();
-      }, CHANGE_DEBOUNCE_MS);
+    // Live reload: watch exactly this file on disk (not the whole
+    // workspace) — a non-recursive single-filename RelativePattern works
+    // even for a file outside any open workspace folder. Deliberately NOT
+    // wired to any "unsaved edit" signal: since resolveCustomEditor no
+    // longer gets a synced TextDocument, an edit in a text editor that
+    // hasn't been saved yet has no effect on the file on disk and so isn't
+    // reflected here — see docs/spec.md / README ("Unsaved edits").
+    const dirUri = vscode.Uri.joinPath(uri, "..");
+    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(dirUri, basename(uri)));
+
+    let reloadDebounceHandle: ReturnType<typeof setTimeout> | undefined;
+    const scheduleReload = (): void => {
+      if (reloadDebounceHandle) clearTimeout(reloadDebounceHandle);
+      reloadDebounceHandle = setTimeout(() => {
+        reloadDebounceHandle = undefined;
+        void postLoad();
+      }, RELOAD_DEBOUNCE_MS);
+    };
+
+    const changeSub = watcher.onDidChange(scheduleReload);
+    const createSub = watcher.onDidCreate(scheduleReload);
+    const deleteSub = watcher.onDidDelete(() => {
+      // Don't try to reload — there's nothing to read. Keep whatever was
+      // last rendered in the webview (it already holds the parsed data in
+      // memory) and just tell the user, non-modally.
+      if (reloadDebounceHandle) {
+        clearTimeout(reloadDebounceHandle);
+        reloadDebounceHandle = undefined;
+      }
+      const msg = "CSV Viewer: File was deleted — showing last loaded contents.";
+      if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
+      void vscode.window.showWarningMessage(msg);
     });
 
     const viewStateSub = webviewPanel.onDidChangeViewState((e) => {
-      if (e.webviewPanel.active) CsvEditorProvider.activeUri = document.uri;
+      if (e.webviewPanel.active) CsvEditorProvider.activeUri = uri;
     });
 
     const messageSub = webview.onDidReceiveMessage((message: WebviewToHostMessage) => {
@@ -170,23 +285,23 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       }
       switch (message.type) {
         case "ready":
-          postLoad();
+          void postLoad();
           break;
         case "saveState":
-          // Separator changes and the "first row is header" toggle now
-          // re-parse locally in the webview from the text it already
-          // holds, so saving state here never needs to trigger a re-send.
           this.saveState(fileKey, message.state);
           break;
         case "openAsText":
-          void vscode.commands.executeCommand("vscode.openWith", document.uri, "default");
+          void vscode.commands.executeCommand("vscode.openWith", uri, "default");
           break;
       }
     });
 
     webviewPanel.onDidDispose(() => {
-      if (changeDebounceHandle) clearTimeout(changeDebounceHandle);
+      if (reloadDebounceHandle) clearTimeout(reloadDebounceHandle);
       changeSub.dispose();
+      createSub.dispose();
+      deleteSub.dispose();
+      watcher.dispose();
       viewStateSub.dispose();
       messageSub.dispose();
       if (TEST_HOOKS_ENABLED) testHookPanels.delete(fileKey);

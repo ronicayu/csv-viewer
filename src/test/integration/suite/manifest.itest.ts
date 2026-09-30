@@ -12,56 +12,81 @@ function readManifest(): Record<string, any> {
   return JSON.parse(fs.readFileSync(p, "utf8"));
 }
 
+/** Converts one of this manifest's simple `filenamePattern` globs (a `*`
+ * wildcard plus optional `[xX]` case-insensitivity character classes — no
+ * other glob syntax is used here) into a RegExp, so the selector can be
+ * exercised directly against sample filenames instead of just eyeballing
+ * the pattern string. */
+function globToRegExp(glob: string): RegExp {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      out += ".*";
+    } else if (c === "[") {
+      const end = glob.indexOf("]", i);
+      out += glob.slice(i, end + 1);
+      i = end;
+    } else if (/[.+^${}()|\\]/.test(c)) {
+      out += "\\" + c;
+    } else {
+      out += c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/** Extracts the `/pattern/flags` regex literal out of a `when` clause of
+ * the form `resourceExtname =~ /.../i` and compiles it, so the clause's
+ * actual matching behavior can be exercised, not just its source text. */
+function regexFromWhenClause(when: string): RegExp {
+  const match = /=~\s*\/(.*)\/([a-z]*)\s*$/.exec(when);
+  assert.ok(match, `expected a "=~ /pattern/flags" when clause, got: ${when}`);
+  return new RegExp(match![1], match![2]);
+}
+
 suite("package.json manifest sanity", () => {
-  test("declares capabilities.untrustedWorkspaces and virtualWorkspaces (BUG: currently missing)", () => {
+  test("declares capabilities.untrustedWorkspaces and virtualWorkspaces (safe: all reads go through workspace.fs, no writes/process spawning/arbitrary code execution)", () => {
     const manifest = readManifest();
-    const capabilities = manifest.capabilities;
-    // BUG (low severity, correctness-of-manifest not correctness-of-code):
-    // package.json has no top-level `capabilities` block at all, so VS
-    // Code falls back to its defaults for both. As of VS Code 1.139, the
-    // *default* for an extension with no declaration is effectively
-    // "not supported" for untrusted/virtual workspaces in the Workspace
-    // Trust / Virtual Workspaces UI (it's listed as unverified rather than
-    // explicitly supported), which is misleading for a extension that is,
-    // in fact, a pure read-only viewer with no filesystem writes, no
-    // process spawning, and no arbitrary code execution — it should
-    // declare both as `true` to avoid an unnecessary trust/virtual-fs
-    // prompt or "not verified" badge on the Marketplace listing.
-    // This assertion documents the CURRENT (missing) state; flip it to
-    // `assert.deepStrictEqual(capabilities, { untrustedWorkspaces: { supported: true }, virtualWorkspaces: true })`
-    // once fixed.
-    assert.strictEqual(capabilities, undefined, "package.json now declares `capabilities` — update this test to check its exact shape");
+    assert.deepStrictEqual(manifest.capabilities, {
+      untrustedWorkspaces: { supported: true },
+      virtualWorkspaces: true,
+    });
   });
 
-  test("customEditors selector is lowercase-only (.csv/.tsv/.tab) — does not itself explain menu case sensitivity, see the `when`-clause test below", () => {
+  test("customEditors selector matches .csv/.tsv/.tab in any letter casing (FIXED: was lowercase-only)", () => {
     const manifest = readManifest();
     const selector: { filenamePattern: string }[] = manifest.contributes.customEditors[0].selector;
     const patterns = selector.map((s) => s.filenamePattern);
-    assert.deepStrictEqual(patterns, ["*.csv", "*.tsv", "*.tab"]);
+    assert.deepStrictEqual(patterns, ["*.[cC][sS][vV]", "*.[tT][sS][vV]", "*.[tT][aA][bB]"]);
+
+    const regexes = patterns.map(globToRegExp);
+    const matchesAny = (name: string) => regexes.some((r) => r.test(name));
+
+    for (const name of ["sample.csv", "sample.tsv", "sample.tab", "UPPER.CSV", "Data.Tsv", "notes.TAB", "mIxEd.CsV"]) {
+      assert.ok(matchesAny(name), `expected "${name}" to match the customEditors selector`);
+    }
+    for (const name of ["sample.txt", "sample.csvx", "sample"]) {
+      assert.ok(!matchesAny(name), `expected "${name}" NOT to match the customEditors selector`);
+    }
   });
 
-  test("BUG: menu `when` clauses compare resourceExtname with lowercase literals only, so .CSV/.TSV/.TAB won't show the menu items", () => {
+  test("FIXED: menu `when` clauses now match resourceExtname case-insensitively, so .CSV/.TSV/.TAB show the menu items too", () => {
     const manifest = readManifest();
     const explorerWhen: string = manifest.contributes.menus["explorer/context"][0].when;
     const editorTitleWhen: string = manifest.contributes.menus["editor/title"][0].when;
     const paletteWhen: string = manifest.contributes.menus.commandPalette[0].when;
 
-    // `resourceExtname` is VS Code's context key for the resource's
-    // extension, preserving the on-disk casing (it does NOT lowercase),
-    // and `when`-clause `==` is a case-sensitive string comparison. A file
-    // named `DATA.CSV` therefore has `resourceExtname == ".CSV"`, which
-    // none of these clauses match — so "Open in CSV Viewer" silently
-    // doesn't appear in the Explorer context menu, the editor title bar,
-    // or (per the identical clause) the Command Palette for an
-    // uppercase-extension file, even though `csvViewer.open` itself works
-    // fine when invoked directly (see opening.itest.ts's UPPER.CSV case).
     for (const when of [explorerWhen, editorTitleWhen, paletteWhen]) {
-      assert.match(when, /resourceExtname == \.csv/, "expected the known lowercase-only clause");
-      assert.doesNotMatch(when, /\.CSV|\.TSV|\.TAB/, "an uppercase variant would mean this was already handled");
+      assert.strictEqual(when, "resourceExtname =~ /^\\.(csv|tsv|tab)$/i");
+      const re = regexFromWhenClause(when);
+      for (const ext of [".csv", ".CSV", ".Csv", ".tsv", ".TSV", ".tab", ".TAB", ".Tab"]) {
+        assert.ok(re.test(ext), `expected when-clause regex to match "${ext}"`);
+      }
+      for (const ext of [".txt", ".csvx", ""]) {
+        assert.ok(!re.test(ext), `expected when-clause regex NOT to match "${ext}"`);
+      }
     }
-    // Fix suggestion (not applied — out of scope, tests only):
-    // `resourceExtname =~ /\.(csv|tsv|tab)$/i` (regex `when` clauses
-    // support an `i` flag) instead of three `==` comparisons.
   });
 
   test("engines.vscode and activationEvents match docs/spec.md's architecture", () => {

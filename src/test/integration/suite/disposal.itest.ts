@@ -39,11 +39,11 @@ suite("Disposal and leak checks", () => {
     await waitForRender(api, key);
     const notifBefore = api.getNotifications().length;
 
-    const doc = await vscode.workspace.openTextDocument(uri);
-    const edit = new vscode.WorkspaceEdit();
-    edit.insert(uri, doc.lineAt(doc.lineCount - 1).range.end, "\n2,b");
-    // This schedules the extension's 300ms debounce timer for a reload.
-    await vscode.workspace.applyEdit(edit);
+    // A real write to disk (not a WorkspaceEdit, which only touches the
+    // in-memory document model unless saved) is what the FileSystemWatcher
+    // reacts to — this schedules the extension's 300ms debounce timer for
+    // a reload.
+    await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n");
 
     // Close well before the 300ms debounce fires, exercising
     // webviewPanel.onDidDispose's `clearTimeout(changeDebounceHandle)`.

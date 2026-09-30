@@ -15,6 +15,7 @@ export interface CsvViewerTestApi {
   postToWebview(fileKey: string, message: HostToWebviewMessage): boolean;
   getNotifications(): { level: "warning" | "error"; message: string }[];
   panelCount(): number;
+  getWorkspaceStateKeys(): string[];
 }
 
 export async function getTestApi(): Promise<CsvViewerTestApi> {

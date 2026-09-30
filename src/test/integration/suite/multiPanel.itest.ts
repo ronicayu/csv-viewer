@@ -7,7 +7,7 @@ import * as fsp from "fs/promises";
 import * as path from "path";
 import * as vscode from "vscode";
 import { WORKSPACE_ROOT } from "../fixtures";
-import { closeAllEditors, fileKeyFor, getTestApi, openInViewer, renderCount, sleep, waitFor, waitForRender } from "../helpers";
+import { closeAllEditors, fileKeyFor, getTestApi, openInViewer, renderCount, sleep, waitFor, waitForRender, waitForSaveState } from "../helpers";
 
 const VIEW_TYPE = "csvViewer.table";
 
@@ -24,7 +24,13 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     await closeAllEditors();
   });
 
-  test("same file open in a text editor and the viewer side by side: editing the text editor reloads the viewer", async () => {
+  test("same file open in a text editor and the viewer side by side: an unsaved edit in the text editor does NOT reload the viewer, but saving it does", async () => {
+    // FIXED behavior (see docs/spec.md's "Unsaved edits" note): the viewer
+    // is a CustomReadonlyEditorProvider now, so it never gets a synced
+    // TextDocument from the side-by-side text editor — it only reloads
+    // from what's actually on disk, via its FileSystemWatcher. An edit
+    // that hasn't been saved yet has no effect on disk, so it's
+    // deliberately not reflected until the user saves.
     const uri = fixture("sidebyside.csv");
     const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
@@ -34,11 +40,17 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     const key = fileKeyFor(uri);
     const initial = await waitForRender(api, key);
     assert.strictEqual(initial.rowCount, 2);
+    const countAfterOpen = renderCount(api, key);
 
     const edit = new vscode.WorkspaceEdit();
     const endPos = doc.lineAt(doc.lineCount - 1).range.end;
     edit.insert(uri, endPos, "\n3,c");
     await vscode.workspace.applyEdit(edit);
+
+    await sleep(1000); // give the (deliberately absent) reload a chance to fire if it were going to
+    assert.strictEqual(renderCount(api, key), countAfterOpen, "an unsaved edit must not reload the side-by-side viewer");
+
+    await doc.save();
 
     await waitFor(
       () => {
@@ -46,7 +58,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
         const last = renders[renders.length - 1];
         return last !== undefined && last.rowCount === 3;
       },
-      { timeoutMs: 6000, message: "editing the text editor never reloaded the side-by-side viewer" },
+      { timeoutMs: 6000, message: "saving the text editor never reloaded the side-by-side viewer" },
     );
   });
 
@@ -167,7 +179,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     );
   });
 
-  test("renaming the open file: the renamed file starts fresh, orphaning the old uri's persisted state", async () => {
+  test("FIXED: renaming a file with saved per-file state migrates that state to the new uri's key, deleting the old one", async () => {
     const oldPath = path.join(WORKSPACE_ROOT, "renameme.csv");
     const newPath = path.join(WORKSPACE_ROOT, "renamed-target.csv");
     const oldUri = vscode.Uri.file(oldPath);
@@ -175,24 +187,68 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     const api = await getTestApi();
     const oldKey = fileKeyFor(oldUri);
     await waitForRender(api, oldKey);
-    await waitFor(() => api.getMessages(oldKey).some((m) => m.type === "saveState")); // persisted under oldKey
+    await waitForSaveState(api, oldKey); // persisted under oldKey by first-open reconciliation
+
+    const oldStateKey = "csvViewer.state:" + oldKey;
+    assert.ok(api.getWorkspaceStateKeys().includes(oldStateKey), "expected persisted state under the old uri's key before renaming");
 
     await closeAllEditors();
-    await vscode.workspace.fs.rename(oldUri, vscode.Uri.file(newPath));
-
     const newUri = vscode.Uri.file(newPath);
-    await openInViewer(newUri);
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(oldUri, newUri);
+    await vscode.workspace.applyEdit(edit);
+
     const newKey = fileKeyFor(newUri);
-    await waitForRender(api, newKey);
-    // FINDING (not a crash — see final report): state is keyed by
-    // `document.uri.toString()`, which changes on rename. The renamed file
-    // goes through first-open reconciliation exactly like a brand-new
-    // file, firing its own saveState — any settings saved under the old
-    // uri are orphaned in workspaceState forever (never read again, never
-    // cleaned up).
-    await waitFor(() => api.getMessages(newKey).some((m) => m.type === "saveState"), {
-      message: "expected the renamed file to go through first-open reconciliation just like a brand-new file",
+    const newStateKey = "csvViewer.state:" + newKey;
+    await waitFor(() => api.getWorkspaceStateKeys().includes(newStateKey), {
+      message: "expected the renamed file's state to appear under the new uri's key",
     });
+    assert.ok(!api.getWorkspaceStateKeys().includes(oldStateKey), "expected the old uri's key to be gone after migration");
+
+    // Decided behavior (see docs/spec.md): opening the renamed file re-uses
+    // the migrated state, so first-open reconciliation is a no-op (headers
+    // are unchanged) and does NOT fire a fresh saveState — unlike a
+    // genuinely new file (see the "closing and reopening" test above).
+    await openInViewer(newUri);
+    await waitForRender(api, newKey);
+    await sleep(1000);
+    const saveStatesForNewKey = api.getMessages(newKey).filter((m) => m.type === "saveState");
+    assert.strictEqual(
+      saveStatesForNewKey.length,
+      0,
+      `expected no fresh saveState after opening the renamed file (state was migrated, not orphaned); got ${JSON.stringify(saveStatesForNewKey)}`,
+    );
+  });
+
+  test("FIXED: renaming a folder migrates every nested file's saved state to the new folder prefix", async () => {
+    const folderName = `rename-folder-${Date.now()}`;
+    const newFolderName = `${folderName}-renamed`;
+    const oldFolderUri = vscode.Uri.file(path.join(WORKSPACE_ROOT, folderName));
+    const nestedPath = path.join(WORKSPACE_ROOT, folderName, "nested.csv");
+    await fsp.mkdir(path.dirname(nestedPath), { recursive: true });
+    await fsp.writeFile(nestedPath, "a,b\n1,2\n");
+    const nestedUri = vscode.Uri.file(nestedPath);
+
+    await openInViewer(nestedUri);
+    const api = await getTestApi();
+    const nestedKey = fileKeyFor(nestedUri);
+    await waitForRender(api, nestedKey);
+    await waitForSaveState(api, nestedKey);
+    const oldNestedStateKey = "csvViewer.state:" + nestedKey;
+    assert.ok(api.getWorkspaceStateKeys().includes(oldNestedStateKey));
+
+    await closeAllEditors();
+    const newFolderUri = vscode.Uri.file(path.join(WORKSPACE_ROOT, newFolderName));
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(oldFolderUri, newFolderUri);
+    await vscode.workspace.applyEdit(edit);
+
+    const newNestedUri = vscode.Uri.file(path.join(WORKSPACE_ROOT, newFolderName, "nested.csv"));
+    const newNestedStateKey = "csvViewer.state:" + fileKeyFor(newNestedUri);
+    await waitFor(() => api.getWorkspaceStateKeys().includes(newNestedStateKey), {
+      message: "expected the nested file's state to migrate under the renamed folder's new prefix",
+    });
+    assert.ok(!api.getWorkspaceStateKeys().includes(oldNestedStateKey), "expected the old nested key to be gone after the folder rename");
   });
 
   test("csvViewer.openAsText from the viewer switches the active editor to the default text editor", async () => {
