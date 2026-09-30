@@ -142,13 +142,19 @@ test("right-click quick-add works on an empty cell value, a value containing quo
   // case removes its own rule afterward before moving to the next row,
   // rather than stacking rules and losing access to the remaining rows.
 
-  // Empty value.
+  // Empty value: creates an "equals" rule with value: "" — since decision
+  // #10, a value-taking rule with an empty value is ignored (isRuleActive
+  // returns false) rather than applied as "equals empty string", so this
+  // one has no filtering effect at all and shows the "enter a value" hint,
+  // not a 1-row result.
   await page.locator('tr.data-row[data-row-id="0"]').locator("td").nth(2).click({ button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
   await page.locator("#context-menu button", { hasText: "include this value" }).click();
   await expect(page.locator(".rule-row")).toHaveCount(1);
   await expect(page.locator(".rule-row").last().locator('input[type="text"]')).toHaveValue("");
-  await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 3 rows");
+  await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 3 rows");
+  await expect(page.locator(".rule-row").last()).toHaveClass(/rule-hint/);
+  await expect(page.locator(".rule-row").last().locator(".rule-error-text")).toContainText("Enter a value");
   await page.locator(".rule-row").last().locator(".remove-rule-btn").click();
   await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 3 rows");
 

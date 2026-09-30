@@ -2,6 +2,8 @@
 // with AND semantics (all enabled include rules must match; any enabled
 // exclude rule that matches drops the row). Pure module, no vscode/DOM.
 
+import { foldCase } from "./caseFold";
+import { parseNumber } from "./number";
 import type { FilterRule } from "./types";
 
 /** A rule is invalid only when it's a regex rule with an unparsable pattern. */
@@ -15,11 +17,28 @@ export function isValidRule(rule: FilterRule): boolean {
   }
 }
 
-function parseNumeric(value: string): number | null {
-  const trimmed = value.trim();
-  if (trimmed === "") return null;
-  const n = Number(trimmed);
-  return Number.isFinite(n) ? n : null;
+/**
+ * Whether a rule can actually apply right now, independent of its
+ * `enabled` checkbox: its regex (if any) parses, its column (if any) still
+ * exists in `headers`, and — for every operator except `isEmpty`, which
+ * takes no value — it has a non-empty value. `applyFilters` uses this (in
+ * combination with `enabled`) to decide which rules take part; the UI uses
+ * it to decide whether to show a "column not found" / "enter a value"
+ * hint on a rule row, so the two always agree on what "active" means.
+ *
+ * A rule that fails this check is IGNORED (as if disabled), not applied as
+ * a rule that matches nothing — those are very different outcomes for an
+ * include rule: "ignored" leaves every row as-is, "matches nothing" drops
+ * every row. A stale/incomplete rule doing the latter (the pre-fix
+ * behavior) meant one leftover rule — e.g. pointing at a column removed by
+ * a header rename or separator change — could silently hide the entire
+ * file instead of just not filtering.
+ */
+export function isRuleActive(rule: FilterRule, headers: string[]): boolean {
+  if (!isValidRule(rule)) return false;
+  if (rule.column !== null && headers.indexOf(rule.column) === -1) return false;
+  if (rule.operator !== "isEmpty" && rule.value === "") return false;
+  return true;
 }
 
 function cellMatches(cell: string, rule: FilterRule, re: RegExp | null): boolean {
@@ -30,8 +49,8 @@ function cellMatches(cell: string, rule: FilterRule, re: RegExp | null): boolean
     case "equals":
     case "startsWith":
     case "endsWith": {
-      const a = rule.caseSensitive ? cell : cell.toLowerCase();
-      const b = rule.caseSensitive ? rule.value : rule.value.toLowerCase();
+      const a = rule.caseSensitive ? cell : foldCase(cell);
+      const b = rule.caseSensitive ? rule.value : foldCase(rule.value);
       switch (rule.operator) {
         case "contains":
           return a.includes(b);
@@ -50,8 +69,8 @@ function cellMatches(cell: string, rule: FilterRule, re: RegExp | null): boolean
     case "lt":
     case "gte":
     case "lte": {
-      const cellNum = parseNumeric(cell);
-      const ruleNum = parseNumeric(rule.value);
+      const cellNum = parseNumber(cell);
+      const ruleNum = parseNumber(rule.value);
       if (cellNum === null || ruleNum === null) return false;
       switch (rule.operator) {
         case "gt":
@@ -92,11 +111,13 @@ export function applyFilters(
   quickSearch: string,
   rules: FilterRule[],
 ): string[][] {
-  const activeRules = rules.filter((r) => r.enabled && isValidRule(r)).map((r) => compileRule(r, headers));
-  const search = quickSearch.trim().toLowerCase();
+  const activeRules = rules
+    .filter((r) => r.enabled && isRuleActive(r, headers))
+    .map((r) => compileRule(r, headers));
+  const search = foldCase(quickSearch.trim());
 
   return rows.filter((row) => {
-    if (search !== "" && !row.some((cell) => cell.toLowerCase().includes(search))) {
+    if (search !== "" && !row.some((cell) => foldCase(cell).includes(search))) {
       return false;
     }
     for (const c of activeRules) {

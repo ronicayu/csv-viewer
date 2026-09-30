@@ -3,9 +3,9 @@
 // owns filtering, sorting, column visibility, and pagination.
 
 import { parseCsv } from "../core/csvParse";
-import { applyFilters, isValidRule } from "../core/filter";
+import { applyFilters, isRuleActive, isValidRule } from "../core/filter";
 import { sortRows, cycleSortForColumn } from "../core/sort";
-import { detailFieldsFor, reconcileVisibility, visibleColumns } from "../core/columns";
+import { detailFieldsFor, getVisibility, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import type {
   ColumnVisibilityMap,
@@ -67,6 +67,13 @@ interface AppState {
    * "Auto (…)" option even when it was forced by defaultDelimiter rather
    * than truly auto-detected. */
   detectedDelimiter: string;
+  /** Data-row numbers where the last parse found a quote problem (see
+   * ParseResult.quoteProblems); drives the warning banner. */
+  quoteProblems: { row: number }[];
+  /** The warning banner is dismissible per-parse: reset to false on every
+   * fresh parse (load or reparseFromText) so a *new* quote problem is
+   * surfaced again even if the user dismissed an earlier one. */
+  quoteBannerDismissed: boolean;
   /** TEST HOOK: mirrors `message.testHooks` from the last `load`. See the
    * "BEGIN TEST HOOK" block below. */
   testHooksEnabled: boolean;
@@ -97,6 +104,11 @@ app.innerHTML = `
       <select id="separator-select" aria-label="Separator"></select>
     </label>
     <input id="separator-custom" type="text" maxlength="5" placeholder="e.g. ||" aria-label="Custom separator" hidden />
+    <span id="separator-custom-error" class="rule-error-text" hidden></span>
+    <label class="quotes-toggle-label">
+      <input id="quotes-checkbox" type="checkbox" checked />
+      Quoted fields
+    </label>
     <button id="open-as-text-btn" type="button">Open as Text</button>
   </div>
   <div id="columns-popover" class="popover" hidden>
@@ -112,6 +124,11 @@ app.innerHTML = `
     <button id="add-rule-btn" type="button">+ Add rule</button>
   </div>
   <div id="status-bar" class="status-bar"></div>
+  <div id="quote-warning-banner" class="quote-warning-banner" hidden>
+    <span id="quote-warning-text"></span>
+    <button id="quote-warning-fix-btn" type="button">Treat quotes as plain text</button>
+    <button id="quote-warning-dismiss-btn" type="button" aria-label="Dismiss">✕</button>
+  </div>
   <div id="table-scroll" class="table-scroll">
     <table id="table">
       <thead id="table-head"></thead>
@@ -145,6 +162,12 @@ const sortDirBtn = document.getElementById("sort-dir-btn") as HTMLButtonElement;
 const firstRowHeaderCheckbox = document.getElementById("first-row-header") as HTMLInputElement;
 const separatorSelect = document.getElementById("separator-select") as HTMLSelectElement;
 const separatorCustomInput = document.getElementById("separator-custom") as HTMLInputElement;
+const separatorCustomError = document.getElementById("separator-custom-error") as HTMLSpanElement;
+const quotesCheckbox = document.getElementById("quotes-checkbox") as HTMLInputElement;
+const quoteWarningBanner = document.getElementById("quote-warning-banner") as HTMLDivElement;
+const quoteWarningText = document.getElementById("quote-warning-text") as HTMLSpanElement;
+const quoteWarningFixBtn = document.getElementById("quote-warning-fix-btn") as HTMLButtonElement;
+const quoteWarningDismissBtn = document.getElementById("quote-warning-dismiss-btn") as HTMLButtonElement;
 const openAsTextBtn = document.getElementById("open-as-text-btn") as HTMLButtonElement;
 const columnsPopover = document.getElementById("columns-popover") as HTMLDivElement;
 const columnsSearch = document.getElementById("columns-search") as HTMLInputElement;
@@ -197,7 +220,7 @@ function sameColumnVisibility(a: ColumnVisibilityMap, b: ColumnVisibilityMap): b
   const aKeys = Object.keys(a);
   const bKeys = Object.keys(b);
   if (aKeys.length !== bKeys.length) return false;
-  return aKeys.every((k) => a[k] === b[k]);
+  return aKeys.every((k) => getVisibility(a, k) === getVisibility(b, k));
 }
 
 /** Yield one frame so a "Loading…" placeholder actually paints before a
@@ -216,6 +239,7 @@ async function onLoad(message: HostToWebviewMessage): Promise<void> {
   // instead of silently misbehaving.
   view.pageSize = normalizePageSize(view.pageSize);
   view.delimiter = typeof view.delimiter === "string" ? view.delimiter : "";
+  view.quotes = typeof view.quotes === "boolean" ? view.quotes : true;
 
   // A `load` for the same file the webview is already showing is a live
   // reload (the document changed on disk) — keep the current page instead
@@ -227,7 +251,11 @@ async function onLoad(message: HostToWebviewMessage): Promise<void> {
   await yieldFrame();
 
   const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
-  const parsed = parseCsv(message.text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader });
+  const parsed = parseCsv(message.text, {
+    delimiter: delimiterOption,
+    firstRowIsHeader: view.firstRowIsHeader,
+    quotes: view.quotes,
+  });
 
   const previousVisibility = view.columnVisibility;
   const reconciled = reconcileVisibility(parsed.headers, previousVisibility, message.defaultTableColumns);
@@ -246,13 +274,17 @@ async function onLoad(message: HostToWebviewMessage): Promise<void> {
     filtered: [],
     page: previousPage,
     detectedDelimiter: parsed.delimiter,
+    quoteProblems: parsed.quoteProblems,
+    quoteBannerDismissed: false,
     testHooksEnabled: message.testHooks === true,
   };
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
+  quotesCheckbox.checked = state.view.quotes;
   quickSearchInput.value = state.view.quickSearch;
   renderColumnsPopover();
   renderFilterPanel();
   renderSeparatorControl();
+  renderQuoteWarningBanner();
   recomputeAndRender();
 
   // Only write state back if reconciliation actually changed the stored
@@ -270,20 +302,28 @@ async function onLoad(message: HostToWebviewMessage): Promise<void> {
 function reparseFromText(options: { resetPage: boolean }): void {
   if (!state) return;
   const delimiterOption = resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter);
-  const parsed = parseCsv(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader });
+  const parsed = parseCsv(state.text, {
+    delimiter: delimiterOption,
+    firstRowIsHeader: state.view.firstRowIsHeader,
+    quotes: state.view.quotes,
+  });
 
   state.headers = parsed.headers;
   state.rows = parsed.rows.map((cells, id) => ({ id, cells }));
   state.detectedDelimiter = parsed.delimiter;
+  state.quoteProblems = parsed.quoteProblems;
+  state.quoteBannerDismissed = false;
   state.view.columnVisibility = reconcileVisibility(parsed.headers, state.view.columnVisibility, state.defaultTableColumns);
   // Row identity is re-tokenized from scratch, so previously expanded rows
   // (tracked by id) no longer correspond to the same content — reset, same
   // as a live reload does.
   state.expanded = new Set<number>();
 
+  quotesCheckbox.checked = state.view.quotes;
   renderColumnsPopover();
   renderFilterPanel();
   renderSeparatorControl();
+  renderQuoteWarningBanner();
   recomputeAndRender({ resetPage: options.resetPage });
 }
 
@@ -621,7 +661,20 @@ function renderSeparatorControl(): void {
   const isPreset = current === "" || PRESET_DELIMITERS.some((p) => p.value === current);
   separatorSelect.value = isPreset ? current : CUSTOM_SENTINEL;
   separatorCustomInput.hidden = isPreset;
+  // Not trimmed: a stored delimiter of exactly " " (a single space) or "\t"
+  // must round-trip back into the input as typed, not as "".
   if (!isPreset) separatorCustomInput.value = current;
+  hideSeparatorCustomError();
+}
+
+function hideSeparatorCustomError(): void {
+  separatorCustomError.hidden = true;
+  separatorCustomError.textContent = "";
+}
+
+function showSeparatorCustomError(message: string): void {
+  separatorCustomError.textContent = message;
+  separatorCustomError.hidden = false;
 }
 
 function applySeparatorChange(delimiter: string): void {
@@ -639,6 +692,7 @@ separatorSelect.addEventListener("change", () => {
     // custom delimiter — picking "Custom…" alone changes nothing yet.
     separatorCustomInput.hidden = false;
     separatorCustomInput.value = "";
+    hideSeparatorCustomError();
     separatorCustomInput.focus();
     return;
   }
@@ -649,9 +703,64 @@ let separatorDebounceHandle: number | undefined;
 separatorCustomInput.addEventListener("input", () => {
   window.clearTimeout(separatorDebounceHandle);
   separatorDebounceHandle = window.setTimeout(() => {
-    // An empty custom value falls back to Auto.
-    applySeparatorChange(separatorCustomInput.value.trim());
+    if (!state) return;
+    // Deliberately NOT trimmed: a single space or a tab is a valid
+    // 1-character delimiter someone might actually type here. An empty
+    // input (truly empty, not whitespace) still falls back to Auto.
+    const value = separatorCustomInput.value;
+    if (value === "") {
+      hideSeparatorCustomError();
+      applySeparatorChange("");
+      return;
+    }
+    // `"` is Papa's quoteChar whenever quoting is on, so requesting it as
+    // the delimiter too would conflict — reject it with an inline error
+    // instead of silently falling back to auto-detected comma. With
+    // quoting off (state.view.quotes === false), there's no conflict, so
+    // `"` is allowed as an ordinary delimiter.
+    if (state.view.quotes && value.includes('"')) {
+      showSeparatorCustomError('"“”" is the quote character — turn off Quoted fields to use it');
+      return;
+    }
+    hideSeparatorCustomError();
+    applySeparatorChange(value);
   }, SEPARATOR_DEBOUNCE_MS);
+});
+
+// ---- Quoted fields --------------------------------------------------------
+
+/** Show/hide the malformed-quotes warning banner above the table. Hidden
+ * whenever quoting is off (nothing to warn about — every `"` is already
+ * literal), there are no quote problems, or the user dismissed it for this
+ * parse. */
+function renderQuoteWarningBanner(): void {
+  if (!state) return;
+  const shouldShow = state.view.quotes && state.quoteProblems.length > 0 && !state.quoteBannerDismissed;
+  quoteWarningBanner.hidden = !shouldShow;
+  if (!shouldShow) return;
+  const firstRow = state.quoteProblems[0].row;
+  quoteWarningText.textContent = `Quotes look malformed near row ${firstRow} — rows after it may be merged.`;
+}
+
+quotesCheckbox.addEventListener("change", () => {
+  if (!state) return;
+  state.view.quotes = quotesCheckbox.checked;
+  reparseFromText({ resetPage: true });
+  saveState();
+});
+
+quoteWarningFixBtn.addEventListener("click", () => {
+  if (!state) return;
+  state.view.quotes = false;
+  quotesCheckbox.checked = false;
+  reparseFromText({ resetPage: true });
+  saveState();
+});
+
+quoteWarningDismissBtn.addEventListener("click", () => {
+  if (!state) return;
+  state.quoteBannerDismissed = true;
+  renderQuoteWarningBanner();
 });
 
 // ---- Open as text ----------------------------------------------------------
@@ -736,10 +845,10 @@ function renderColumnsPopover(): void {
     label.className = "column-row";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = state.view.columnVisibility[header] !== false;
+    checkbox.checked = getVisibility(state.view.columnVisibility, header) !== false;
     checkbox.addEventListener("change", () => {
       if (!state) return;
-      state.view.columnVisibility[header] = checkbox.checked;
+      setVisibility(state.view.columnVisibility, header, checkbox.checked);
       recomputeAndRender(); // column visibility keeps the current page
       saveState();
     });
@@ -755,7 +864,7 @@ columnsSearch.addEventListener("input", renderColumnsPopover);
 
 columnsShowAll.addEventListener("click", () => {
   if (!state) return;
-  for (const header of state.headers) state.view.columnVisibility[header] = true;
+  for (const header of state.headers) setVisibility(state.view.columnVisibility, header, true);
   renderColumnsPopover();
   recomputeAndRender();
   saveState();
@@ -763,7 +872,7 @@ columnsShowAll.addEventListener("click", () => {
 
 columnsHideAll.addEventListener("click", () => {
   if (!state) return;
-  for (const header of state.headers) state.view.columnVisibility[header] = false;
+  for (const header of state.headers) setVisibility(state.view.columnVisibility, header, false);
   renderColumnsPopover();
   recomputeAndRender();
   saveState();
@@ -841,6 +950,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   columnSelect.value = rule.column ?? "";
   columnSelect.addEventListener("change", () => {
     rule.column = columnSelect.value === "" ? null : columnSelect.value;
+    syncRuleError();
     recomputeAndRender({ resetPage: true });
     saveState();
   });
@@ -919,13 +1029,30 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
 
   const error = document.createElement("span");
   error.className = "rule-error-text";
-  error.textContent = "Invalid regex — rule ignored";
   row.appendChild(error);
 
+  // isRuleActive (src/core/filter.ts) is the single source of truth for
+  // "will this rule do anything", shared with applyFilters, so the hint
+  // shown here always agrees with what's actually being filtered. Checked
+  // in priority order: an invalid regex and a missing column are both
+  // real errors (same strong styling); a missing value is a softer,
+  // "you're not done yet" hint.
   function syncRuleError(): void {
-    const invalid = !isValidRule(rule);
-    row.classList.toggle("rule-error", invalid);
-    error.hidden = !invalid;
+    if (!state) return;
+    const regexInvalid = !isValidRule(rule);
+    const columnMissing = !regexInvalid && rule.column !== null && state.headers.indexOf(rule.column) === -1;
+    const needsValue = !regexInvalid && !columnMissing && rule.operator !== "isEmpty" && rule.value === "";
+    // isRuleActive is the single source of truth applyFilters itself uses
+    // for "does this rule do anything"; gating on it here (rather than
+    // just the three checks above) keeps the UI from silently drifting out
+    // of sync with applyFilters if either is ever changed alone.
+    const inactive = !isRuleActive(rule, state.headers);
+    row.classList.toggle("rule-error", inactive && (regexInvalid || columnMissing));
+    row.classList.toggle("rule-hint", inactive && needsValue);
+    if (regexInvalid) error.textContent = "Invalid regex — rule ignored";
+    else if (columnMissing) error.textContent = "Column not found — rule ignored";
+    else if (needsValue) error.textContent = "Enter a value — rule ignored";
+    error.hidden = !inactive;
   }
   syncRuleError();
 

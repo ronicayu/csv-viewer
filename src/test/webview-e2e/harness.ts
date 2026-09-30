@@ -68,6 +68,7 @@ export function defaultViewState(overrides: Partial<ViewState> = {}): ViewState 
     firstRowIsHeader: true,
     pageSize: 100,
     delimiter: "",
+    quotes: true,
     ...overrides,
   };
 }

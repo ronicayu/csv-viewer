@@ -157,9 +157,39 @@ th:focus {
   outline: 1px solid var(--vscode-errorForeground);
 }
 
+.rule-row.rule-hint {
+  outline: 1px dashed var(--vscode-descriptionForeground);
+}
+
 .rule-error-text {
   color: var(--vscode-errorForeground);
   font-size: 0.9em;
+}
+
+.rule-row.rule-hint .rule-error-text {
+  color: var(--vscode-descriptionForeground);
+}
+
+.quotes-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.quote-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  background: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWarning-background));
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-border));
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-editor-foreground));
+  font-size: 0.9em;
+}
+
+.quote-warning-banner span#quote-warning-text {
+  flex: 1;
 }
 
 .inline-checkbox-label {

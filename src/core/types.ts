@@ -6,6 +6,15 @@ export interface ParseResult {
   headers: string[];
   rows: string[][];
   delimiter: string;
+  /**
+   * Data-row numbers (1-based, as the user sees them in the table) where
+   * Papa reported a quote-related parse error (InvalidQuotes/MissingQuotes
+   * etc.) — or, for a malformed pattern Papa's own error reporting misses,
+   * a cheap fallback heuristic (see src/core/csvParse.ts). Capped at the
+   * first ~20. Empty when `quotes` parsing was off (see ParseOptions) or
+   * when nothing looked malformed.
+   */
+  quoteProblems: { row: number }[];
 }
 
 export type FilterOperator =
@@ -60,6 +69,14 @@ export interface ViewState {
    * (normalized in the webview on load).
    */
   delimiter: string;
+  /**
+   * Whether `"` opens a quoted field. Default (and normalized fallback for
+   * stored state saved before this field existed) is `true`. When `false`,
+   * every `"` in the file is literal text — a workaround for a file whose
+   * quoting is malformed enough that Papa Parse merges rows together (see
+   * ParseResult.quoteProblems and the "Quoted fields" toolbar checkbox).
+   */
+  quotes: boolean;
 }
 
 export function createDefaultViewState(): ViewState {
@@ -71,6 +88,7 @@ export function createDefaultViewState(): ViewState {
     firstRowIsHeader: true,
     pageSize: 100,
     delimiter: "",
+    quotes: true,
   };
 }
 

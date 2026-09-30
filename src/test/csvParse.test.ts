@@ -66,9 +66,16 @@ describe("quoted fields", () => {
     expect(result.rows).toEqual([["line1\nline2", "x"]]);
   });
 
-  it("preserves embedded CRLF inside a quoted field", () => {
+  it("normalizes an embedded CRLF inside a quoted field to LF", () => {
+    // Updated expectation: csvParse.ts now normalizes every line-ending
+    // style to LF *before* Papa ever sees the text, so a file mixing CRLF/
+    // LF/CR line endings parses one row per physical line instead of
+    // merging rows (see the "line endings" describe block in
+    // src/test/stress/parser.stress.test.ts for the bug this fixes). That
+    // normalization necessarily also applies inside quoted fields — a
+    // deliberate, documented tradeoff, not a regression.
     const result = parseCsv('a,b\n"line1\r\nline2",x');
-    expect(result.rows).toEqual([["line1\r\nline2", "x"]]);
+    expect(result.rows).toEqual([["line1\nline2", "x"]]);
   });
 
   it("preserves a quoted field containing a newline followed by a comma", () => {

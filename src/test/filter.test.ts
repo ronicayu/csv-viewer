@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyFilters, isValidRule } from "../core/filter";
+import { applyFilters, isRuleActive, isValidRule } from "../core/filter";
 import type { FilterRule } from "../core/types";
 
 const headers = ["name", "age", "city"];
@@ -159,5 +159,43 @@ describe("AND semantics across multiple rules", () => {
       ["bob", "25", ""],
       ["", "40", "SF"],
     ]);
+  });
+});
+
+describe("isRuleActive: the single source of truth applyFilters and the UI both use for 'will this rule do anything'", () => {
+  it("is false for an invalid regex", () => {
+    expect(isRuleActive(rule({ operator: "regex", value: "(unterminated" }), headers)).toBe(false);
+  });
+
+  it("is false when the rule's column no longer exists in headers", () => {
+    expect(isRuleActive(rule({ column: "ghost", operator: "equals", value: "x" }), headers)).toBe(false);
+  });
+
+  it("is true for an any-column rule (column: null), regardless of headers", () => {
+    expect(isRuleActive(rule({ column: null, operator: "equals", value: "x" }), headers)).toBe(true);
+  });
+
+  it("is false for a value-taking operator with an empty value", () => {
+    expect(isRuleActive(rule({ operator: "contains", value: "" }), headers)).toBe(false);
+    expect(isRuleActive(rule({ operator: "gt", value: "" }), headers)).toBe(false);
+  });
+
+  it("is true for isEmpty even with an empty value, since isEmpty takes no value", () => {
+    expect(isRuleActive(rule({ operator: "isEmpty", value: "" }), headers)).toBe(true);
+  });
+
+  it("is true for an otherwise-well-formed rule", () => {
+    expect(isRuleActive(rule({ column: "age", operator: "gt", value: "10" }), headers)).toBe(true);
+  });
+
+  it("agrees with applyFilters: a rule isRuleActive says is inactive has zero effect either way (include leaves rows as-is, exclude drops nothing)", () => {
+    const inactiveRules: FilterRule[] = [
+      rule({ column: "ghost", operator: "equals", value: "x", mode: "include" }),
+      rule({ operator: "contains", value: "", mode: "exclude" }),
+    ];
+    for (const r of inactiveRules) {
+      expect(isRuleActive(r, headers)).toBe(false);
+      expect(applyFilters(headers, rows, "", [r])).toEqual(rows);
+    }
   });
 });

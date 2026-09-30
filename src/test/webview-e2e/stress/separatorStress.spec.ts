@@ -41,10 +41,13 @@ test("cycling through Auto/Comma/Semicolon/Tab/Pipe on a 20k-row comma file re-p
   expect(consoleErrors).toEqual([]);
 });
 
-test("BUG: a Custom separator of a single space can never actually be applied — the input is trimmed before use, so it silently falls back to Auto", async ({
+test("a Custom separator of a single space can now actually be applied — the input is no longer trimmed before use", async ({
   page,
 }) => {
-  test.fail(); // see comment below for expected behavior
+  // FIXED: the custom-input 'input' handler (src/webview/main.ts) no
+  // longer trims the typed value before applying it — only a truly empty
+  // input (never a whitespace-only one) falls back to Auto. A single
+  // space is a perfectly valid 1-character delimiter.
   const text = "a b c\n1 2 3\n4 5 6";
   await bootAndLoadText(page, {
     fileKey: "file:///space-sep.csv",
@@ -56,54 +59,66 @@ test("BUG: a Custom separator of a single space can never actually be applied �
   await page.locator("#separator-select").selectOption("custom");
   await page.locator("#separator-custom").fill(" ");
 
-  // Expected: a single space is a perfectly valid 1-character delimiter
-  // (the input's maxlength is 5, and nothing in the spec singles out
-  // whitespace as disallowed) — it should split "a b c" into 3 columns.
-  // Actual: the custom-input 'input' handler (src/webview/main.ts) calls
-  // `applySeparatorChange(separatorCustomInput.value.trim())`, so a
-  // value of exactly " " becomes "" after trim and falls back to Auto —
-  // which then guesses among [",",";","\t","|"], none present, and Papa
-  // collapses the whole line into 1 column. There is no way to type a
-  // pure-whitespace custom separator at all.
-  await expect(page.locator("th.sortable")).toHaveCount(3); // fails: 1
+  await expect(page.locator("th.sortable")).toHaveCount(3);
   await expect(page.locator("tr.data-row").first()).toContainText("2");
 });
 
-test("BUG: a Custom separator of a double-quote silently falls back to auto-detected comma instead of the requested delimiter, so the Separator dropdown lies about what actually produced the table", async ({
+test('a Custom separator of a double-quote is rejected with an inline error when Quoted fields is on, and honored once Quoted fields is turned off', async ({
   page,
 }) => {
-  test.fail(); // see comment below for expected behavior
+  // FIXED (decision): `"` conflicts with Papa's quoteChar while quoting is
+  // on, so the webview now rejects it up front with an inline error
+  // instead of silently falling back to auto-detected comma — the
+  // Separator control never claims a delimiter that isn't actually
+  // active. With "Quoted fields" off, `"` is an ordinary, valid
+  // delimiter (see src/core/csvParse.ts's QUOTE_DELIMITER_PLACEHOLDER
+  // workaround for Papa's hardcoded refusal to use `"` as a delimiter).
   const consoleErrors = trackConsoleErrors(page);
-  const text = "a,b\n1,2\n3,4"; // no literal '"' anywhere in the data
+  const text = 'a"b\n1"2'; // literal '"' separates real fields here
   await bootAndLoadText(page, {
     fileKey: "file:///quote-sep.csv",
     text,
     state: defaultViewState(),
     defaultTableColumns: 2,
   });
+  // Auto-detected as one column while quoting is on (no comma/semicolon/
+  // tab/pipe present, and the `"` in the text isn't a real quote-open
+  // since it's not the first character of either field).
+  await expect(page.locator("th.sortable")).toHaveCount(1);
 
   await page.locator("#separator-select").selectOption("custom");
   await page.locator("#separator-custom").fill('"');
 
-  // Expected: forcing '"' as the delimiter — since it never occurs in the
-  // text — should behave like any other absent delimiter and collapse
-  // every row to 1 column (same as the ';'/Tab/'|' cases above), while
-  // the Separator dropdown keeps showing the user's actual "Custom…" `"`
-  // choice.
-  // Actual: Papa Parse, given `delimiter: '"'` together with the fixed
-  // `quoteChar: '"'` (src/core/csvParse.ts), silently ignores the forced
-  // delimiter and falls through to its own guessing among
-  // `delimitersToGuess`, landing on comma — so the table renders 2
-  // columns (a, b) even though the UI says a custom `"` separator is
-  // active. No crash, but the displayed data doesn't match the stated
-  // parse configuration.
-  await expect(page.locator("th.sortable")).toHaveCount(1); // fails: 2 (a, b via guessed comma)
+  // Rejected: an inline error appears, and the table is unchanged (still
+  // 1 column) — the rejected value was never applied (state.view.delimiter
+  // stays "", i.e. Auto).
+  await expect(page.locator("#separator-custom-error")).toBeVisible();
+  await expect(page.locator("#separator-custom-error")).toContainText("quote character");
+  await expect(page.locator("th.sortable")).toHaveCount(1);
+
+  // Turn off "Quoted fields", then try the same custom value again — the
+  // rejected attempt above never got as far as being stored, so the
+  // control reset back to Auto/hidden; picking "Custom…" and typing `"`
+  // fresh is now accepted since there's no quoteChar conflict anymore.
+  await page.locator("#quotes-checkbox").uncheck();
+  await page.locator("#separator-select").selectOption("custom");
+  await page.locator("#separator-custom").fill('"');
+
+  await expect(page.locator("#separator-custom-error")).toBeHidden();
+  await expect(page.locator("th.sortable")).toHaveCount(2);
+  await expect(page.locator("tr.data-row").first()).toContainText("2");
   expect(consoleErrors).toEqual([]);
 });
 
-test("switching the separator so a filter rule's column disappears makes that include-rule match zero rows (documented as inert-if-stale, but 'inert' means the whole file, not a no-op)", async ({
+test("switching the separator so a filter rule's column disappears leaves that rule ignored (inert), not filtering out the whole file", async ({
   page,
 }) => {
+  // Changed behavior (bug fix, decision #10, not a regression): a rule
+  // whose column no longer exists is now ignored via isRuleActive
+  // (src/core/filter.ts), not applied as "matches nothing" — which, for
+  // an include rule, used to drop every row in the file. This test's
+  // original title/expectation ("inert' means the whole file") described
+  // exactly the behavior that decision reverses.
   const text = "id,age,city\n1,30,NYC\n2,20,LA\n3,40,SF";
   await bootAndLoadText(page, {
     fileKey: "file:///filter-then-sep.csv",
@@ -121,7 +136,10 @@ test("switching the separator so a filter rule's column disappears makes that in
   // three original columns collapse into one and "age" no longer exists.
   await page.locator("#separator-select").selectOption("|");
   await expect(page.locator("th.sortable")).toHaveCount(1);
-  // The stale include-rule on "age" can never match (columnIndex === -1),
-  // so *every* row is dropped, not just left unfiltered.
-  await expect(page.locator("#status-bar")).toHaveText("Showing 0 of 3 rows");
+  // The stale include-rule on "age" is now ignored, so all rows remain.
+  await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 3 rows");
+  // The filter panel shows a "column not found" hint on that rule.
+  await page.locator("#filters-btn").click();
+  await expect(page.locator(".rule-row.rule-error")).toHaveCount(1);
+  await expect(page.locator(".rule-row.rule-error .rule-error-text")).toContainText("Column not found");
 });

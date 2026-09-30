@@ -4,9 +4,9 @@
 // because the code reads it back via Object.prototype.hasOwnProperty.call
 // (defends against a header literally named "hasOwnProperty") — but one
 // name breaks the whole scheme via a different mechanism.
-import { describe, expect, it, test } from "vitest";
+import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { defaultVisibility, detailFieldsFor, detailOnlyColumns, reconcileVisibility, visibleColumns } from "../../core/columns";
+import { defaultVisibility, detailFieldsFor, detailOnlyColumns, getVisibility, reconcileVisibility, visibleColumns } from "../../core/columns";
 
 describe("header named 'constructor' — safe", () => {
   it("gets a real own property and round-trips through reconcileVisibility normally", () => {
@@ -32,41 +32,56 @@ describe("header named 'hasOwnProperty' — safe (code explicitly guards this)",
   });
 });
 
-describe("header named '__proto__' — BUG", () => {
-  test.fails(
-    "BUG: assigning map['__proto__'] = <boolean> on a plain object literal invokes Object.prototype's __proto__ ACCESSOR (a setter), not a normal property write. Since the assigned value (true/false) is neither an object nor null, the setter is a silent no-op per the ECMAScript spec — no own property named '__proto__' is ever created. So a column literally named '__proto__' never gets a real visibility entry: defaultVisibility() silently drops it. Expected: every header in `headers` should get an own entry in the returned map, checkable via Object.prototype.hasOwnProperty.call. Location: src/core/columns.ts defaultVisibility() and reconcileVisibility(), `map[h] = ...` — needs `Object.defineProperty` or a Map instead of a plain object literal to be safe for arbitrary header names.",
-    () => {
-      const headers = ["__proto__", "name"];
-      const vis = defaultVisibility(headers, 2); // both columns should be in the table
-      expect(Object.prototype.hasOwnProperty.call(vis, "__proto__")).toBe(true);
-    },
-  );
+describe("header named '__proto__' — FIXED", () => {
+  // FIXED: defaultVisibility/reconcileVisibility (src/core/columns.ts) now
+  // write every entry via Object.defineProperty (which bypasses
+  // Object.prototype's __proto__ accessor and always creates a real own
+  // data property, even for "__proto__") and read only via
+  // Object.prototype.hasOwnProperty.call + the getVisibility helper.
+  it("gets a real own entry in the returned map, for every defaultTableColumns setting", () => {
+    const headers = ["__proto__", "name"];
+    const vis = defaultVisibility(headers, 2); // both columns should be in the table
+    expect(Object.prototype.hasOwnProperty.call(vis, "__proto__")).toBe(true);
+    expect(getVisibility(vis, "__proto__")).toBe(true);
+  });
 
-  test.fails(
-    "BUG (consequence #1): because '__proto__' never becomes an own property, reading vis['__proto__'] back returns Object.prototype itself (an object, hence truthy and !== false), so visibleColumns() happens to still show it — but only by accident, not because the column's actual visibility flag was ever stored or honored.",
-    () => {
-      const headers = ["__proto__", "name"];
-      const vis = defaultVisibility(headers, 0); // BOTH columns should be detail-only (0 shown by default)
-      // Expected: '__proto__' should be detail-only, matching every other
-      // column when defaultTableColumns is 0.
-      expect(detailOnlyColumns(headers, vis)).toEqual(["__proto__", "name"]);
-    },
-  );
+  it("is correctly detail-only when defaultTableColumns says so, not shown by accident", () => {
+    const headers = ["__proto__", "name"];
+    const vis = defaultVisibility(headers, 0); // BOTH columns should be detail-only
+    expect(detailOnlyColumns(headers, vis)).toEqual(["__proto__", "name"]);
+  });
 
-  test.fails(
-    "BUG (consequence #2, the more serious one): reconcileVisibility's whole point is to preserve a user's prior visibility choice across a header reload. For a column named '__proto__', Object.prototype.hasOwnProperty.call(previous, '__proto__') is ALWAYS false (since no own property could ever be written), so the user's saved choice is silently discarded every single time and the column reverts to the default rule on every reload — a real, persistent data-loss bug for anyone with a column named '__proto__' (unlikely, but not impossible — e.g. a JSON-derived export). Expected: a previously-hidden '__proto__' column should stay hidden after reconciliation, exactly like any other column name.",
-    () => {
-      const headers = ["__proto__", "name"];
-      const previous = { name: true } as Record<string, boolean>;
-      // Attempt to record that '__proto__' was explicitly hidden by the user...
-      (previous as any).__proto__ = false; // this itself no-ops for the same reason
-      const reconciled = reconcileVisibility(headers, previous, 5); // default would show it (i < 5)
-      // Expected: still hidden, honoring the (attempted) prior choice.
-      expect(reconciled.__proto__).toBe(false);
-    },
-  );
+  it("keeps a previously-hidden '__proto__' column hidden after reconcileVisibility, when `previous` comes from a realistic source", () => {
+    // NOTE: the original version of this test built `previous` via
+    // `(previous as any).__proto__ = false` — a runtime bracket
+    // assignment on an ordinary object, which is exactly the no-op trap
+    // this bug is about and can never create a real own property,
+    // regardless of whether reconcileVisibility itself is fixed. The
+    // realistic source, per the task's own framing ("persisted state is
+    // JSON in VS Code workspaceState"), is JSON.parse, which — unlike a
+    // literal/bracket write — does create a genuine own "__proto__"
+    // property (per the JSON spec's use of CreateDataProperty).
+    const headers = ["__proto__", "name"];
+    const previous = JSON.parse('{"name": true, "__proto__": false}') as Record<string, boolean>;
+    expect(Object.prototype.hasOwnProperty.call(previous, "__proto__")).toBe(true); // sanity: JSON.parse really does create an own property
+    const reconciled = reconcileVisibility(headers, previous, 5); // default would show it (i < 5)
+    expect(getVisibility(reconciled, "__proto__")).toBe(false);
+  });
 
-  it("detailFieldsFor does not crash on a '__proto__' header, at least (defensive smoke test)", () => {
+  it("round-trips through JSON.stringify/JSON.parse (the real persistence path via workspaceState) without losing the '__proto__' entry", () => {
+    const headers = ["__proto__", "other"];
+    const vis = defaultVisibility(headers, 0); // both detail-only
+    const roundTripped = JSON.parse(JSON.stringify(vis)) as Record<string, boolean>;
+    expect(Object.prototype.hasOwnProperty.call(roundTripped, "__proto__")).toBe(true);
+    expect(getVisibility(roundTripped, "__proto__")).toBe(false);
+
+    // And the round-tripped map still works correctly as `previous` input
+    // to reconcileVisibility on the next load.
+    const reconciled = reconcileVisibility(headers, roundTripped, 5); // default would show it now
+    expect(getVisibility(reconciled, "__proto__")).toBe(false); // prior choice honored, not reset to default
+  });
+
+  it("detailFieldsFor does not crash on a '__proto__' header (defensive smoke test)", () => {
     const headers = ["__proto__", "name"];
     const vis = defaultVisibility(headers, 1);
     expect(() => detailFieldsFor(headers, vis)).not.toThrow();

@@ -5,7 +5,7 @@
 // design decision is safe, or documenting a surprising-but-arguably-OK edge
 // case that a product owner should be aware of but that isn't a bug per se.
 import { execFileSync } from "node:child_process";
-import { describe, expect, it, test } from "vitest";
+import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { applyFilters, isValidRule } from "../../core/filter";
 import type { FilterRule } from "../../core/types";
@@ -27,19 +27,34 @@ describe("empty rule value", () => {
   const headers = ["name"];
   const rows = [["Alice"], [""], ["  "]];
 
-  it("contains '' matches every cell, since every string contains the empty string (JS String.includes semantics) — an empty include rule is a no-op, an empty exclude rule drops everything", () => {
+  // Changed behavior (bug fix, decision #10, not a regression): a
+  // value-taking rule (every operator except isEmpty, which takes no
+  // value) with an empty value is now IGNORED — as if disabled — rather
+  // than applied with whatever incidental behavior its operator happens
+  // to have on "". For contains/startsWith/endsWith in include mode, that
+  // incidental behavior (match-everything, via JS String semantics) was
+  // already indistinguishable from "ignored", so nothing here changes.
+  // But the SAME incidental behavior in exclude mode used to be
+  // "drop everything", which is now, correctly, "ignored" (drop nothing) —
+  // see isRuleActive in src/core/filter.ts.
+  it("contains '' is ignored (ties to isRuleActive's 'needs a value' check) — has no effect in either include or exclude mode", () => {
     expect(applyFilters(headers, rows, "", [rule({ operator: "contains", value: "", mode: "include" })])).toEqual(rows);
-    expect(applyFilters(headers, rows, "", [rule({ operator: "contains", value: "", mode: "exclude" })])).toEqual([]);
+    expect(applyFilters(headers, rows, "", [rule({ operator: "contains", value: "", mode: "exclude" })])).toEqual(rows);
   });
 
-  it("startsWith/endsWith '' also match every cell for the same reason", () => {
+  it("startsWith/endsWith '' are likewise ignored, not applied", () => {
     expect(applyFilters(headers, rows, "", [rule({ operator: "startsWith", value: "" })])).toEqual(rows);
     expect(applyFilters(headers, rows, "", [rule({ operator: "endsWith", value: "" })])).toEqual(rows);
   });
 
-  it("equals '' only matches cells that are exactly empty (not whitespace-only, since equals never trims)", () => {
+  it("equals '' is ignored too — even though 'match only truly-empty cells' would have been a well-defined, useful behavior, the empty-value rule is inert like every other operator", () => {
     const result = applyFilters(headers, rows, "", [rule({ operator: "equals", value: "" })]);
-    expect(result).toEqual([[""]]);
+    expect(result).toEqual(rows);
+  });
+
+  it("isEmpty, the one operator that takes no value, is unaffected — an empty `value` field never disables it", () => {
+    const result = applyFilters(headers, rows, "", [rule({ operator: "isEmpty", value: "" })]);
+    expect(result).toEqual([[""], ["  "]]);
   });
 });
 
@@ -72,38 +87,38 @@ describe("Unicode case folding via toLowerCase()", () => {
     expect(applyFilters(headers, rows, "", [rule({ column: "word", operator: "equals", value: "οδος" })])).toEqual(rows);
   });
 
-  it("German ß does not case-fold to 'ss' (plain toLowerCase, not full Unicode case folding) — surprising but arguably OK: fixing this needs a locale-aware case-folding table, out of scope for a simple toggle", () => {
+  // Changed behavior (bug fix, decision #8, not a regression): case-
+  // insensitive matching now goes through a shared `foldCase` (src/core/
+  // caseFold.ts) instead of plain `toLowerCase()`. foldCase explicitly
+  // folds "ß" to "ss", so this test's original "expected" (that ß case-
+  // folding was out of scope) now conflicts with that decision — updated
+  // to assert the fix instead.
+  it("German ß now case-folds to 'ss' via the shared foldCase, so STRASSE matches straße case-insensitively", () => {
     const headers = ["word"];
     const rows = [["straße"]];
-    // A user typing the all-caps German form "STRASSE" would expect a
-    // case-insensitive match against "straße", but toLowerCase("STRASSE")
-    // is "strasse", not "straße", so equals fails.
-    expect(applyFilters(headers, rows, "", [rule({ column: "word", operator: "equals", value: "STRASSE" })])).toEqual([]);
+    expect(applyFilters(headers, rows, "", [rule({ column: "word", operator: "equals", value: "STRASSE" })])).toEqual(rows);
   });
 
-  test.fails(
-    "BUG: case-insensitive 'contains' fails to match plain 'i' against Turkish İ (U+0130) because toLowerCase('İ') produces 'i' + a combining dot above (U+0307), a 2-codepoint string, which is never a substring of plain lowercase text. Expected: a case-insensitive rule value containing İ should match ordinary 'i' text the way a user searching for a Turkish place name would expect (or at minimum, equals should be reflexive under case-insensitive comparison for any Unicode input). Location: src/core/filter.ts cellMatches(), the a.toLowerCase()/b.toLowerCase() comparison shared by contains/equals/startsWith/endsWith.",
-    () => {
-      const headers = ["city"];
-      const rows = [["istanbul"]];
-      const result = applyFilters(headers, rows, "", [
-        rule({ column: "city", operator: "contains", value: "İstanbul", caseSensitive: false }),
-      ]);
-      expect(result).toEqual(rows);
-    },
-  );
+  // FIXED: foldCase (src/core/caseFold.ts) drops the combining dot above
+  // (U+0307) that toLowerCase("İ") leaves behind, so a case-insensitive
+  // rule value containing Turkish İ matches ordinary lowercase "i" text.
+  it("case-insensitive 'contains' matches plain 'i' against Turkish İ (U+0130) via the shared foldCase", () => {
+    const headers = ["city"];
+    const rows = [["istanbul"]];
+    const result = applyFilters(headers, rows, "", [
+      rule({ column: "city", operator: "contains", value: "İstanbul", caseSensitive: false }),
+    ]);
+    expect(result).toEqual(rows);
+  });
 
-  test.fails(
-    "BUG: equals is not reflexive under case-insensitive comparison — a cell equal to the rule value cannot fail to match itself. 'İ'.toLowerCase() !== 'i'.toLowerCase() means equals(value='İstanbul', cell='İstanbul') still passes, but the more basic invariant that equals(v, v) should always hold under any transform is what breaks: comparing 'İstanbul' against a rule value of 'istanbul' (same word, ordinary casing) fails, i.e. two spellings a user considers the same city are treated as different. Expected: case-insensitive equals should match when both sides only differ in ASCII case, at minimum for round-tripping the same text.",
-    () => {
-      const headers = ["city"];
-      const rows = [["İstanbul"]];
-      const result = applyFilters(headers, rows, "", [
-        rule({ column: "city", operator: "equals", value: "istanbul", caseSensitive: false }),
-      ]);
-      expect(result).toEqual(rows);
-    },
-  );
+  it("case-insensitive equals is now reflexive: 'İstanbul' matches a rule value of 'istanbul' (same word, ordinary casing)", () => {
+    const headers = ["city"];
+    const rows = [["İstanbul"]];
+    const result = applyFilters(headers, rows, "", [
+      rule({ column: "city", operator: "equals", value: "istanbul", caseSensitive: false }),
+    ]);
+    expect(result).toEqual(rows);
+  });
 });
 
 describe("regex: anchors and flags", () => {
@@ -209,13 +224,14 @@ describe("numeric operators: what Number() actually accepts", () => {
     ]);
   });
 
-  test.fails(
-    "BUG: '0x10' is silently parsed as hex (16) by plain Number(), so a numeric filter compares a textual value in a numeral system the user never asked for. Expected: a CSV cell '0x10' should either be treated as non-numeric (fails every numeric rule, like '12abc') or, if hex is intentionally supported, that should be documented — right now '0x10' > '15' evaluates true, which will silently surprise anyone whose data happens to contain hex-looking strings (ids, color codes). Location: src/core/filter.ts parseNumeric() — Number('0x10') === 16.",
-    () => {
-      const result = applyFilters(headers, [["0x10"]], "", [rule({ column: "v", operator: "gt", value: "15" })]);
-      expect(result).toEqual([]);
-    },
-  );
+  // FIXED: the shared parseNumber (src/core/number.ts) only accepts a
+  // strict decimal-number pattern, so '0x10' is no longer silently parsed
+  // as hex (16) the way plain Number('0x10') === 16 would — it's treated
+  // as non-numeric, same as '12abc'.
+  it("'0x10' is treated as non-numeric (rejected by the strict decimal pattern), not silently parsed as hex", () => {
+    const result = applyFilters(headers, [["0x10"]], "", [rule({ column: "v", operator: "gt", value: "15" })]);
+    expect(result).toEqual([]);
+  });
 
   it("' 12 ' trims before Number() and parses to 12 for numeric operators — matches spec's documented trim-then-Number() rule, not a bug (note: this is 'equals'-as-a-numeric-value behavior via gte+lte, not the string 'equals' operator, which never trims)", () => {
     expect(applyFilters(headers, [[" 12 "]], "", [rule({ column: "v", operator: "gte", value: "12" })])).toEqual([
@@ -275,9 +291,16 @@ describe("rule referencing a column that no longer exists", () => {
     ["3", "4"],
   ];
 
-  it("an include rule on a missing column matches nothing, so it drops every row (documented pre-existing behavior per spec's header-rename note)", () => {
+  // Changed behavior (bug fix, decision #10, not a regression): a rule
+  // whose column no longer exists is now IGNORED (isRuleActive returns
+  // false), not applied as a rule that matches nothing. For an include
+  // rule those are very different outcomes — "ignored" leaves every row
+  // as-is, "matches nothing" used to drop every row in the file, which is
+  // what this test's original "documented pre-existing behavior" comment
+  // called out as intentional. It no longer is.
+  it("an include rule on a missing column is ignored, not applied as 'matches nothing' (which used to drop every row)", () => {
     const result = applyFilters(headers, rows, "", [rule({ column: "ghost", operator: "equals", value: "1" })]);
-    expect(result).toEqual([]);
+    expect(result).toEqual(rows);
   });
 
   it("an exclude rule on a missing column never matches, so it drops nothing", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultVisibility, detailFieldsFor, detailOnlyColumns, reconcileVisibility, visibleColumns } from "../core/columns";
+import { defaultVisibility, detailFieldsFor, detailOnlyColumns, getVisibility, reconcileVisibility, visibleColumns } from "../core/columns";
 
 describe("defaultVisibility", () => {
   it("shows the first N columns and hides the rest", () => {
@@ -28,10 +28,21 @@ describe("reconcileVisibility", () => {
     expect(reconcileVisibility(headers, previous, 1)).toEqual({ a: false, b: false, c: false });
   });
 
-  it("drops settings for columns that no longer exist", () => {
+  it("merges instead of dropping settings for columns that no longer exist, so a later round trip back to that name restores them — but visibleColumns/detailFieldsFor still only consider the current headers", () => {
+    // Changed behavior (bug fix, not a regression): reconcileVisibility
+    // used to drop any entry not in the current `headers` list, which lost
+    // a user's visibility choice the moment an intermediate header set
+    // (e.g. toggling "first row is header" off, which synthesizes
+    // column_1..N headers) didn't include their name — even though the
+    // *original* name came right back afterward. It now merges, carrying
+    // every previous entry forward regardless of the current header list.
     const previous = { a: true, removed: false };
     const headers = ["a"];
-    expect(reconcileVisibility(headers, previous, 8)).toEqual({ a: true });
+    const reconciled = reconcileVisibility(headers, previous, 8);
+    expect(reconciled.a).toBe(true);
+    expect(getVisibility(reconciled, "removed")).toBe(false); // retained, not dropped
+    // "removed" isn't a current header, so it plays no role in rendering.
+    expect(visibleColumns(headers, reconciled)).toEqual(["a"]);
   });
 });
 

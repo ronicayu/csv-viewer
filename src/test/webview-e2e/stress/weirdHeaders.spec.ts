@@ -15,10 +15,14 @@ import { bootAndLoad, bootAndLoadText, defaultViewState } from "../harness";
 import { toCsvText, trackConsoleErrors } from "./stressHelpers";
 
 test.describe("__proto__ as a header name", () => {
-  test("BUG: a __proto__ column cannot be hidden — the checkbox snaps back to checked and the column stays in the table", async ({
+  // FIXED: columnVisibility maps (src/core/columns.ts) now write every
+  // entry via Object.defineProperty (bypassing Object.prototype's
+  // __proto__ accessor, which used to silently no-op the write) and read
+  // only via the safe getVisibility helper, so a column literally named
+  // "__proto__" can be hidden like any other column.
+  test("a __proto__ column can be hidden — the checkbox stays unchecked and the column leaves the table", async ({
     page,
   }) => {
-    test.fail(); // see comment below for expected behavior
     const consoleErrors = trackConsoleErrors(page);
     await bootAndLoad(page, {
       fileKey: "file:///proto.csv",
@@ -36,20 +40,18 @@ test.describe("__proto__ as a header name", () => {
     await expect(protoCheckbox).toBeChecked();
     await protoCheckbox.uncheck();
 
-    // Expected: unchecking hides the column, exactly like any other header
-    // (see columns.spec.ts's "age" case) — the "__proto__" <th> disappears
-    // and re-opening the popover shows the checkbox still unchecked.
-    // Actual: `state.view.columnVisibility["__proto__"] = false` is a
-    // silent no-op (src/webview/main.ts's columnsList checkbox change
-    // handler, and ultimately src/core/columns.ts's `visibleColumns`
-    // reading `visibility[h] !== false`), so the column never leaves the
-    // table and the checkbox reverts to checked on the next render.
-    await expect(page.locator("th", { hasText: "__proto__" })).toHaveCount(0); // fails: still 1
+    await expect(page.locator("th", { hasText: "__proto__" })).toHaveCount(0);
+    // Re-opening the popover still shows the checkbox unchecked (the
+    // setting was really stored, not lost on the next render).
+    await page.locator("#columns-btn").click();
+    await page.locator("#columns-btn").click();
+    await expect(protoCheckbox).not.toBeChecked();
     expect(consoleErrors).toEqual([]);
   });
 
-  test("BUG: a __proto__ column beyond the default-visible-column count still shows up in the table", async ({ page }) => {
-    test.fail(); // see comment below for expected behavior
+  test("a __proto__ column beyond the default-visible-column count is correctly detail-only, not shown by accident", async ({
+    page,
+  }) => {
     await bootAndLoad(page, {
       fileKey: "file:///proto2.csv",
       headers: ["a", "b", "c", "__proto__"],
@@ -58,13 +60,10 @@ test.describe("__proto__ as a header name", () => {
       defaultTableColumns: 2, // only "a" and "b" should start visible
     });
 
-    // Expected: table shows exactly "a" and "b"; "c" and "__proto__" are
-    // detail-only, same default-N rule as every other column (see
-    // src/core/columns.ts's defaultVisibility).
-    // Actual: `map["__proto__"] = (3 < 2) = false` is a silent no-op (same
-    // root cause as above), so reading it back yields Object.prototype —
-    // an object, therefore `!== false` — and the column renders anyway.
-    await expect(page.locator("th.sortable")).toHaveCount(2); // fails: 3 (a, b, __proto__)
+    // Table shows exactly "a" and "b"; "c" and "__proto__" are
+    // detail-only, same default-N rule as every other column.
+    await expect(page.locator("th.sortable")).toHaveCount(2);
+    await expect(page.locator("th", { hasText: "__proto__" })).toHaveCount(0);
   });
 
   test("sorting and filtering by a __proto__ column still work (headers array and Map-keyed lookups aren't affected)", async ({
@@ -159,15 +158,13 @@ test("plain duplicate headers dedupe to name/name_2 and are independently toggle
   await expect(page.locator("th", { hasText: /^dup$/ })).toHaveCount(0);
 });
 
-test("BUG: a header set 'a', 'a', 'a_2' dedupes to a colliding pair of 'a_2' columns that alias each other's data", async ({
-  page,
-}) => {
-  test.fail(); // see comment below for expected behavior
-  // dedupeNames (src/core/csvParse.ts) tracks how many times it has seen
-  // each *original* name, but doesn't check whether the name it generates
-  // (`${name}_${count+1}`) collides with a name that was already in the
-  // input. Header row ["a", "a", "a_2"] dedupes to ["a", "a_2", "a_2"] —
-  // two columns with the identical final name "a_2".
+test("a header set 'a', 'a', 'a_2' dedupes to three distinct, independently addressable columns", async ({ page }) => {
+  // FIXED: dedupeNames (src/core/csvParse.ts) now checks every generated
+  // `_N` candidate against every literal name in the file (not just names
+  // already assigned so far), so the duplicate "a" at index 1 skips "a_2"
+  // (reserved for the literal at index 2) and becomes "a_3" instead —
+  // three distinct final headers, each showing its own original cell
+  // value.
   const text = toCsvText(["a", "a", "a_2"], [["first", "second", "third"]]);
   await bootAndLoadText(page, {
     fileKey: "file:///dupcollide.csv",
@@ -176,20 +173,12 @@ test("BUG: a header set 'a', 'a', 'a_2' dedupes to a colliding pair of 'a_2' col
     defaultTableColumns: 3,
   });
 
-  // Expected: three distinct, independently addressable columns (e.g.
-  // "a", "a_2", "a_3", or some other collision-free scheme) each showing
-  // its own original cell value ("first", "second", "third").
-  // Actual: `state.headers` contains "a_2" twice. Every `Map(headers.map((h,
-  // i) => [h, i]))` lookup by header name (used throughout main.ts, e.g.
-  // buildRowTr's `indexByHeader`) then resolves "a_2" to only the *last*
-  // matching index, so both "a_2" <th> columns render the same ("third")
-  // value and the true second column's data ("second") is not shown
-  // anywhere in the table.
   const headerTexts = await page.locator("th.sortable").allTextContents();
-  expect(new Set(headerTexts).size).toBe(headerTexts.length); // fails: two "a_2"s
+  expect(new Set(headerTexts).size).toBe(headerTexts.length);
+  expect(headerTexts).toEqual(["a", "a_3", "a_2"]);
 
   const rowCells = await page.locator("tr.data-row").first().locator("td:not(.chevron-col)").allTextContents();
-  expect(rowCells).toEqual(["first", "second", "third"]); // fails: ["first", "third", "third"]
+  expect(rowCells).toEqual(["first", "second", "third"]);
 });
 
 test("a 500-character header renders, toggles, sorts, and filters normally", async ({ page }) => {

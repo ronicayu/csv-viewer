@@ -29,10 +29,16 @@ test("toggling 'first row is header' off and on 10 times in a row never throws a
   expect(consoleErrors).toEqual([]);
 });
 
-test("BUG: a column-visibility customization is lost after toggling 'first row is header' off and back on, even though the header names end up unchanged", async ({
+test("a column-visibility customization survives toggling 'first row is header' off and back on, since the header names end up unchanged", async ({
   page,
 }) => {
-  test.fail(); // see comment below for expected behavior
+  // FIXED: reconcileVisibility (src/core/columns.ts) now merges rather
+  // than replaces — every entry from the previous visibility map is
+  // carried forward, including ones for header names not in the
+  // *current* header list. So "b: false" survives being carried through
+  // the intermediate reconciliation against the synthetic column_1..N
+  // headers (while "first row is header" is off), and reappears once the
+  // real a/b/c/d names come back.
   const text = "a,b,c,d\n1,2,3,4\n5,6,7,8";
   await bootAndLoadText(page, {
     fileKey: "file:///toggle-visibility.csv",
@@ -53,14 +59,5 @@ test("BUG: a column-visibility customization is lost after toggling 'first row i
   await page.locator("#first-row-header").uncheck();
   await page.locator("#first-row-header").check();
 
-  // Expected: "b" is still hidden — reparseFromText (src/webview/main.ts)
-  // should reconcile visibility by header *name* across the whole round
-  // trip, and "b" is exactly the name it started and ended with.
-  // Actual: turning the checkbox off re-parses with synthetic headers
-  // (column_1..column_4), and reconcileVisibility (src/core/columns.ts)
-  // only compares against the *immediately previous* map — which is now
-  // keyed by column_1..column_4, not a/b/c/d. Turning it back on treats
-  // "b" as a brand-new column name (no matching key in that intermediate
-  // map) and reapplies the default-N rule, silently un-hiding it.
-  await expect(page.locator("th", { hasText: "b" })).toHaveCount(0); // fails: "b" is visible again
+  await expect(page.locator("th", { hasText: "b" })).toHaveCount(0);
 });
