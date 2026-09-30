@@ -111,6 +111,12 @@ export interface FixtureLoad {
   defaultTableColumns: number;
   /** Defaults to "" (auto), same as the host would send for a .csv file. */
   defaultDelimiter?: string;
+  /** Mirrors extension.ts's CSV_VIEWER_TEST_HOOKS-gated `testHooks` flag
+   * on the real `load` message. Defaults to false/omitted; a spec that
+   * needs to observe webview-internal test hooks (e.g. `rendered`
+   * messages, or the worker-query-sent counter on `window`) opts in
+   * explicitly. */
+  testHooks?: boolean;
 }
 
 /** A `load` message built from raw CSV/TSV text instead of headers/rows —
@@ -122,6 +128,7 @@ export interface TextLoad {
   state: ViewState;
   defaultTableColumns: number;
   defaultDelimiter?: string;
+  testHooks?: boolean;
 }
 
 function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
@@ -132,6 +139,7 @@ function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
     state: data.state,
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
+    testHooks: data.testHooks ?? false,
   };
 }
 
@@ -142,6 +150,7 @@ function toTextLoadMessage(data: TextLoad): Omit<LoadMessage, "type"> {
     state: data.state,
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
+    testHooks: data.testHooks ?? false,
   };
 }
 

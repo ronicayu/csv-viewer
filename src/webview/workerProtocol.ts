@@ -39,13 +39,30 @@ export type WorkerResponse =
       quoteProblems: { row: number }[];
       totalRows: number;
     }
+  /** Posted right before the worker begins `applyFilters` for this
+   * request — i.e. once it has actually started running, not merely been
+   * received. The main thread only starts its regex-timeout watchdog once
+   * this arrives, so a request that's simply queued behind an earlier one
+   * (or behind a slow sort — see `filterDone`) is never penalized for
+   * time it spent waiting its turn in the worker's single-threaded
+   * mailbox. */
+  | { type: "queryStarted"; requestId: number }
+  /** Posted right after `applyFilters` finishes for this request, before
+   * `sortRows` runs — this is what disarms the regex-timeout watchdog.
+   * The watchdog covers only the filter phase (where a catastrophic
+   * regex actually runs); a slow sort afterward, even on a huge dataset,
+   * is a different (and separately handled — see the sort-key cache in
+   * worker.ts) performance concern and must never falsely trip it. */
+  | { type: "filterDone"; requestId: number }
   | { type: "queryResult"; requestId: number; filteredCount: number }
   | { type: "pageResult"; requestId: number; rows: WorkerRow[] }
   | { type: "workerError"; requestId: number; message: string };
 
-/** How long the main thread waits for a `query` response before assuming
- * the worker is stuck (catastrophic regex backtracking) and terminating
- * it. See main.ts's regex-timeout handling. */
+/** How long the main thread waits, after a `query` request containing an
+ * enabled regex rule actually starts running (`queryStarted`) and before
+ * it finishes filtering (`filterDone`), before assuming the worker is
+ * stuck (catastrophic regex backtracking) and terminating it. See
+ * main.ts's regex-timeout handling. */
 export const REGEX_TIMEOUT_MS = 2000;
 
 /** After a request has been in flight this long with no response, show

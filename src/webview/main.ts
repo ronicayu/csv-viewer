@@ -298,7 +298,65 @@ let queryInFlight = false;
  * consumed by the next queryResult instead of `state.page`, so the UI
  * stays responsive to navigation even while the worker is busy/recovering. */
 let pendingPageAfterQuery: number | null = null;
-let regexTimeoutHandle: number | undefined;
+
+/** The canonical key (see buildQueryKey) of the last query actually SENT
+ * to the worker — reset to null on every fresh `init`, since a new parse
+ * invalidates whatever the worker's cached view meant before. Used by
+ * runQuery to skip sending a redundant query when nothing that would
+ * change the filtered/sorted result actually changed (e.g. an
+ * inactive filter-rule edit). */
+let lastQueryKey: string | null = null;
+
+/**
+ * requestId -> the rules sent with that query, tracked only for requests
+ * that contain an enabled, syntactically-valid regex rule (i.e. ones "at
+ * risk" of catastrophic backtracking). The actual per-request 2s watchdog
+ * timer only starts once the WORKER confirms (via `queryStarted`) that it
+ * has actually begun running that request's `applyFilters` — never from
+ * when the request was merely sent — so a request that's simply queued
+ * behind an earlier one (or behind a slow sort afterward — the watchdog
+ * is disarmed by `filterDone`, before sorting even starts) is never
+ * falsely penalized for time it spent waiting its turn in the worker's
+ * single-threaded mailbox. See onQueryStarted/onFilterDone below.
+ */
+let riskyRulesByRequestId = new Map<number, FilterRule[]>();
+let regexWatchdogHandles = new Map<number, number>();
+
+/** Clears every pending regex-watchdog timer and tracked request — called
+ * on every fresh `init` (a new parse/worker makes any old requestId
+ * meaningless) and defensively at the start of a timeout's own recovery
+ * (so no *other* stale watchdog can fire mid-respawn and race it). */
+function resetRegexWatchdogState(): void {
+  for (const handle of regexWatchdogHandles.values()) window.clearTimeout(handle);
+  regexWatchdogHandles.clear();
+  riskyRulesByRequestId.clear();
+}
+
+function armRegexWatchdogIfRisky(requestId: number, rulesSent: FilterRule[]): void {
+  const risky = rulesSent.some((r) => r.enabled && r.operator === "regex" && isValidRule(r));
+  if (risky) riskyRulesByRequestId.set(requestId, rulesSent);
+}
+
+function onQueryStarted(requestId: number): void {
+  const rulesSent = riskyRulesByRequestId.get(requestId);
+  if (!rulesSent) return; // nothing risky about this particular request
+  const handle = window.setTimeout(() => {
+    regexWatchdogHandles.delete(requestId);
+    riskyRulesByRequestId.delete(requestId);
+    if (!state) return;
+    void handleRegexTimeout(rulesSent);
+  }, REGEX_TIMEOUT_MS);
+  regexWatchdogHandles.set(requestId, handle);
+}
+
+function onFilterDone(requestId: number): void {
+  const handle = regexWatchdogHandles.get(requestId);
+  if (handle !== undefined) {
+    window.clearTimeout(handle);
+    regexWatchdogHandles.delete(requestId);
+  }
+  riskyRulesByRequestId.delete(requestId);
+}
 
 // ---- "Working…" indicator ----------------------------------------------
 //
@@ -428,6 +486,8 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   const requestId = nextRequestId++;
   pendingInitRequestId = requestId;
   pendingInitIsFreshParse = isFreshParse;
+  lastQueryKey = null; // a fresh parse invalidates whatever the worker's cached view meant before
+  resetRegexWatchdogState();
   postToWorker({ type: "init", requestId, text, options });
 }
 
@@ -449,6 +509,18 @@ function notifyRendered(): void {
   if (!state || !state.testHooksEnabled) return;
   vscode.postMessage({ type: "rendered", rowCount: state.filteredCount, headers: state.headers });
 }
+
+/** TEST HOOK: number of `query` messages actually sent to the worker so
+ * far in this session, exposed on `window` so a Playwright spec can
+ * assert that a given interaction (e.g. an inactive filter-rule edit —
+ * see runQuery's no-op skip) sent none, or that a real change sent
+ * exactly one. Written only when testHooksEnabled (set via `load`'s
+ * `testHooks` flag — see harness.ts). */
+function recordQuerySent(): void {
+  if (!state || !state.testHooksEnabled) return;
+  const w = window as unknown as { __workerQueryCount?: number };
+  w.__workerQueryCount = (w.__workerQueryCount ?? 0) + 1;
+}
 // ---- END TEST HOOK ---------------------------------------------------------
 
 // ---- Worker responses ----------------------------------------------------
@@ -458,6 +530,12 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
   switch (msg.type) {
     case "initResult":
       onInitResult(msg);
+      break;
+    case "queryStarted":
+      onQueryStarted(msg.requestId);
+      break;
+    case "filterDone":
+      onFilterDone(msg.requestId);
       break;
     case "queryResult":
       onQueryResult(msg);
@@ -509,10 +587,7 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
  * regex-timeout recovery — all three need exactly this same follow-up). */
 function continueAfterInit(): void {
   if (!state) return;
-  queryInFlight = true;
-  const { requestId, rulesSent } = sendQueryNow();
-  latestQueryRequestId = requestId;
-  maybeArmRegexTimeout(requestId, rulesSent);
+  runQuery();
 }
 
 function sendQueryNow(): { requestId: number; rulesSent: FilterRule[] } {
@@ -520,13 +595,68 @@ function sendQueryNow(): { requestId: number; rulesSent: FilterRule[] } {
   const rulesSent = state.view.filterRules.filter((r) => !state!.timedOutRuleIds.has(r.id));
   const requestId = nextRequestId++;
   postToWorker({ type: "query", requestId, quickSearch: state.view.quickSearch, filterRules: rulesSent, sortKeys: state.view.sortKeys });
+  recordQuerySent();
   return { requestId, rulesSent };
+}
+
+/**
+ * A stable-enough (same-process) canonical representation of "what would
+ * actually change the filtered/sorted result": quick search, the
+ * *active* filter rules (enabled, isRuleActive, not timed-out — reduced
+ * to only their semantic fields) and sort keys. Two states that produce
+ * the same key are guaranteed to produce the same worker result, so
+ * runQuery uses this to skip sending a redundant query — e.g. adding an
+ * empty rule, or picking its column/operator before it has a value,
+ * never changes which rules are *active*, so the key doesn't change
+ * either.
+ */
+function buildQueryKey(): string {
+  if (!state) return "";
+  const activeRules = state.view.filterRules
+    .filter((r) => r.enabled && isRuleActive(r, state!.headers) && !state!.timedOutRuleIds.has(r.id))
+    .map((r) => ({ column: r.column, operator: r.operator, value: r.value, mode: r.mode, caseSensitive: r.caseSensitive }));
+  return JSON.stringify({ q: state.view.quickSearch, rules: activeRules, sort: state.view.sortKeys });
+}
+
+/**
+ * Sends a fresh query unless nothing that actually affects the
+ * filtered/sorted result changed since the last query actually sent
+ * (see buildQueryKey) — in which case the worker's cached view is
+ * already correct, and this only needs to fetch the desired page
+ * without paying a full re-filter-and-re-sort of the whole dataset for
+ * no reason. Shared by `continueAfterInit` (always sends — `beginInit`
+ * reset `lastQueryKey` to null, which the key string can never equal)
+ * and `requery` (interactive filter/sort/search changes).
+ */
+function runQuery(): void {
+  if (!state) return;
+  const key = buildQueryKey();
+  if (key === lastQueryKey) {
+    if (!queryInFlight) {
+      const desired = pendingPageAfterQuery ?? state.page;
+      pendingPageAfterQuery = null;
+      state.page = clampPage(desired, state.filteredCount, state.view.pageSize);
+      startOperation();
+      const requestId = nextRequestId++;
+      latestPageRequestId = requestId;
+      postToWorker({ type: "page", requestId, page: state.page, pageSize: state.view.pageSize });
+    }
+    // else: a query for this exact key is already in flight (or queued
+    // behind an earlier one); its own onQueryResult will consume
+    // pendingPageAfterQuery once it answers — nothing more to do here.
+    return;
+  }
+  lastQueryKey = key;
+  startOperation();
+  queryInFlight = true;
+  const { requestId, rulesSent } = sendQueryNow();
+  latestQueryRequestId = requestId;
+  armRegexWatchdogIfRisky(requestId, rulesSent);
 }
 
 function onQueryResult(msg: { type: "queryResult" } & WorkerResponse): void {
   if (!state) return;
   if (msg.requestId !== latestQueryRequestId) return; // stale — a newer query has since been sent
-  window.clearTimeout(regexTimeoutHandle); // this query answered before the regex watchdog fired
 
   state.filteredCount = msg.filteredCount;
   const desired = pendingPageAfterQuery ?? state.page;
@@ -562,20 +692,14 @@ function finishRender(): void {
 }
 
 // ---- Regex timeout watchdog ----------------------------------------------
-
-function maybeArmRegexTimeout(requestId: number, rulesSent: FilterRule[]): void {
-  window.clearTimeout(regexTimeoutHandle);
-  const risky = rulesSent.some((r) => r.enabled && r.operator === "regex" && isValidRule(r));
-  if (!risky) return;
-  regexTimeoutHandle = window.setTimeout(() => {
-    if (!state) return;
-    if (latestQueryRequestId !== requestId) return; // already answered or superseded
-    void handleRegexTimeout(rulesSent);
-  }, REGEX_TIMEOUT_MS);
-}
+//
+// armRegexWatchdogIfRisky/onQueryStarted/onFilterDone/resetRegexWatchdogState
+// live up in the "Request bookkeeping" section above, next to the state
+// they manage.
 
 async function handleRegexTimeout(rulesSent: FilterRule[]): Promise<void> {
   if (!state) return;
+  resetRegexWatchdogState(); // no other stale watchdog can fire during the respawn below
   worker?.terminate();
   worker = null;
 
@@ -1179,11 +1303,7 @@ const OPERATORS: { value: FilterOperator; label: string; needsValue: boolean }[]
 function requery(): void {
   if (!state) return;
   pendingPageAfterQuery = 1;
-  startOperation();
-  queryInFlight = true;
-  const { requestId, rulesSent } = sendQueryNow();
-  latestQueryRequestId = requestId;
-  maybeArmRegexTimeout(requestId, rulesSent);
+  runQuery();
 }
 
 /**

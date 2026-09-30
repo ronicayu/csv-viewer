@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { cycleSortForColumn, sortRows } from "../core/sort";
-import type { SortKey } from "../core/types";
+import fc from "fast-check";
+import { buildColumnSortKeys, cycleSortForColumn, sortRowIdsByCachedKeys, sortRows } from "../core/sort";
+import type { SortDirection, SortKey } from "../core/types";
 
 const headers = ["name", "age", "score"];
 
@@ -136,5 +137,119 @@ describe("collator ties", () => {
       { column: "n", direction: "asc" },
     ]);
     expect(sorted.map((r) => r[1])).toEqual(["1", "2"]);
+  });
+});
+
+// buildColumnSortKeys/sortRowIdsByCachedKeys are the primitives the worker
+// caches per column to avoid re-deriving a column's sort keys (including
+// the collator-ranking pass) on every query — see worker.ts. sortRows
+// itself is now implemented in terms of them, so any accidental behavior
+// drift between the two would show up as a sortRows regression too; these
+// tests additionally cover the specific reuse the cache depends on:
+// keys built once over the FULL dataset must still order any filtered
+// SUBSET (by id) identically to sorting that subset directly.
+describe("buildColumnSortKeys / sortRowIdsByCachedKeys (worker sort-key cache primitives)", () => {
+  it("sorting the full dataset via the cached-key path matches sortRows exactly", () => {
+    const rows = [["a", "30"], ["b", "10"], ["c", "20"], ["d", "10"]];
+    const expected = sortRows(rows, ["name", "age"], [{ column: "age", direction: "asc" }]);
+
+    const ageKeys = buildColumnSortKeys(rows, 1);
+    const order = sortRowIdsByCachedKeys(
+      rows.map((_, i) => i),
+      [{ direction: "asc", keys: ageKeys }],
+    );
+    expect(order.map((i) => rows[i])).toEqual(expected);
+  });
+
+  it("keeps collator-tied case variants in original row order, same as sortRows", () => {
+    const rows = [["a", "0"], ["A", "1"], ["b", "2"], ["a", "3"]];
+    const expected = sortRows(rows, ["v", "i"], [{ column: "v", direction: "asc" }]);
+
+    const vKeys = buildColumnSortKeys(rows, 0);
+    const order = sortRowIdsByCachedKeys(
+      rows.map((_, i) => i),
+      [{ direction: "asc", keys: vKeys }],
+    );
+    expect(order.map((i) => rows[i])).toEqual(expected);
+  });
+
+  it("multi-key: a later cached column breaks a tie on an earlier one, same as sortRows", () => {
+    const rows = [["a", "2"], ["A", "1"]];
+    const expected = sortRows(rows, ["v", "n"], [
+      { column: "v", direction: "asc" },
+      { column: "n", direction: "asc" },
+    ]);
+
+    const vKeys = buildColumnSortKeys(rows, 0);
+    const nKeys = buildColumnSortKeys(rows, 1);
+    const order = sortRowIdsByCachedKeys(
+      rows.map((_, i) => i),
+      [
+        { direction: "asc", keys: vKeys },
+        { direction: "asc", keys: nKeys },
+      ],
+    );
+    expect(order.map((i) => rows[i])).toEqual(expected);
+  });
+
+  it("keys built once over the FULL dataset still order a filtered SUBSET identically to sorting that subset directly — the exact reuse the worker's sort-key cache relies on", () => {
+    const rows = [["banana"], ["Apple"], ["cherry"], ["apple"], ["Banana"], ["date"]];
+    // Keep only these ids (in original relative order) — mimics what
+    // applyFilters would hand back for some filter.
+    const keptIds = [0, 2, 3, 5];
+    const subsetRows = keptIds.map((id) => rows[id]);
+    const direction: SortDirection = "asc";
+    const expected = sortRows(subsetRows, ["v"], [{ column: "v", direction }]);
+
+    // Cache built over the FULL dataset once, then reused for the subset by id.
+    const globalKeys = buildColumnSortKeys(rows, 0);
+    const order = sortRowIdsByCachedKeys(keptIds, [{ direction, keys: globalKeys }]);
+    expect(order.map((id) => rows[id])).toEqual(expected);
+  });
+
+  it("no sort keys returns the ids unchanged, same as sortRows returning rows unchanged", () => {
+    const ids = [3, 1, 4];
+    expect(sortRowIdsByCachedKeys(ids, [])).toEqual(ids);
+  });
+
+  it("property (fast-check): sort keys built once over the FULL dataset, then restricted to a random subset of ids, order that subset identically to calling sortRows directly on it", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.tuple(
+            fc.constantFrom("a", "A", "b", "B", "1", "2", "10", "1e1", "", "  ", "xyz"),
+            fc.constantFrom("1", "2", "3", "10", "abc", ""),
+            fc.boolean(), // whether this row survives into the "filtered" subset
+          ),
+          { minLength: 1, maxLength: 15 },
+        ),
+        fc.constantFrom<SortDirection>("asc", "desc"),
+        (rowTuples, direction) => {
+          const rows = rowTuples.map(([v, n]) => [v, n]);
+          const headers = ["v", "n"];
+          const keys: SortKey[] = [
+            { column: "v", direction },
+            { column: "n", direction },
+          ];
+
+          let keptIds = rows.map((_, i) => i).filter((i) => rowTuples[i][2]);
+          if (keptIds.length === 0) keptIds = [0]; // keep the subset non-empty
+          const subsetRows = keptIds.map((id) => rows[id]);
+
+          const expected = sortRows(subsetRows, headers, keys);
+
+          const vKeys = buildColumnSortKeys(rows, 0);
+          const nKeys = buildColumnSortKeys(rows, 1);
+          const order = sortRowIdsByCachedKeys(keptIds, [
+            { direction, keys: vKeys },
+            { direction, keys: nKeys },
+          ]);
+          const actual = order.map((id) => rows[id]);
+
+          expect(actual).toEqual(expected);
+        },
+      ),
+      { numRuns: 200 },
+    );
   });
 });

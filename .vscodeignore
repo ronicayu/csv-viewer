@@ -1,4 +1,6 @@
 .vscode/**
+.vscode-test/**
+.claude/**
 src/**
 node_modules/**
 # tsc emits one .js per source file into out/ as a side effect of type
@@ -6,14 +8,21 @@ node_modules/**
 # are ever loaded at runtime.
 out/core/**
 out/test/**
-tsconfig.json
-tsconfig.webview.json
-tsconfig.e2e.json
+# The real-VS-Code integration suite's compiled output (a separate
+# tsconfig/outDir from the runtime bundle — see tsconfig.integration.json)
+# and every project tsconfig — none of these are ever loaded at runtime,
+# only out/extension.js and out/webview/* are.
+out-integration/**
+tsconfig*.json
 vitest.config.ts
 playwright.config.ts
 playwright-report/**
 test-results/**
 .gitignore
+.vscodeignore
 docs/**
 package-lock.json
+# Manual-testing fixture referenced from the README's Development section
+# only — not needed at runtime.
+samples/**
 **/*.vsix

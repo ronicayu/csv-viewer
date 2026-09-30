@@ -68,13 +68,12 @@ test("200k rows x 30 columns: timing table for first render and each interaction
   const timings: Array<{ step: string; ms: number }> = [];
 
   await bootShell(page);
-  const client = await page.context().newCDPSession(page);
-  await client.send("Performance.enable");
-
+  // Chrome's non-standard performance.memory, not a CDP Performance
+  // session: enabling CDP metrics collection slowed every timed step
+  // below by 2-3x, so the timings measured the profiler, not the viewer.
   async function heapMB(): Promise<number> {
-    const { metrics } = await client.send("Performance.getMetrics");
-    const m = metrics.find((x) => x.name === "JSHeapUsedSize");
-    return m ? m.value / (1024 * 1024) : -1;
+    const bytes = await page.evaluate(() => (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? -1);
+    return bytes < 0 ? -1 : bytes / (1024 * 1024);
   }
 
   const t0 = Date.now();

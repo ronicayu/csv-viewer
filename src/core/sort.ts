@@ -71,7 +71,7 @@ export function compareCellSortKeys(a: CellSortKey, b: CellSortKey, direction: S
  * `Intl.Collator.compare` again for every pairwise comparison — which
  * matters at scale, since a column with many repeated/tied values (e.g. a
  * secondary sort key) can otherwise call the collator millions of times. */
-interface ResolvedCellSortKey extends CellSortKey {
+export interface ResolvedCellSortKey extends CellSortKey {
   rank: number;
 }
 
@@ -92,6 +92,77 @@ function compareResolvedCellSortKeys(a: ResolvedCellSortKey, b: ResolvedCellSort
   return direction === "desc" ? -cmp : cmp;
 }
 
+/**
+ * Computes the resolved sort key (kind/num/rank) for every row in `rows`,
+ * for one column — exactly the per-column precompute `sortRows` always
+ * did inline, extracted so a caller that wants to *cache* this across
+ * multiple sorts (see worker.ts: the same column's keys are reused
+ * unchanged across every subsequent query, as long as the underlying
+ * rows haven't been re-parsed) can call it once and reuse the result,
+ * instead of paying the collator-ranking pass again on every call.
+ *
+ * The rank is resolved from the distinct text values within *this* call's
+ * `rows` — but since rank is just a monotonic relabeling of the
+ * collator's order over the *set of distinct values considered*, and two
+ * values that are collator-equal are always assigned equal ranks
+ * regardless of what else was in that set, a caller may safely pass the
+ * *entire* dataset once (rather than only ever the currently-filtered
+ * subset) and reuse the resulting keys — by row id — for any filtered
+ * subset's relative order via `sortRowIdsByCachedKeys`, with identical
+ * results to calling this per-subset every time.
+ */
+export function buildColumnSortKeys(rows: string[][], columnIndex: number): ResolvedCellSortKey[] {
+  const cells = rows.map((row) => cellSortKey(row[columnIndex] ?? "")) as ResolvedCellSortKey[];
+  const distinctText = new Set<string>();
+  for (const k of cells) if (k.kind === "text") distinctText.add(k.text);
+  const sortedText = Array.from(distinctText).sort((a, b) => collator.compare(a, b));
+  // Values the collator considers equal (e.g. "a" and "A") share a rank,
+  // so they tie and fall through to later keys / original row order.
+  const rankOf = new Map<string, number>();
+  let rank = 0;
+  sortedText.forEach((text, i) => {
+    if (i > 0 && collator.compare(sortedText[i - 1], text) !== 0) rank++;
+    rankOf.set(text, rank);
+  });
+  // Mutate in place (these cell-key objects were just freshly allocated
+  // above and aren't shared with anything else) rather than spreading
+  // into a second array of objects — halves the allocation for large
+  // datasets.
+  for (const k of cells) k.rank = k.kind === "text" ? (rankOf.get(k.text) as number) : 0;
+  return cells;
+}
+
+/**
+ * Sorts `ids` (a list of row identifiers — indices into whatever full
+ * row set `sortColumns`' keys were built against, e.g. a filtered
+ * subset's original ids) by one or more precomputed per-column key
+ * arrays (see `buildColumnSortKeys`), stable, exactly like `sortRows`'s
+ * own comparator. `ids` need not be a contiguous or full range — this is
+ * what lets a filtered subset be sorted by reusing sort keys computed
+ * once over the *entire* dataset, without re-deriving them.
+ *
+ * The stable tie-break (`x - y`, comparing the ids themselves) relies on
+ * `ids` always being a subsequence that preserves the original row
+ * order (true for anything produced by filtering rows in order, e.g.
+ * `Array.prototype.filter`) — under that assumption, comparing id values
+ * directly is equivalent to comparing their positions within `ids`.
+ */
+export function sortRowIdsByCachedKeys(
+  ids: number[],
+  sortColumns: { direction: SortDirection; keys: ResolvedCellSortKey[] }[],
+): number[] {
+  if (sortColumns.length === 0) return ids.slice();
+  const order = ids.slice();
+  order.sort((x, y) => {
+    for (const { direction, keys } of sortColumns) {
+      const cmp = compareResolvedCellSortKeys(keys[x], keys[y], direction);
+      if (cmp !== 0) return cmp;
+    }
+    return x - y;
+  });
+  return order;
+}
+
 export function sortRows(rows: string[][], headers: string[], keys: SortKey[]): string[][] {
   if (keys.length === 0) return rows.slice();
 
@@ -99,42 +170,18 @@ export function sortRows(rows: string[][], headers: string[], keys: SortKey[]): 
   const activeKeys = keys
     .map((key) => ({ direction: key.direction, columnIndex: columnIndex.get(key.column) }))
     .filter((k): k is { direction: SortDirection; columnIndex: number } => k.columnIndex !== undefined);
+  if (activeKeys.length === 0) return rows.slice();
 
   // Precompute every active column's sort key for every row exactly once,
   // up front — the comparator below only ever reads these, never
-  // re-parses a cell. Also resolve each text value's collation rank once
-  // per distinct value in that column (see ResolvedCellSortKey) rather
-  // than re-running the collator on every comparison during the sort.
-  const keyMatrices = activeKeys.map(({ direction, columnIndex: ci }) => {
-    const cells = rows.map((row) => cellSortKey(row[ci] ?? "")) as ResolvedCellSortKey[];
-    const distinctText = new Set<string>();
-    for (const k of cells) if (k.kind === "text") distinctText.add(k.text);
-    const sortedText = Array.from(distinctText).sort((a, b) => collator.compare(a, b));
-    // Values the collator considers equal (e.g. "a" and "A") share a rank,
-    // so they tie and fall through to later keys / original row order.
-    const rankOf = new Map<string, number>();
-    let rank = 0;
-    sortedText.forEach((text, i) => {
-      if (i > 0 && collator.compare(sortedText[i - 1], text) !== 0) rank++;
-      rankOf.set(text, rank);
-    });
-    // Mutate in place (these cell-key objects were just freshly allocated
-    // above and aren't shared with anything else) rather than spreading
-    // into a second array of objects — halves the allocation for large
-    // datasets.
-    for (const k of cells) k.rank = k.kind === "text" ? (rankOf.get(k.text) as number) : 0;
-    return { direction, cells };
-  });
+  // re-parses a cell.
+  const sortColumns = activeKeys.map(({ direction, columnIndex: ci }) => ({
+    direction,
+    keys: buildColumnSortKeys(rows, ci),
+  }));
 
-  const order = rows.map((_, i) => i);
-  order.sort((x, y) => {
-    for (const { direction, cells } of keyMatrices) {
-      const cmp = compareResolvedCellSortKeys(cells[x], cells[y], direction);
-      if (cmp !== 0) return cmp;
-    }
-    return x - y;
-  });
-
+  const ids = rows.map((_, i) => i);
+  const order = sortRowIdsByCachedKeys(ids, sortColumns);
   return order.map((i) => rows[i]);
 }
 
