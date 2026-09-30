@@ -22,7 +22,7 @@ function parseNumeric(value: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function cellMatches(cell: string, rule: FilterRule): boolean {
+function cellMatches(cell: string, rule: FilterRule, re: RegExp | null): boolean {
   switch (rule.operator) {
     case "isEmpty":
       return cell.trim() === "";
@@ -44,14 +44,8 @@ function cellMatches(cell: string, rule: FilterRule): boolean {
       }
       break;
     }
-    case "regex": {
-      try {
-        const re = new RegExp(rule.value, rule.caseSensitive ? "" : "i");
-        return re.test(cell);
-      } catch {
-        return false;
-      }
-    }
+    case "regex":
+      return re !== null && re.test(cell);
     case "gt":
     case "lt":
     case "gte":
@@ -75,13 +69,21 @@ function cellMatches(cell: string, rule: FilterRule): boolean {
   return false;
 }
 
-function ruleMatchesRow(row: string[], headers: string[], rule: FilterRule): boolean {
-  if (rule.column === null) {
-    return row.some((cell) => cellMatches(cell, rule));
-  }
-  const idx = headers.indexOf(rule.column);
-  if (idx === -1) return false;
-  return cellMatches(row[idx] ?? "", rule);
+interface CompiledRule {
+  rule: FilterRule;
+  columnIndex: number | null;
+  re: RegExp | null;
+}
+
+function compileRule(rule: FilterRule, headers: string[]): CompiledRule {
+  const re = rule.operator === "regex" ? new RegExp(rule.value, rule.caseSensitive ? "" : "i") : null;
+  return { rule, columnIndex: rule.column === null ? null : headers.indexOf(rule.column), re };
+}
+
+function ruleMatchesRow(row: string[], c: CompiledRule): boolean {
+  if (c.columnIndex === null) return row.some((cell) => cellMatches(cell, c.rule, c.re));
+  if (c.columnIndex === -1) return false;
+  return cellMatches(row[c.columnIndex] ?? "", c.rule, c.re);
 }
 
 export function applyFilters(
@@ -90,17 +92,17 @@ export function applyFilters(
   quickSearch: string,
   rules: FilterRule[],
 ): string[][] {
-  const activeRules = rules.filter((r) => r.enabled && isValidRule(r));
+  const activeRules = rules.filter((r) => r.enabled && isValidRule(r)).map((r) => compileRule(r, headers));
   const search = quickSearch.trim().toLowerCase();
 
   return rows.filter((row) => {
     if (search !== "" && !row.some((cell) => cell.toLowerCase().includes(search))) {
       return false;
     }
-    for (const rule of activeRules) {
-      const matched = ruleMatchesRow(row, headers, rule);
-      if (rule.mode === "include" && !matched) return false;
-      if (rule.mode === "exclude" && matched) return false;
+    for (const c of activeRules) {
+      const matched = ruleMatchesRow(row, c);
+      if (c.rule.mode === "include" && !matched) return false;
+      if (c.rule.mode === "exclude" && matched) return false;
     }
     return true;
   });

@@ -17,7 +17,7 @@ A read-only table viewer for CSV/TSV files in VS Code and its forks (Cursor, Win
 
 - Right-click a `.csv`/`.tsv`/`.tab` file in the Explorer and choose **Open in CSV Viewer**.
 - Or use the icon in the editor title bar, or the **Open in CSV Viewer** command from the Command Palette.
-- The text editor stays the default; CSV Viewer is offered as an alternate editor. To make it the default for these extensions, set `csvViewer.openByDefault` to `true`, or configure `workbench.editorAssociations` yourself (e.g. `"*.csv": "csvViewer.table"`).
+- The text editor stays the default; CSV Viewer is offered as an alternate editor. To make it the default for these extensions, configure `workbench.editorAssociations` (e.g. `"*.csv": "csvViewer.table"`).
 - From inside the viewer, use **Open as Text** to switch back to the plain text editor for the same file.
 
 ## Settings
@@ -25,7 +25,6 @@ A read-only table viewer for CSV/TSV files in VS Code and its forks (Cursor, Win
 | Setting                          | Default | Description                                                                 |
 | --------------------------------- | ------- | ----------------------------------------------------------------------------- |
 | `csvViewer.defaultTableColumns`   | `8`     | Number of leading columns shown in the table by default on first open.       |
-| `csvViewer.openByDefault`         | `false` | Open `.csv`/`.tsv`/`.tab` files in CSV Viewer instead of the text editor.     |
 
 ## Installing from a `.vsix`
 

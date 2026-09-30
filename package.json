@@ -38,9 +38,15 @@
         "viewType": "csvViewer.table",
         "displayName": "CSV Viewer",
         "selector": [
-          { "filenamePattern": "*.csv" },
-          { "filenamePattern": "*.tsv" },
-          { "filenamePattern": "*.tab" }
+          {
+            "filenamePattern": "*.csv"
+          },
+          {
+            "filenamePattern": "*.tsv"
+          },
+          {
+            "filenamePattern": "*.tab"
+          }
         ],
         "priority": "option"
       }
@@ -79,11 +85,6 @@
           "default": 8,
           "minimum": 0,
           "description": "Number of leading columns shown in the table by default when a file is first opened. Remaining columns start as detail-only."
-        },
-        "csvViewer.openByDefault": {
-          "type": "boolean",
-          "default": false,
-          "description": "Open .csv/.tsv/.tab files in CSV Viewer by default instead of the text editor. You can also set this per-extension with the workbench.editorAssociations setting."
         }
       }
     }

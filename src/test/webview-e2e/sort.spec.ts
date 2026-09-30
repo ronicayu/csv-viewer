@@ -46,3 +46,18 @@ test("shift+click adds a secondary sort key with a priority indicator", async ({
   // city asc, age asc as tiebreak: LA(25,35) < NYC(30,40) < SF(28)
   expect(await firstColumnValues(page, "name")).toEqual(["Bob", "Charlie", "Alice", "Eve", "Dana"]);
 });
+
+test("Sort by… dropdown sorts a column and the direction button flips it", async ({ page }) => {
+  await page.locator("#sort-by-select").selectOption("age");
+  expect(await firstColumnValues(page, "age")).toEqual(["25", "28", "30", "35", "40"]);
+
+  await page.locator("#sort-dir-btn").click();
+  expect(await firstColumnValues(page, "age")).toEqual(["40", "35", "30", "28", "25"]);
+  await expect(page.locator("#sort-dir-btn")).toHaveText("▼");
+});
+
+test("Sort by… dropdown follows header clicks", async ({ page }) => {
+  await page.locator("th", { hasText: "city" }).click();
+  await expect(page.locator("#sort-by-select")).toHaveValue("city");
+  await expect(page.locator("#sort-dir-btn")).toBeVisible();
+});

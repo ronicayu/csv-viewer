@@ -4,6 +4,8 @@
 
 import type { SortDirection, SortKey } from "./types";
 
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 function parseNumeric(value: string): number | null {
   const trimmed = value.trim();
   if (trimmed === "") return null;
@@ -26,7 +28,7 @@ function compareCells(a: string, b: string, direction: SortDirection): number {
   const aNum = parseNumeric(a);
   const bNum = parseNumeric(b);
   const cmp =
-    aNum !== null && bNum !== null ? aNum - bNum : a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+    aNum !== null && bNum !== null ? aNum - bNum : collator.compare(a, b);
 
   return direction === "desc" ? -cmp : cmp;
 }

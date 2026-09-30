@@ -47,3 +47,49 @@ test("quick search filters across all columns and debounces, then posts saveStat
   const saved = await awaitPosted(page, "saveState");
   expect((saved.state as { quickSearch: string }).quickSearch).toBe("la");
 });
+
+test("the invalid-regex message appears while typing and clears once the pattern is valid", async ({ page }) => {
+  await page.locator("#filters-btn").click();
+  await page.locator("#add-rule-btn").click();
+
+  const rule = page.locator(".rule-row").first();
+  await rule.locator("select").nth(1).selectOption("regex");
+  await rule.locator('input[type="text"]').fill("(bad");
+  await expect(rule.locator(".rule-error-text")).toBeVisible();
+
+  await rule.locator('input[type="text"]').fill("(ok)");
+  await expect(rule.locator(".rule-error-text")).toBeHidden();
+});
+
+test("a rule added after reloading persisted rules gets a distinct id", async ({ page }) => {
+  const persisted = {
+    id: "rule-1",
+    column: "city",
+    operator: "equals" as const,
+    value: "LA",
+    mode: "exclude" as const,
+    caseSensitive: false,
+    enabled: true,
+  };
+  await page.evaluate(
+    (msg) => window.postMessage(msg, "*"),
+    {
+      type: "load",
+      fileKey: "file:///people.csv",
+      headers: smallFixture.headers,
+      rows: smallFixture.rows,
+      state: defaultViewState({ filterRules: [persisted] }),
+      defaultTableColumns: 4,
+    },
+  );
+  await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 5 rows");
+
+  await page.locator("#filters-btn").click();
+  await page.locator("#add-rule-btn").click();
+  await expect(page.locator(".rule-row")).toHaveCount(2);
+
+  // Removing the new rule must leave the persisted one in place.
+  await page.locator(".rule-row").nth(1).locator(".remove-rule-btn").click();
+  await expect(page.locator(".rule-row")).toHaveCount(1);
+  await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 5 rows");
+});

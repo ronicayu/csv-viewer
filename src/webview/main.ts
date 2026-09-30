@@ -36,7 +36,6 @@ interface AppState {
 }
 
 let state: AppState | null = null;
-let nextRuleId = 1;
 let searchDebounceHandle: number | undefined;
 
 // ---- DOM skeleton -----------------------------------------------------
@@ -52,6 +51,7 @@ app.innerHTML = `
     <label class="sort-by-label">Sort by…
       <select id="sort-by-select" aria-label="Sort by column"></select>
     </label>
+    <button id="sort-dir-btn" type="button" aria-label="Toggle sort direction" hidden>▲</button>
     <label class="header-toggle-label">
       <input id="first-row-header" type="checkbox" checked />
       First row is header
@@ -86,6 +86,7 @@ const filtersBtn = document.getElementById("filters-btn") as HTMLButtonElement;
 const expandAllBtn = document.getElementById("expand-all-btn") as HTMLButtonElement;
 const collapseAllBtn = document.getElementById("collapse-all-btn") as HTMLButtonElement;
 const sortBySelect = document.getElementById("sort-by-select") as HTMLSelectElement;
+const sortDirBtn = document.getElementById("sort-dir-btn") as HTMLButtonElement;
 const firstRowHeaderCheckbox = document.getElementById("first-row-header") as HTMLInputElement;
 const openAsTextBtn = document.getElementById("open-as-text-btn") as HTMLButtonElement;
 const columnsPopover = document.getElementById("columns-popover") as HTMLDivElement;
@@ -133,9 +134,12 @@ function onLoad(message: HostToWebviewMessage): void {
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
   quickSearchInput.value = state.view.quickSearch;
   renderColumnsPopover();
-  renderSortBySelect();
   renderFilterPanel();
   recomputeAndRender();
+}
+
+function newRuleId(): string {
+  return `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function saveState(): void {
@@ -157,6 +161,7 @@ function recomputeAndRender(): void {
   state.renderedCount = Math.min(CHUNK_SIZE, state.filtered.length);
 
   renderTableHead();
+  renderSortBySelect();
   renderTableBodyFresh();
   renderStatusBar();
 }
@@ -383,12 +388,23 @@ function renderSortBySelect(): void {
 
   const primary = state.view.sortKeys[0];
   sortBySelect.value = primary ? primary.column : "";
+  sortDirBtn.hidden = !primary;
+  sortDirBtn.textContent = primary?.direction === "desc" ? "▼" : "▲";
+  sortDirBtn.title = primary?.direction === "desc" ? "Descending" : "Ascending";
 }
 
 sortBySelect.addEventListener("change", () => {
   if (!state) return;
   const column = sortBySelect.value;
   state.view.sortKeys = column === "" ? [] : [{ column, direction: "asc" }];
+  recomputeAndRender();
+  saveState();
+});
+
+sortDirBtn.addEventListener("click", () => {
+  if (!state || state.view.sortKeys.length === 0) return;
+  const [primary, ...rest] = state.view.sortKeys;
+  state.view.sortKeys = [{ ...primary, direction: primary.direction === "asc" ? "desc" : "asc" }, ...rest];
   recomputeAndRender();
   saveState();
 });
@@ -467,7 +483,7 @@ filtersBtn.addEventListener("click", () => {
 addRuleBtn.addEventListener("click", () => {
   if (!state) return;
   const rule: FilterRule = {
-    id: `rule-${nextRuleId++}`,
+    id: newRuleId(),
     column: null,
     operator: "contains",
     value: "",
@@ -490,7 +506,6 @@ function renderFilterPanel(): void {
 function buildRuleRow(rule: FilterRule): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "rule-row";
-  if (!isValidRule(rule)) row.classList.add("rule-error");
 
   const enabledCheckbox = document.createElement("input");
   enabledCheckbox.type = "checkbox";
@@ -533,7 +548,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   operatorSelect.addEventListener("change", () => {
     rule.operator = operatorSelect.value as FilterOperator;
     valueInput.hidden = rule.operator === "isEmpty";
-    row.classList.toggle("rule-error", !isValidRule(rule));
+    syncRuleError();
     recomputeAndRender();
     saveState();
   });
@@ -546,7 +561,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   valueInput.placeholder = "value";
   valueInput.addEventListener("input", () => {
     rule.value = valueInput.value;
-    row.classList.toggle("rule-error", !isValidRule(rule));
+    syncRuleError();
     recomputeAndRender();
     saveState();
   });
@@ -593,12 +608,17 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   });
   row.appendChild(removeBtn);
 
-  if (!isValidRule(rule)) {
-    const error = document.createElement("span");
-    error.className = "rule-error-text";
-    error.textContent = "Invalid regex — rule ignored";
-    row.appendChild(error);
+  const error = document.createElement("span");
+  error.className = "rule-error-text";
+  error.textContent = "Invalid regex — rule ignored";
+  row.appendChild(error);
+
+  function syncRuleError(): void {
+    const invalid = !isValidRule(rule);
+    row.classList.toggle("rule-error", invalid);
+    error.hidden = !invalid;
   }
+  syncRuleError();
 
   return row;
 }
@@ -629,7 +649,7 @@ function onCellContextMenu(ev: MouseEvent, column: string, value: string): void 
 function addQuickFilter(column: string, value: string, mode: "include" | "exclude"): void {
   if (!state) return;
   const rule: FilterRule = {
-    id: `rule-${nextRuleId++}`,
+    id: newRuleId(),
     column,
     operator: "equals",
     value,
