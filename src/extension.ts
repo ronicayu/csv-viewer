@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { parseCsv } from "./core/csvParse";
 import { defaultVisibility, reconcileVisibility } from "./core/columns";
+import { normalizePageSize } from "./core/paging";
 import { createDefaultViewState, type HostToWebviewMessage, type ViewState, type WebviewToHostMessage } from "./core/types";
 
 const VIEW_TYPE = "csvViewer.table";
@@ -140,7 +141,13 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
 
   private loadOrCreateState(fileKey: string, document: vscode.TextDocument): ViewState {
     const stored = this.context.workspaceState.get<ViewState>(STATE_PREFIX + fileKey);
-    if (stored) return stored;
+    if (stored) {
+      // Backward compatibility: state saved before pagination existed has no
+      // pageSize (or, in principle, a corrupted one) — normalize it rather
+      // than shipping `undefined` down to the webview.
+      stored.pageSize = normalizePageSize(stored.pageSize);
+      return stored;
+    }
 
     const parsed = parseCsv(document.getText(), { delimiter: this.delimiterFor(document.uri), firstRowIsHeader: true });
     const state = createDefaultViewState();

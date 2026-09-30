@@ -50,6 +50,10 @@ export interface ViewState {
   quickSearch: string;
   sortKeys: SortKey[];
   firstRowIsHeader: boolean;
+  /** Rows per page. Persisted; the current page number is not. A
+   * missing/invalid value (state saved before pagination existed) is
+   * normalized to 100 via core/paging's normalizePageSize. */
+  pageSize: number;
 }
 
 export function createDefaultViewState(): ViewState {
@@ -59,6 +63,7 @@ export function createDefaultViewState(): ViewState {
     quickSearch: "",
     sortKeys: [],
     firstRowIsHeader: true,
+    pageSize: 100,
   };
 }
 

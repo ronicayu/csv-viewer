@@ -37,6 +37,15 @@ button:hover {
   background: var(--vscode-button-hoverBackground);
 }
 
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button:disabled:hover {
+  background: var(--vscode-button-background);
+}
+
 input,
 select {
   color: var(--vscode-input-foreground);
@@ -251,6 +260,38 @@ tr.detail-row td {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.pager-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-descriptionForeground);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.pager-page-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#pager-page-input {
+  width: 3.5em;
+  text-align: right;
+}
+
+.pager-row-range {
+  margin-left: auto;
+}
+
+.pager-size-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .context-menu {

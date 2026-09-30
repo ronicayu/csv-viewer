@@ -1,8 +1,8 @@
 {
   "name": "csv-viewer",
   "displayName": "CSV Viewer",
-  "description": "Read-only table viewer for CSV/TSV files, with column visibility, filtering, and sorting.",
-  "version": "0.1.0",
+  "description": "Read-only table viewer for CSV/TSV files, with column visibility, filtering, sorting, and pagination.",
+  "version": "0.2.0",
   "publisher": "ronica",
   "license": "MIT",
   "repository": {

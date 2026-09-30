@@ -65,6 +65,7 @@ export function defaultViewState(overrides: Partial<ViewState> = {}): ViewState 
     quickSearch: "",
     sortKeys: [],
     firstRowIsHeader: true,
+    pageSize: 100,
     ...overrides,
   };
 }

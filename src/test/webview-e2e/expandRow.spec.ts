@@ -32,7 +32,7 @@ test("clicking a row expands it and shows the detail-only fields", async ({ page
   await expect(firstDetail).toBeHidden();
 });
 
-test("Expand all / Collapse all toggle every visible row's detail panel", async ({ page }) => {
+test("Expand page / Collapse page toggle every visible row's detail panel", async ({ page }) => {
   await page.locator("#expand-all-btn").click();
   const details = page.locator("tr.detail-row");
   await expect(details).toHaveCount(smallFixture.rows.length);

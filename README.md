@@ -9,9 +9,9 @@ A read-only table viewer for CSV/TSV files in VS Code and its forks (Cursor, Win
 - **Table + detail view.** Each column is either shown in the table or moved to a per-row detail panel. Click a row's chevron (or the row itself) to expand it and see the detail-only fields as key/value pairs. Use the **Columns** button to choose which columns are in the table, with a search box and Show all / Hide all.
 - **Filtering.** A quick search box filters across every column. The **Filters** panel adds rules per column (or "any column") with operators — contains, equals, starts with, ends with, regex, is empty, and numeric `>`, `<`, `>=`, `<=` — each rule set to Include or Exclude, with case sensitivity and an enable checkbox. Right-click a cell to quick-add an include/exclude rule for that value.
 - **Sorting.** Click a column header to cycle ascending → descending → none. Shift+click adds a secondary sort key (shown with a priority number). Use the **Sort by…** dropdown to sort by a detail-only column that has no visible header.
-- **Fast on large files.** Rows render in chunks and load more as you scroll, so the view stays responsive even at 100k+ rows. Files over 50 MB show a warning but still open.
-- **Live reload.** Editing the file on disk or in another editor refreshes the view automatically.
-- Column visibility, filter rules, and sort order are remembered per file.
+- **Pagination.** A pager bar below the table — always visible, independent of table scroll — has First/Prev/Next/Last buttons, a "Page [ N ] of M" jump box, a "Rows X–Y of Z" range, and a page size selector (25/50/100/200/500, default 100). Quick search, filter, and sort changes jump back to page 1; changing column visibility keeps your place. Alt+→ / Alt+← move to the next/previous page. Rows render only the current page, so the view stays responsive even at 100k+ rows. Files over 50 MB show a warning but still open.
+- **Live reload.** Editing the file on disk or in another editor refreshes the view automatically, keeping your current page.
+- Column visibility, filter rules, sort order, and page size are remembered per file.
 
 ## Opening a file
 
@@ -28,11 +28,11 @@ A read-only table viewer for CSV/TSV files in VS Code and its forks (Cursor, Win
 
 ## Installing from a `.vsix`
 
-Build the package with `npm run package`, which produces `csv-viewer-0.1.0.vsix`.
+Build the package with `npm run package`, which produces `csv-viewer-0.2.0.vsix`.
 
-**VS Code:** Extensions view → `···` menu → **Install from VSIX…** → select the file. Or from the command line: `code --install-extension csv-viewer-0.1.0.vsix`.
+**VS Code:** Extensions view → `···` menu → **Install from VSIX…** → select the file. Or from the command line: `code --install-extension csv-viewer-0.2.0.vsix`.
 
-**Cursor:** Extensions view → `···` menu → **Install from VSIX…** → select the file. Or from the command line: `cursor --install-extension csv-viewer-0.1.0.vsix`.
+**Cursor:** Extensions view → `···` menu → **Install from VSIX…** → select the file. Or from the command line: `cursor --install-extension csv-viewer-0.2.0.vsix`.
 
 ## Development
 

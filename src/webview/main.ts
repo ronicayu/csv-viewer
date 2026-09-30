@@ -1,10 +1,11 @@
 // CSV Viewer webview client. Vanilla TypeScript + DOM, no framework and no
 // runtime dependencies. Receives parsed rows from the extension host and
-// owns filtering, sorting, column visibility, and chunked rendering.
+// owns filtering, sorting, column visibility, and pagination.
 
 import { applyFilters, isValidRule } from "../core/filter";
 import { sortRows, cycleSortForColumn } from "../core/sort";
 import { detailFieldsFor, reconcileVisibility, visibleColumns } from "../core/columns";
+import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import type { FilterOperator, FilterRule, HostToWebviewMessage, ViewState, WebviewToHostMessage } from "../core/types";
 
 declare function acquireVsCodeApi(): {
@@ -15,8 +16,6 @@ declare function acquireVsCodeApi(): {
 
 const vscode = acquireVsCodeApi();
 
-const CHUNK_SIZE = 200;
-const SCROLL_THRESHOLD_PX = 300;
 const SEARCH_DEBOUNCE_MS = 150;
 
 interface RowWithId {
@@ -32,7 +31,8 @@ interface AppState {
   defaultTableColumns: number;
   expanded: Set<number>;
   filtered: RowWithId[];
-  renderedCount: number;
+  /** 1-based. Not persisted — only pageSize is. */
+  page: number;
 }
 
 let state: AppState | null = null;
@@ -46,8 +46,8 @@ app.innerHTML = `
     <input id="quick-search" type="search" placeholder="Search all columns…" aria-label="Search all columns" />
     <button id="columns-btn" type="button">Columns</button>
     <button id="filters-btn" type="button">Filters</button>
-    <button id="expand-all-btn" type="button">Expand all</button>
-    <button id="collapse-all-btn" type="button">Collapse all</button>
+    <button id="expand-all-btn" type="button">Expand page</button>
+    <button id="collapse-all-btn" type="button">Collapse page</button>
     <label class="sort-by-label">Sort by…
       <select id="sort-by-select" aria-label="Sort by column"></select>
     </label>
@@ -77,6 +77,20 @@ app.innerHTML = `
       <tbody id="table-body"></tbody>
     </table>
   </div>
+  <div id="pager-bar" class="pager-bar">
+    <button id="pager-first-btn" type="button" title="First page">«</button>
+    <button id="pager-prev-btn" type="button" title="Previous page (Alt+←)">‹</button>
+    <span class="pager-page-label">Page
+      <input id="pager-page-input" type="number" min="1" step="1" aria-label="Page number" />
+      of <span id="pager-page-count">1</span>
+    </span>
+    <button id="pager-next-btn" type="button" title="Next page (Alt+→)">›</button>
+    <button id="pager-last-btn" type="button" title="Last page">»</button>
+    <span id="pager-row-range" class="pager-row-range"></span>
+    <label class="pager-size-label">Rows per page
+      <select id="pager-page-size-select" aria-label="Rows per page"></select>
+    </label>
+  </div>
   <div id="context-menu" class="context-menu" hidden></div>
 `;
 
@@ -102,6 +116,21 @@ const tableScroll = document.getElementById("table-scroll") as HTMLDivElement;
 const tableHead = document.getElementById("table-head") as HTMLTableSectionElement;
 const tableBody = document.getElementById("table-body") as HTMLTableSectionElement;
 const contextMenu = document.getElementById("context-menu") as HTMLDivElement;
+const pagerFirstBtn = document.getElementById("pager-first-btn") as HTMLButtonElement;
+const pagerPrevBtn = document.getElementById("pager-prev-btn") as HTMLButtonElement;
+const pagerNextBtn = document.getElementById("pager-next-btn") as HTMLButtonElement;
+const pagerLastBtn = document.getElementById("pager-last-btn") as HTMLButtonElement;
+const pagerPageInput = document.getElementById("pager-page-input") as HTMLInputElement;
+const pagerPageCount = document.getElementById("pager-page-count") as HTMLSpanElement;
+const pagerRowRange = document.getElementById("pager-row-range") as HTMLSpanElement;
+const pagerPageSizeSelect = document.getElementById("pager-page-size-select") as HTMLSelectElement;
+
+for (const size of PAGE_SIZES) {
+  const option = document.createElement("option");
+  option.value = String(size);
+  option.textContent = String(size);
+  pagerPageSizeSelect.appendChild(option);
+}
 
 // ---- Messaging ----------------------------------------------------------
 
@@ -115,12 +144,20 @@ vscode.postMessage({ type: "ready" });
 function onLoad(message: HostToWebviewMessage): void {
   const rows: RowWithId[] = message.rows.map((cells, id) => ({ id, cells }));
   const view = message.state;
-  // Defense in depth: the host already reconciles column visibility before
-  // sending, but re-applying the same pure rule here means a header that's
-  // missing from the map (a first load, or a test pushing a bare message)
-  // still gets the default-N-columns rule instead of silently showing
-  // everything.
+  // Defense in depth: the host already reconciles column visibility and
+  // normalizes pageSize before sending, but re-applying the same pure rules
+  // here means a bare message (e.g. a test pushing one directly) still gets
+  // sane defaults instead of silently misbehaving.
   view.columnVisibility = reconcileVisibility(message.headers, view.columnVisibility, message.defaultTableColumns);
+  view.pageSize = normalizePageSize(view.pageSize);
+
+  // A `load` for the same file the webview is already showing is a live
+  // reload (the document changed on disk, or "first row is header" was
+  // toggled and the host re-parsed) — keep the current page instead of
+  // jumping back to page 1. It gets clamped to the new page count below.
+  const isReload = state !== null && state.fileKey === message.fileKey;
+  const previousPage = isReload ? state!.page : 1;
+
   state = {
     fileKey: message.fileKey,
     headers: message.headers,
@@ -129,7 +166,7 @@ function onLoad(message: HostToWebviewMessage): void {
     defaultTableColumns: message.defaultTableColumns,
     expanded: new Set<number>(),
     filtered: [],
-    renderedCount: 0,
+    page: previousPage,
   };
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
   quickSearchInput.value = state.view.quickSearch;
@@ -149,7 +186,14 @@ function saveState(): void {
 
 // ---- Derived rows (filter + sort while preserving row identity) --------
 
-function recomputeAndRender(): void {
+/**
+ * Re-derives `state.filtered` from the raw rows plus quick search/filter
+ * rules/sort, then reconciles the current page against the (possibly
+ * changed) result. Quick search, filter rule, and sort changes pass
+ * `resetPage: true` so the page goes back to 1; everything else (column
+ * visibility, a live reload) keeps the current page, clamped in range.
+ */
+function recomputeAndRender(options: { resetPage?: boolean } = {}): void {
   if (!state) return;
   const idByCells = new Map<string[], number>();
   for (const row of state.rows) idByCells.set(row.cells, row.id);
@@ -158,12 +202,13 @@ function recomputeAndRender(): void {
   const sortedCells = sortRows(filteredCells, state.headers, state.view.sortKeys);
 
   state.filtered = sortedCells.map((cells) => ({ id: idByCells.get(cells)!, cells }));
-  state.renderedCount = Math.min(CHUNK_SIZE, state.filtered.length);
+  state.page = options.resetPage ? 1 : clampPage(state.page, state.filtered.length, state.view.pageSize);
 
   renderTableHead();
   renderSortBySelect();
-  renderTableBodyFresh();
+  renderTableBody();
   renderStatusBar();
+  renderPagerBar();
 }
 
 // ---- Table head ----------------------------------------------------------
@@ -214,21 +259,17 @@ function renderTableHead(): void {
 function onHeaderClick(column: string, shiftKey: boolean): void {
   if (!state) return;
   state.view.sortKeys = cycleSortForColumn(state.view.sortKeys, column, shiftKey);
-  recomputeAndRender();
+  recomputeAndRender({ resetPage: true });
   saveState();
 }
 
-// ---- Table body (chunked rendering) --------------------------------------
+// ---- Table body (one page at a time) --------------------------------------
 
-function renderTableBodyFresh(): void {
+function renderTableBody(): void {
   if (!state) return;
   tableBody.innerHTML = "";
-  appendRows(0, state.renderedCount);
-}
-
-function appendRows(start: number, end: number): void {
-  if (!state) return;
   const columns = visibleColumns(state.headers, state.view.columnVisibility);
+  const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
   const fragment = document.createDocumentFragment();
 
   for (let i = start; i < end; i++) {
@@ -309,23 +350,95 @@ function toggleExpanded(rowId: number): void {
   if (detailTr) detailTr.hidden = !state.expanded.has(rowId);
 }
 
-tableScroll.addEventListener("scroll", () => {
-  if (!state) return;
-  const { scrollTop, scrollHeight, clientHeight } = tableScroll;
-  if (scrollHeight - (scrollTop + clientHeight) > SCROLL_THRESHOLD_PX) return;
-  if (state.renderedCount >= state.filtered.length) return;
-
-  const nextEnd = Math.min(state.renderedCount + CHUNK_SIZE, state.filtered.length);
-  appendRows(state.renderedCount, nextEnd);
-  state.renderedCount = nextEnd;
-});
-
 // ---- Status bar ----------------------------------------------------------
 
 function renderStatusBar(): void {
   if (!state) return;
   statusBar.textContent = `Showing ${state.filtered.length} of ${state.rows.length} rows`;
 }
+
+// ---- Pager bar ----------------------------------------------------------
+
+function renderPagerBar(): void {
+  if (!state) return;
+  const total = state.filtered.length;
+  const size = state.view.pageSize;
+  const count = pageCount(total, size);
+  const { start, end } = pageSlice(total, state.page, size);
+
+  pagerPageInput.value = String(state.page);
+  pagerPageInput.max = String(count);
+  pagerPageCount.textContent = String(count);
+  pagerPageSizeSelect.value = String(size);
+  pagerRowRange.textContent = total === 0 ? "No matching rows" : `Rows ${start + 1}–${end} of ${total}`;
+
+  const noRows = total === 0;
+  pagerFirstBtn.disabled = noRows || state.page <= 1;
+  pagerPrevBtn.disabled = noRows || state.page <= 1;
+  pagerNextBtn.disabled = noRows || state.page >= count;
+  pagerLastBtn.disabled = noRows || state.page >= count;
+  pagerPageInput.disabled = noRows;
+}
+
+/** Jump to `page` (clamped in range), re-rendering only if it actually
+ * changes, and scroll the table area back to top. */
+function goToPage(page: number): void {
+  if (!state) return;
+  const clamped = clampPage(page, state.filtered.length, state.view.pageSize);
+  if (clamped === state.page) {
+    renderPagerBar(); // still resync e.g. the page-number input's text
+    return;
+  }
+  state.page = clamped;
+  renderTableBody();
+  renderPagerBar();
+  tableScroll.scrollTop = 0;
+}
+
+pagerFirstBtn.addEventListener("click", () => goToPage(1));
+pagerPrevBtn.addEventListener("click", () => {
+  if (state) goToPage(state.page - 1);
+});
+pagerNextBtn.addEventListener("click", () => {
+  if (state) goToPage(state.page + 1);
+});
+pagerLastBtn.addEventListener("click", () => {
+  if (state) goToPage(pageCount(state.filtered.length, state.view.pageSize));
+});
+
+function commitPageInput(): void {
+  if (!state) return;
+  const raw = pagerPageInput.value.trim();
+  const parsed = raw === "" ? NaN : Number(raw);
+  if (!Number.isFinite(parsed)) {
+    renderPagerBar(); // invalid input: restore the current page
+    return;
+  }
+  goToPage(parsed);
+}
+
+pagerPageInput.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    commitPageInput();
+  }
+});
+pagerPageInput.addEventListener("blur", commitPageInput);
+
+pagerPageSizeSelect.addEventListener("change", () => {
+  if (!state) return;
+  const oldSize = state.view.pageSize;
+  const { start: firstRowIndex } = pageSlice(state.filtered.length, state.page, oldSize);
+  const newSize = normalizePageSize(Number(pagerPageSizeSelect.value));
+
+  state.view.pageSize = newSize;
+  state.page = clampPage(pageForRow(firstRowIndex, newSize), state.filtered.length, newSize);
+
+  renderTableBody();
+  renderPagerBar();
+  tableScroll.scrollTop = 0;
+  saveState();
+});
 
 // ---- Quick search ----------------------------------------------------------
 
@@ -336,7 +449,7 @@ quickSearchInput.addEventListener("input", () => {
   searchDebounceHandle = window.setTimeout(() => {
     if (!state) return;
     state.view.quickSearch = value;
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   }, SEARCH_DEBOUNCE_MS);
 });
@@ -355,18 +468,20 @@ openAsTextBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "openAsText" });
 });
 
-// ---- Expand all / collapse all ----------------------------------------------------------
+// ---- Expand page / collapse page (current page only) ----------------------
 
 expandAllBtn.addEventListener("click", () => {
   if (!state) return;
-  for (const row of state.filtered) state.expanded.add(row.id);
-  renderTableBodyFresh();
+  const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
+  for (let i = start; i < end; i++) state.expanded.add(state.filtered[i].id);
+  renderTableBody();
 });
 
 collapseAllBtn.addEventListener("click", () => {
   if (!state) return;
-  state.expanded.clear();
-  renderTableBodyFresh();
+  const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
+  for (let i = start; i < end; i++) state.expanded.delete(state.filtered[i].id);
+  renderTableBody();
 });
 
 // ---- Sort by… dropdown (for detail-only columns, which have no header) ------
@@ -397,7 +512,7 @@ sortBySelect.addEventListener("change", () => {
   if (!state) return;
   const column = sortBySelect.value;
   state.view.sortKeys = column === "" ? [] : [{ column, direction: "asc" }];
-  recomputeAndRender();
+  recomputeAndRender({ resetPage: true });
   saveState();
 });
 
@@ -405,7 +520,7 @@ sortDirBtn.addEventListener("click", () => {
   if (!state || state.view.sortKeys.length === 0) return;
   const [primary, ...rest] = state.view.sortKeys;
   state.view.sortKeys = [{ ...primary, direction: primary.direction === "asc" ? "desc" : "asc" }, ...rest];
-  recomputeAndRender();
+  recomputeAndRender({ resetPage: true });
   saveState();
 });
 
@@ -431,7 +546,7 @@ function renderColumnsPopover(): void {
     checkbox.addEventListener("change", () => {
       if (!state) return;
       state.view.columnVisibility[header] = checkbox.checked;
-      recomputeAndRender();
+      recomputeAndRender(); // column visibility keeps the current page
       saveState();
     });
     label.appendChild(checkbox);
@@ -493,7 +608,7 @@ addRuleBtn.addEventListener("click", () => {
   };
   state.view.filterRules.push(rule);
   renderFilterPanel();
-  recomputeAndRender();
+  recomputeAndRender({ resetPage: true });
   saveState();
 });
 
@@ -513,7 +628,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   enabledCheckbox.title = "Enabled";
   enabledCheckbox.addEventListener("change", () => {
     rule.enabled = enabledCheckbox.checked;
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   });
   row.appendChild(enabledCheckbox);
@@ -532,7 +647,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   columnSelect.value = rule.column ?? "";
   columnSelect.addEventListener("change", () => {
     rule.column = columnSelect.value === "" ? null : columnSelect.value;
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   });
   row.appendChild(columnSelect);
@@ -549,7 +664,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     rule.operator = operatorSelect.value as FilterOperator;
     valueInput.hidden = rule.operator === "isEmpty";
     syncRuleError();
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   });
   row.appendChild(operatorSelect);
@@ -562,7 +677,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   valueInput.addEventListener("input", () => {
     rule.value = valueInput.value;
     syncRuleError();
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   });
   row.appendChild(valueInput);
@@ -573,7 +688,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   caseCheckbox.title = "Case-sensitive";
   caseCheckbox.addEventListener("change", () => {
     rule.caseSensitive = caseCheckbox.checked;
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   });
   const caseLabel = document.createElement("label");
@@ -589,7 +704,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   modeToggle.addEventListener("click", () => {
     rule.mode = rule.mode === "include" ? "exclude" : "include";
     modeToggle.textContent = rule.mode === "include" ? "Include" : "Exclude";
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   });
   row.appendChild(modeToggle);
@@ -603,7 +718,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     if (!state) return;
     state.view.filterRules = state.view.filterRules.filter((r) => r.id !== rule.id);
     renderFilterPanel();
-    recomputeAndRender();
+    recomputeAndRender({ resetPage: true });
     saveState();
   });
   row.appendChild(removeBtn);
@@ -661,7 +776,7 @@ function addQuickFilter(column: string, value: string, mode: "include" | "exclud
   contextMenu.hidden = true;
   renderFilterPanel();
   filterPanel.hidden = false;
-  recomputeAndRender();
+  recomputeAndRender({ resetPage: true });
   saveState();
 }
 
@@ -675,5 +790,17 @@ document.addEventListener("keydown", (ev) => {
     contextMenu.hidden = true;
     columnsPopover.hidden = true;
     filterPanel.hidden = true;
+    return;
+  }
+
+  // Alt+←/→ change pages, but only when focus isn't in a form control —
+  // otherwise this would steal the native cursor/selection behavior those
+  // keys have inside inputs, selects, and textareas.
+  if (ev.altKey && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) {
+    const tag = (ev.target as HTMLElement | null)?.tagName;
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+    if (!state) return;
+    ev.preventDefault();
+    goToPage(state.page + (ev.key === "ArrowRight" ? 1 : -1));
   }
 });
