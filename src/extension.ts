@@ -1,6 +1,11 @@
 import * as vscode from "vscode";
 import { normalizePageSize } from "./core/paging";
-import { createDefaultViewState, type HostToWebviewMessage, type ViewState, type WebviewToHostMessage } from "./core/types";
+import {
+  createDefaultViewState,
+  type HostToWebviewMessage,
+  type ViewState,
+  type WebviewToHostMessage,
+} from "./core/types";
 
 const VIEW_TYPE = "csvViewer.table";
 const STATE_PREFIX = "csvViewer.state:";
@@ -10,7 +15,34 @@ const LARGE_FILE_BYTES = 50 * 1024 * 1024;
  * every keystroke. */
 const CHANGE_DEBOUNCE_MS = 300;
 
-export function activate(context: vscode.ExtensionContext): void {
+// ---- BEGIN TEST HOOK (CSV_VIEWER_TEST_HOOKS) ------------------------------
+// Test-only instrumentation for src/test/integration. Completely inert
+// (zero extra state, zero extra work, activate() returns undefined as
+// normal) unless the extension host process has CSV_VIEWER_TEST_HOOKS=1 set
+// — which only the integration test runner does. Nothing here changes
+// production behavior for real users.
+const TEST_HOOKS_ENABLED = process.env.CSV_VIEWER_TEST_HOOKS === "1";
+/** fileKey (document.uri.toString()) -> live panel, for postToWebview(). */
+const testHookPanels = new Map<string, vscode.WebviewPanel>();
+/** fileKey -> every WebviewToHostMessage received so far, in order. */
+const testHookMessages = new Map<string, WebviewToHostMessage[]>();
+/** Every warning/error notification the extension has shown, in order. */
+const testHookNotifications: { level: "warning" | "error"; message: string }[] = [];
+
+export interface CsvViewerTestApi {
+  /** Messages received from the webview for a given document, in order. */
+  getMessages(fileKey: string): WebviewToHostMessage[];
+  /** Post a message directly into a given document's live webview,
+   * bypassing the UI. Returns false if no panel is open for that fileKey. */
+  postToWebview(fileKey: string, message: HostToWebviewMessage): boolean;
+  /** Warning/error messages shown via vscode.window.show*Message so far. */
+  getNotifications(): { level: "warning" | "error"; message: string }[];
+  /** Number of currently-live CSV Viewer panels (for disposal/leak checks). */
+  panelCount(): number;
+}
+// ---- END TEST HOOK setup ---------------------------------------------------
+
+export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | undefined {
   const provider = new CsvEditorProvider(context);
 
   context.subscriptions.push(
@@ -24,7 +56,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("csvViewer.open", async (uri?: vscode.Uri) => {
       const target = uri ?? vscode.window.activeTextEditor?.document.uri;
       if (!target) {
-        void vscode.window.showErrorMessage("CSV Viewer: no file to open.");
+        const msg = "CSV Viewer: no file to open.";
+        if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "error", message: msg });
+        void vscode.window.showErrorMessage(msg);
         return;
       }
       await vscode.commands.executeCommand("vscode.openWith", target, VIEW_TYPE);
@@ -38,6 +72,21 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.commands.executeCommand("vscode.openWith", uri, "default");
     }),
   );
+
+  if (TEST_HOOKS_ENABLED) {
+    return {
+      getMessages: (fileKey) => (testHookMessages.get(fileKey) ?? []).slice(),
+      postToWebview: (fileKey, message) => {
+        const panel = testHookPanels.get(fileKey);
+        if (!panel) return false;
+        void panel.webview.postMessage(message);
+        return true;
+      },
+      getNotifications: () => testHookNotifications.slice(),
+      panelCount: () => testHookPanels.size,
+    };
+  }
+  return undefined;
 }
 
 export function deactivate(): void {
@@ -70,14 +119,15 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
 
     const fileKey = document.uri.toString();
     CsvEditorProvider.activeUri = document.uri;
+    if (TEST_HOOKS_ENABLED) testHookPanels.set(fileKey, webviewPanel);
 
     // `document.getText().length` (UTF-16 code units) is a cheaper stand-in
     // for the file's byte size than `Buffer.byteLength(..., "utf8")` — good
     // enough for a "this might be slow" warning.
     if (document.getText().length > LARGE_FILE_BYTES) {
-      void vscode.window.showWarningMessage(
-        `CSV Viewer: "${basename(document.uri)}" is larger than 50 MB. Loading it may be slow.`,
-      );
+      const msg = `CSV Viewer: "${basename(document.uri)}" is larger than 50 MB. Loading it may be slow.`;
+      if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
+      void vscode.window.showWarningMessage(msg);
     }
 
     // Parsing now happens in the webview (see docs/spec.md): the host just
@@ -93,6 +143,7 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
         state,
         defaultTableColumns: this.defaultTableColumns(),
         defaultDelimiter: this.delimiterFor(document.uri) ?? "",
+        testHooks: TEST_HOOKS_ENABLED,
       };
       void webview.postMessage(message);
     };
@@ -112,6 +163,11 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
     });
 
     const messageSub = webview.onDidReceiveMessage((message: WebviewToHostMessage) => {
+      if (TEST_HOOKS_ENABLED) {
+        const arr = testHookMessages.get(fileKey) ?? [];
+        arr.push(message);
+        testHookMessages.set(fileKey, arr);
+      }
       switch (message.type) {
         case "ready":
           postLoad();
@@ -133,6 +189,7 @@ class CsvEditorProvider implements vscode.CustomTextEditorProvider {
       changeSub.dispose();
       viewStateSub.dispose();
       messageSub.dispose();
+      if (TEST_HOOKS_ENABLED) testHookPanels.delete(fileKey);
     });
   }
 
