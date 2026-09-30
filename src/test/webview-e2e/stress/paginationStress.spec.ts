@@ -3,7 +3,7 @@
 // on the last page, and filtering to 0 rows and back.
 
 import { expect, test } from "@playwright/test";
-import { bootAndLoad, defaultViewState } from "../harness";
+import { bootAndLoad, defaultViewState, pushLoad } from "../harness";
 import { trackConsoleErrors, wideFixture } from "./stressHelpers";
 
 const fixture = wideFixture(250, 4); // pageSize 100 -> pages of 100,100,50
@@ -126,4 +126,23 @@ test("filtering down to 0 rows disables every nav control, and clearing the filt
     await expect(page.locator(id)).toBeEnabled();
   }
   await expect(page.locator("tr.data-row")).toHaveCount(100);
+});
+
+test("a render landing while the user is typing a page number doesn't overwrite what they typed", async ({ page }) => {
+  // Regression: after clicking Next, the page result could land between
+  // fill() and Enter, resetting the box to the new page so Enter committed
+  // that instead. Deterministic version: type, then force a re-render.
+  const input = page.locator("#pager-page-input");
+  await input.fill("3");
+  await pushLoad(page, {
+    fileKey: "file:///pagestress.csv",
+    headers: fixture.headers,
+    rows: fixture.rows,
+    state: defaultViewState(),
+    defaultTableColumns: 4,
+  });
+  await expect(page.locator("#status-bar")).toHaveText("Showing 250 of 250 rows");
+  await expect(input).toHaveValue("3");
+  await input.press("Enter");
+  await expect(page.locator("#pager-row-range")).toHaveText("Rows 201–250 of 250");
 });

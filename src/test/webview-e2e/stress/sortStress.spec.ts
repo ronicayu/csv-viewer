@@ -19,7 +19,10 @@ test("rapid repeated clicks on the same header cycle asc/desc/none without desyn
 
   const header = page.locator("th", { hasText: "col_2" });
   // 9 rapid clicks, no waiting in between -> 9 mod 3 == 0 -> back to "none".
-  for (let i = 0; i < 9; i++) await header.click({ delay: 0, force: true });
+  // No `force`: the header row is rebuilt on every render, and a forced
+  // click can target the detached old <th>. Actionability checks still
+  // click as fast as the element is attached, without waiting for renders.
+  for (let i = 0; i < 9; i++) await header.click({ delay: 0 });
 
   await expect(header.locator(".sort-indicator")).toHaveCount(0);
   await expect(page.locator("#sort-by-select")).toHaveValue("");

@@ -901,6 +901,11 @@ function renderStatusBar(): void {
 
 // ---- Pager bar ----------------------------------------------------------
 
+/** True while the user has typed into the page-number box and not yet
+ * committed it (Enter/blur). Renders landing meanwhile must not overwrite
+ * what they're typing. */
+let pageInputDirty = false;
+
 function renderPagerBar(): void {
   if (!state) return;
   const total = state.filteredCount;
@@ -908,7 +913,7 @@ function renderPagerBar(): void {
   const count = pageCount(total, size);
   const { start, end } = pageSlice(total, state.page, size);
 
-  pagerPageInput.value = String(state.page);
+  if (!pageInputDirty) pagerPageInput.value = String(state.page);
   pagerPageInput.max = String(count);
   pagerPageCount.textContent = String(count);
   pagerPageSizeSelect.value = String(size);
@@ -967,6 +972,7 @@ pagerLastBtn.addEventListener("click", () => {
 
 function commitPageInput(): void {
   if (!state) return;
+  pageInputDirty = false;
   const raw = pagerPageInput.value.trim();
   const parsed = raw === "" ? NaN : Number(raw);
   if (!Number.isFinite(parsed)) {
@@ -981,6 +987,9 @@ pagerPageInput.addEventListener("keydown", (ev) => {
     ev.preventDefault();
     commitPageInput();
   }
+});
+pagerPageInput.addEventListener("input", () => {
+  pageInputDirty = true;
 });
 pagerPageInput.addEventListener("blur", commitPageInput);
 
@@ -1026,6 +1035,11 @@ firstRowHeaderCheckbox.addEventListener("change", () => {
 /** Render the Separator dropdown's options (including the live "Auto (…)"
  * label) and select the value matching the current state, revealing the
  * custom input when the stored delimiter isn't one of the presets. */
+/** True while the user has picked "Custom…" and hasn't yet applied a value
+ * (or picked something else). A re-render triggered by an unrelated parse
+ * result must not reset the control out from under them. */
+let separatorCustomEditing = false;
+
 function renderSeparatorControl(): void {
   if (!state) return;
   separatorSelect.innerHTML = "";
@@ -1046,6 +1060,12 @@ function renderSeparatorControl(): void {
   customOption.value = CUSTOM_SENTINEL;
   customOption.textContent = "Custom…";
   separatorSelect.appendChild(customOption);
+
+  if (separatorCustomEditing) {
+    separatorSelect.value = CUSTOM_SENTINEL;
+    separatorCustomInput.hidden = false;
+    return;
+  }
 
   const current = state.view.delimiter;
   const isPreset = current === "" || PRESET_DELIMITERS.some((p) => p.value === current);
@@ -1069,6 +1089,7 @@ function showSeparatorCustomError(message: string): void {
 
 function applySeparatorChange(delimiter: string): void {
   if (!state) return;
+  separatorCustomEditing = false;
   state.view.delimiter = delimiter;
   reparseFromText({ resetPage: true });
   saveState();
@@ -1080,6 +1101,7 @@ separatorSelect.addEventListener("change", () => {
   if (value === CUSTOM_SENTINEL) {
     // Reveal the input but don't reparse until the user actually types a
     // custom delimiter — picking "Custom…" alone changes nothing yet.
+    separatorCustomEditing = true;
     separatorCustomInput.hidden = false;
     separatorCustomInput.value = "";
     hideSeparatorCustomError();
@@ -1109,7 +1131,7 @@ separatorCustomInput.addEventListener("input", () => {
     // quoting off (state.view.quotes === false), there's no conflict, so
     // `"` is allowed as an ordinary delimiter.
     if (state.view.quotes && value.includes('"')) {
-      showSeparatorCustomError('"“”" is the quote character — turn off Quoted fields to use it');
+      showSeparatorCustomError('" is the quote character — turn off Quoted fields to use it');
       return;
     }
     hideSeparatorCustomError();

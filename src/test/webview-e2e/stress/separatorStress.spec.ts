@@ -3,7 +3,7 @@
 // while a filter rule references a column that the new parse removes.
 
 import { expect, test } from "@playwright/test";
-import { bootAndLoadText, defaultViewState } from "../harness";
+import { bootAndLoadText, defaultViewState, pushLoadText } from "../harness";
 import { trackConsoleErrors, wideFixtureText } from "./stressHelpers";
 
 test("cycling through Auto/Comma/Semicolon/Tab/Pipe on a 20k-row comma file re-parses correctly (or collapses to 1 column) every time, without errors", async ({
@@ -93,7 +93,7 @@ test('a Custom separator of a double-quote is rejected with an inline error when
   // 1 column) — the rejected value was never applied (state.view.delimiter
   // stays "", i.e. Auto).
   await expect(page.locator("#separator-custom-error")).toBeVisible();
-  await expect(page.locator("#separator-custom-error")).toContainText("quote character");
+  await expect(page.locator("#separator-custom-error")).toHaveText('" is the quote character — turn off Quoted fields to use it');
   await expect(page.locator("th.sortable")).toHaveCount(1);
 
   // Turn off "Quoted fields", then try the same custom value again — the
@@ -142,4 +142,25 @@ test("switching the separator so a filter rule's column disappears leaves that r
   await page.locator("#filters-btn").click();
   await expect(page.locator(".rule-row.rule-error")).toHaveCount(1);
   await expect(page.locator(".rule-row.rule-error .rule-error-text")).toContainText("Column not found");
+});
+
+test("a reload landing while Custom… is being edited keeps the custom input open and its typed text", async ({ page }) => {
+  // Regression: every parse result re-rendered the separator control from
+  // the stored delimiter, so a reload (or a re-parse from toggling Quoted
+  // fields) arriving between picking Custom… and typing hid the input.
+  const text = "a;b\n1;2\n";
+  const load = { fileKey: "file:///race.csv", text, state: defaultViewState(), defaultTableColumns: 2 };
+  await bootAndLoadText(page, load);
+
+  await page.locator("#separator-select").selectOption("custom");
+  await expect(page.locator("#separator-custom")).toBeVisible();
+
+  await pushLoadText(page, { ...load, text: "a;b\n1;2\n3;4\n" });
+  await expect(page.locator("#status-bar")).toHaveText("Showing 2 of 2 rows");
+
+  await expect(page.locator("#separator-custom")).toBeVisible();
+  await expect(page.locator("#separator-select")).toHaveValue("custom");
+
+  await page.locator("#separator-custom").fill(";");
+  await expect(page.locator("th.sortable")).toHaveCount(2);
 });
