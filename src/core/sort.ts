@@ -110,7 +110,14 @@ export function sortRows(rows: string[][], headers: string[], keys: SortKey[]): 
     const distinctText = new Set<string>();
     for (const k of cells) if (k.kind === "text") distinctText.add(k.text);
     const sortedText = Array.from(distinctText).sort((a, b) => collator.compare(a, b));
-    const rankOf = new Map(sortedText.map((text, i) => [text, i]));
+    // Values the collator considers equal (e.g. "a" and "A") share a rank,
+    // so they tie and fall through to later keys / original row order.
+    const rankOf = new Map<string, number>();
+    let rank = 0;
+    sortedText.forEach((text, i) => {
+      if (i > 0 && collator.compare(sortedText[i - 1], text) !== 0) rank++;
+      rankOf.set(text, rank);
+    });
     // Mutate in place (these cell-key objects were just freshly allocated
     // above and aren't shared with anything else) rather than spreading
     // into a second array of objects — halves the allocation for large

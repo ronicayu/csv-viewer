@@ -253,3 +253,22 @@ describe("explicit delimiter option", () => {
     expect(parseCsv("a\tb\n1\t2", { delimiter: "\t" }).delimiter).toBe("\t");
   });
 });
+
+describe("quoteProblems", () => {
+  it("reports the row where a bad quote swallows the rest of the file", () => {
+    const result = parseCsv('a,b\n"b"c,d\ne,f\ng,h\n');
+    expect(result.quoteProblems.map((p) => p.row)).toContain(1);
+  });
+
+  it("does not report a mid-field quote, which parses correctly as literal text", () => {
+    const result = parseCsv('id,size,name\n1,5" screen,TV\n2,10,Radio\n');
+    expect(result.quoteProblems).toEqual([]);
+    expect(result.rows).toEqual([["1", '5" screen', "TV"], ["2", "10", "Radio"]]);
+  });
+
+  it("does not report a well-formed quoted field spanning several lines", () => {
+    const result = parseCsv('a,b\n"line one\nline two, with comma\nline three",2\n3,4\n');
+    expect(result.quoteProblems).toEqual([]);
+    expect(result.rows).toHaveLength(2);
+  });
+});

@@ -121,3 +121,20 @@ describe("cycleSortForColumn", () => {
     expect(keys).toEqual([{ column: "name", direction: "asc" }]);
   });
 });
+
+describe("collator ties", () => {
+  it("keeps values the collator treats as equal (case variants) in original row order", () => {
+    const rows = [["a", "0"], ["A", "1"], ["b", "2"], ["a", "3"]];
+    const sorted = sortRows(rows, ["v", "i"], [{ column: "v", direction: "asc" }]);
+    expect(sorted.map((r) => r[1])).toEqual(["0", "1", "3", "2"]);
+  });
+
+  it("lets a later sort key break a case-variant tie", () => {
+    const rows = [["a", "2"], ["A", "1"]];
+    const sorted = sortRows(rows, ["v", "n"], [
+      { column: "v", direction: "asc" },
+      { column: "n", direction: "asc" },
+    ]);
+    expect(sorted.map((r) => r[1])).toEqual(["1", "2"]);
+  });
+});

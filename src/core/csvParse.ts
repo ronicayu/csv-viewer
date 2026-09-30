@@ -144,29 +144,6 @@ function quoteErrorDataRows(errors: Papa.ParseError[], firstRowIsHeader: boolean
   return rows;
 }
 
-/**
- * Cheap fallback for a malformed-quote pattern Papa's own `errors` array
- * doesn't flag: a physical line (post line-ending normalization) with an
- * odd number of `"` characters. Balanced quoting (open+close, or doubled
- * `""` escapes) always leaves an even count on a line; an odd count is a
- * strong, cheap signal that a quote on that line is unterminated or
- * otherwise misplaced. Deliberately approximate — it can't tell "several
- * separate problems" from "one that swallowed several physical lines" —
- * it exists only to catch inputs Papa's error reporting misses.
- */
-function heuristicQuoteProblemRows(normalizedText: string, firstRowIsHeader: boolean): { row: number }[] {
-  const lines = normalizedText.length === 0 ? [] : normalizedText.split("\n");
-  const rows: { row: number }[] = [];
-  lines.forEach((line, i) => {
-    if (firstRowIsHeader && i === 0) return;
-    const quoteCount = (line.match(/"/g) ?? []).length;
-    if (quoteCount % 2 !== 0) {
-      rows.push({ row: firstRowIsHeader ? i : i + 1 });
-    }
-  });
-  return rows.slice(0, 20);
-}
-
 export function parseCsv(text: string, options: ParseOptions = {}): ParseResult {
   const stripped = normalizeLineEndings(stripBom(text));
   const firstRowIsHeader = options.firstRowIsHeader ?? true;
@@ -204,10 +181,10 @@ export function parseCsv(text: string, options: ParseOptions = {}): ParseResult 
   const records = parsed.data;
   const delimiter = useQuoteDelimiterWorkaround ? '"' : parsed.meta.delimiter;
 
-  let quoteProblems = quoteErrorDataRows(parsed.errors, firstRowIsHeader);
-  if (quoteProblems.length === 0 && quotesEnabled) {
-    quoteProblems = heuristicQuoteProblemRows(stripped, firstRowIsHeader);
-  }
+  // Papa reports every case where a bad quote swallows following rows
+  // (InvalidQuotes/MissingQuotes). A `"` in the middle of an unquoted
+  // field produces no error because it parses correctly as literal text.
+  const quoteProblems = quoteErrorDataRows(parsed.errors, firstRowIsHeader);
 
   if (records.length === 0) {
     return { headers: [], rows: [], delimiter, quoteProblems };
