@@ -198,11 +198,25 @@ th:focus {
   gap: 2px;
 }
 
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
 .status-bar {
+  flex: 1;
   padding: 4px 8px;
   color: var(--vscode-descriptionForeground);
-  border-bottom: 1px solid var(--vscode-panel-border);
   font-size: 0.9em;
+}
+
+.working-indicator {
+  padding: 4px 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  font-style: italic;
 }
 
 .table-scroll {
@@ -295,6 +309,12 @@ tr.detail-row td {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.show-all-btn {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.85em;
 }
 
 .pager-bar {

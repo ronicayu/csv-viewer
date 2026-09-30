@@ -46,7 +46,7 @@ test("adding 20 rules, deleting one from the middle, and rapidly toggling Includ
   expect(consoleErrors).toEqual([]);
 });
 
-test("typing fast in the filter value box on a 50k-row file: no debounce, so every keystroke re-filters synchronously — measure per-keystroke latency", async ({
+test("typing fast in the filter value box on a 50k-row file: the value box is now debounced (150ms) and re-filtering runs in a worker, so per-keystroke DOM latency stays low even on a large file — measure per-keystroke latency", async ({
   page,
 }) => {
   const fixture = wideFixture(50_000, 6);
@@ -71,7 +71,7 @@ test("typing fast in the filter value box on a 50k-row file: no debounce, so eve
   });
 
   await valueInput.click();
-  await page.keyboard.type("v49999_", { delay: 0 }); // 7 keystrokes, no debounce on this box
+  await page.keyboard.type("v49999_", { delay: 0 }); // 7 keystrokes — the 'input' event itself fires per keystroke regardless of the debounce; only the resulting re-filter is delayed/coalesced
 
   const times = await page.evaluate(() => (window as unknown as { __inputTimes: number[] }).__inputTimes);
   expect(times.length).toBe(7);
@@ -82,11 +82,12 @@ test("typing fast in the filter value box on a 50k-row file: no debounce, so eve
   console.log("[stress] per-keystroke filter latency on 50k rows (ms):", deltas.map((d) => Math.round(d)));
 
   const worst = Math.max(...deltas);
-  // Flag (not fail) anything over 300ms per keystroke — the value box is
-  // documented as not debounced, so this is expected to be tight on a
-  // large file; this assertion exists to make regressions visible, not to
-  // block the suite (see the BUG test right below for the actual finding
-  // if it trips).
+  // Flag (not fail) anything over 300ms per keystroke. Each keystroke's
+  // synchronous work is now just updating `rule.value` and the (instant,
+  // undebounced) error/hint check — the actual re-filter is debounced
+  // 150ms and runs off-thread in the worker — so this should stay far
+  // under the budget even on a large file; this assertion exists to make
+  // regressions visible, not to block the suite.
   if (worst > 300) {
     // eslint-disable-next-line no-console
     console.warn(`[stress] worst per-keystroke latency ${Math.round(worst)}ms exceeds the 300ms budget`);
@@ -173,10 +174,9 @@ test("right-click quick-add works on an empty cell value, a value containing quo
   await expect(page.locator(".rule-row").last().locator('input[type="text"]')).toHaveValue(longValue);
 });
 
-test("BUG: the cell context menu isn't clamped to the viewport, so a right-click near the bottom-right corner renders it partly off-screen", async ({
+test("FIXED: the cell context menu is clamped to the viewport, so a right-click near the bottom-right corner no longer renders it off-screen", async ({
   page,
 }) => {
-  test.fail(); // see comment below for expected behavior
   const consoleErrors = trackConsoleErrors(page);
   const fixture = wideFixture(60, 10);
   await bootAndLoad(page, {
@@ -200,13 +200,10 @@ test("BUG: the cell context menu isn't clamped to the viewport, so a right-click
   const menuBox = await page.locator("#context-menu").boundingBox();
   expect(menuBox).not.toBeNull();
 
-  // Expected: main.ts's onCellContextMenu (src/webview/main.ts) clamps the
-  // menu's left/top so it always fits fully inside the viewport, the same
-  // way a native context menu would.
-  // Actual: onCellContextMenu sets `contextMenu.style.left/top` directly
-  // from `ev.pageX`/`ev.pageY` with no viewport-boundary check at all, so
-  // near the right/bottom edge the menu's right/bottom edges extend past
-  // the viewport and are unreachable/unreadable.
+  // onCellContextMenu (src/webview/main.ts) now measures the menu after
+  // it's shown and clamps left/top so it always fits fully inside the
+  // viewport (flipping left/up instead of overflowing right/bottom), the
+  // same way a native context menu would.
   expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(viewport!.width);
   expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(viewport!.height);
   expect(consoleErrors).toEqual([]);

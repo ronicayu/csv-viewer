@@ -376,12 +376,21 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "out", "webview", "main.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "out", "webview", "main.css"));
+    // Parsing/filtering/sorting run in a Web Worker (out/webview/worker.js)
+    // so a catastrophic regex or a large filter/sort never blocks the UI
+    // thread — see docs/spec.md. A webview can't load a vscode-resource:
+    // URL directly as a Worker script, so main.ts fetches this URI's text
+    // (allowed by `connect-src` below) and loads it from a `blob:` URL
+    // (allowed by `worker-src` below) instead.
+    const workerUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "out", "webview", "worker.js"));
     const csp = [
       `default-src 'none'`,
       `img-src ${webview.cspSource} data:`,
       `style-src ${webview.cspSource}`,
       `script-src 'nonce-${nonce}'`,
       `font-src ${webview.cspSource}`,
+      `worker-src blob:`,
+      `connect-src ${webview.cspSource}`,
     ].join("; ");
 
     return `<!doctype html>
@@ -394,7 +403,7 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
 <title>CSV Viewer</title>
 </head>
 <body>
-<div id="app"></div>
+<div id="app" data-worker-src="${workerUri}"></div>
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

@@ -82,8 +82,12 @@ test.describe("__proto__ as a header name", () => {
     });
 
     await page.locator("th", { hasText: "__proto__" }).click();
-    const idColumn = page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? ""));
-    expect(await idColumn).toEqual(["2", "1", "3"]); // apple, banana, cherry -> ids 2,1,3
+    // Sorting runs in a worker and re-renders asynchronously once it
+    // answers, so poll rather than reading the DOM exactly once right
+    // after the click resolves (same expected order either way).
+    await expect
+      .poll(() => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? "")))
+      .toEqual(["2", "1", "3"]); // apple, banana, cherry -> ids 2,1,3
 
     await page.locator("#filters-btn").click();
     await page.locator("#add-rule-btn").click();
@@ -131,8 +135,9 @@ test("an empty header cell is renamed to column_N and behaves normally", async (
 
   await expect(page.locator("th", { hasText: "column_2" })).toHaveCount(1);
   await page.locator("th", { hasText: "column_2" }).click(); // sort
-  const col2 = await page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[2]?.textContent ?? ""));
-  expect(col2).toEqual(["x", "y"]);
+  await expect
+    .poll(() => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[2]?.textContent ?? "")))
+    .toEqual(["x", "y"]);
 });
 
 test("plain duplicate headers dedupe to name/name_2 and are independently toggleable/sortable", async ({ page }) => {
@@ -196,8 +201,9 @@ test("a 500-character header renders, toggles, sorts, and filters normally", asy
 
   await expect(page.locator("th", { hasText: longHeader })).toHaveCount(1);
   await page.locator("th", { hasText: longHeader }).click();
-  const idCol = await page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? ""));
-  expect(idCol).toEqual(["2", "1"]); // sorted by the long-named column ascending: a, b -> ids 2, 1
+  await expect
+    .poll(() => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? "")))
+    .toEqual(["2", "1"]); // sorted by the long-named column ascending: a, b -> ids 2, 1
 
   await page.locator("#columns-btn").click();
   await page.locator(".column-row", { hasText: longHeader.slice(0, 50) }).locator('input[type="checkbox"]').uncheck();
@@ -219,8 +225,9 @@ test("an emoji header renders, toggles, sorts, and filters normally", async ({ p
 
   await expect(page.locator("th", { hasText: emojiHeader })).toHaveCount(1);
   await page.locator("th", { hasText: emojiHeader }).click();
-  const idCol = await page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? ""));
-  expect(idCol).toEqual(["2", "1"]);
+  await expect
+    .poll(() => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? "")))
+    .toEqual(["2", "1"]);
 
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();

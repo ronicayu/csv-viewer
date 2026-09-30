@@ -67,26 +67,29 @@ test("table headers are keyboard-activatable via Enter/Space (role=button, tabin
   await expect(ageHeader.locator(".sort-indicator")).toHaveText("▲");
 });
 
-test("BUG: activating a header via keyboard re-renders the whole header row and drops focus, so a second Space/Enter does nothing until the user tabs back to it", async ({
+test("FIXED: activating a header via keyboard keeps focus on it (or the new <th> that replaced it), so repeated Space/Enter keeps cycling the sort direction", async ({
   page,
 }) => {
-  test.fail(); // see comment below for expected behavior
+  // renderTableHead (src/webview/main.ts) still does `tableHead.innerHTML
+  // = ""` and appends a brand-new <tr>/<th> tree on every render (now
+  // after an async worker round-trip too), which used to destroy the
+  // focused element outright. It now remembers which column's header had
+  // focus (matched by label text, not DOM position, since a render can
+  // also reorder/remove columns) and restores focus to the new <th> for
+  // that same column once the tree is rebuilt.
   const ageHeader = page.locator("th", { hasText: "age" });
   await ageHeader.focus();
   await page.keyboard.press("Enter"); // none -> asc
   await expect(ageHeader.locator(".sort-indicator")).toHaveText("▲");
+  await expect(page.locator("th", { hasText: "age" })).toBeFocused();
 
-  // Expected: focus stays on the "age" header (or is restored to the new
-  // <th> that replaced it) so a keyboard-only user can keep cycling the
-  // sort direction with repeated Space/Enter presses, the same way mouse
-  // users can keep clicking.
-  // Actual: onHeaderClick -> recomputeAndRender -> renderTableHead
-  // (src/webview/main.ts) does `tableHead.innerHTML = ""` and appends a
-  // brand-new <tr>/<th> tree every time, destroying the focused element.
-  // The next Space keypress therefore lands on whatever (or nothing) has
-  // focus now — not the header — and never reaches onHeaderClick again.
-  await page.keyboard.press(" "); // intended: asc -> desc
-  await expect(page.locator("th", { hasText: "age" }).locator(".sort-indicator")).toHaveText("▼"); // fails: still "▲"
+  await page.keyboard.press(" "); // asc -> desc
+  await expect(page.locator("th", { hasText: "age" }).locator(".sort-indicator")).toHaveText("▼");
+  await expect(page.locator("th", { hasText: "age" })).toBeFocused();
+
+  await page.keyboard.press("Enter"); // desc -> none
+  await expect(page.locator("th", { hasText: "age" }).locator(".sort-indicator")).toHaveCount(0);
+  await expect(page.locator("th", { hasText: "age" })).toBeFocused();
 });
 
 test("Escape closes the columns popover", async ({ page }) => {

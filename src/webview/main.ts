@@ -1,12 +1,27 @@
 // CSV Viewer webview client. Vanilla TypeScript + DOM, no framework and no
-// runtime dependencies. Receives parsed rows from the extension host and
-// owns filtering, sorting, column visibility, and pagination.
+// runtime dependencies. Receives the raw document text from the extension
+// host and owns filtering, sorting, column visibility, and pagination.
+//
+// Parsing, filtering, and sorting run in a dedicated Web Worker
+// (worker.ts), never on this (the main/UI) thread — see docs/spec.md's
+// "Performance / Worker architecture" section. This file owns:
+//   - creating/recreating the worker (via a Blob URL — a webview can't
+//     load a vscode-resource: URL directly as a Worker script) and
+//     talking to it (init/query/page request-response, with request ids
+//     so a stale response can be dropped);
+//   - the regex-timeout watchdog (terminate + respawn the worker if a
+//     query containing an enabled regex rule doesn't answer in time);
+//   - all DOM rendering, always from the worker's last answers — the
+//     worker owns the full parsed/filtered/sorted data; this thread only
+//     ever holds small summaries (headers, counts) plus the current
+//     page's rows (with FULL, untruncated cell values — truncation is a
+//     render-time-only concern, see src/core/truncate.ts).
 
-import { parseCsv } from "../core/csvParse";
-import { applyFilters, isRuleActive, isValidRule } from "../core/filter";
-import { sortRows, cycleSortForColumn } from "../core/sort";
+import { isRuleActive, isValidRule } from "../core/filter";
+import { cycleSortForColumn } from "../core/sort";
 import { detailFieldsFor, getVisibility, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
+import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
 import type {
   ColumnVisibilityMap,
   FilterOperator,
@@ -15,6 +30,8 @@ import type {
   ViewState,
   WebviewToHostMessage,
 } from "../core/types";
+import { REGEX_TIMEOUT_MS, WORKING_INDICATOR_DELAY_MS } from "./workerProtocol";
+import type { ParseOptionsMsg, WorkerRequest, WorkerResponse, WorkerRow } from "./workerProtocol";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: WebviewToHostMessage): void;
@@ -26,6 +43,7 @@ const vscode = acquireVsCodeApi();
 
 const SEARCH_DEBOUNCE_MS = 150;
 const SEPARATOR_DEBOUNCE_MS = 300;
+const FILTER_RULE_DEBOUNCE_MS = 150;
 
 /** Presets for the "Separator" toolbar dropdown, in display order. Tab is
  * labeled with the word "Tab" rather than a literal tab character. */
@@ -41,31 +59,33 @@ function delimiterDisplay(d: string): string {
   return d === "\t" ? "Tab" : d;
 }
 
-interface RowWithId {
-  id: number;
-  cells: string[];
-}
-
 interface AppState {
   fileKey: string;
   /** The whole document text, held onto so the "first row is header"
-   * toggle and separator changes can re-parse locally without a host
-   * round-trip. */
+   * toggle and separator changes can re-parse (in the worker) locally,
+   * without a host round-trip. */
   text: string;
   /** `"\t"` for .tsv/.tab, else `""` — the delimiter to fall back to when
    * `view.delimiter` is `""` (auto). */
   defaultDelimiter: string;
   headers: string[];
-  rows: RowWithId[];
+  /** Total row count from the worker's last parse (before filtering). */
+  totalRows: number;
   view: ViewState;
   defaultTableColumns: number;
   expanded: Set<number>;
-  filtered: RowWithId[];
+  /** Row count after the last filter query — NOT the page size. */
+  filteredCount: number;
   /** 1-based. Not persisted — only pageSize is. */
   page: number;
-  /** The delimiter parseCsv actually used on the last parse — shown in the
-   * "Auto (…)" option even when it was forced by defaultDelimiter rather
-   * than truly auto-detected. */
+  /** Full (untruncated) rows for exactly the current page, as last
+   * returned by the worker. Rendering (table cell / detail view)
+   * truncates from these; quick-add and other consumers of the "real"
+   * value always read from here too. */
+  currentPageRows: WorkerRow[];
+  /** The delimiter the worker's parseCsv actually used on the last parse
+   * — shown in the "Auto (…)" option even when it was forced by
+   * defaultDelimiter rather than truly auto-detected. */
   detectedDelimiter: string;
   /** Data-row numbers where the last parse found a quote problem (see
    * ParseResult.quoteProblems); drives the warning banner. */
@@ -74,6 +94,11 @@ interface AppState {
    * fresh parse (load or reparseFromText) so a *new* quote problem is
    * surfaced again even if the user dismissed an earlier one. */
   quoteBannerDismissed: boolean;
+  /** Enabled regex rules whose last query attempt didn't answer within
+   * REGEX_TIMEOUT_MS — ignored the same way an invalid regex is ignored
+   * (see isRuleActive), and shown with a "Regex too slow" hint in the
+   * filter panel, until the rule's value is edited. */
+  timedOutRuleIds: Set<string>;
   /** TEST HOOK: mirrors `message.testHooks` from the last `load`. See the
    * "BEGIN TEST HOOK" block below. */
   testHooksEnabled: boolean;
@@ -123,7 +148,10 @@ app.innerHTML = `
     <div id="filter-rules"></div>
     <button id="add-rule-btn" type="button">+ Add rule</button>
   </div>
-  <div id="status-bar" class="status-bar"></div>
+  <div class="status-row">
+    <div id="status-bar" class="status-bar"></div>
+    <span id="working-indicator" class="working-indicator" hidden>Working…</span>
+  </div>
   <div id="quote-warning-banner" class="quote-warning-banner" hidden>
     <span id="quote-warning-text"></span>
     <button id="quote-warning-fix-btn" type="button">Treat quotes as plain text</button>
@@ -178,6 +206,7 @@ const filterPanel = document.getElementById("filter-panel") as HTMLDivElement;
 const filterRulesEl = document.getElementById("filter-rules") as HTMLDivElement;
 const addRuleBtn = document.getElementById("add-rule-btn") as HTMLButtonElement;
 const statusBar = document.getElementById("status-bar") as HTMLDivElement;
+const workingIndicator = document.getElementById("working-indicator") as HTMLSpanElement;
 const tableScroll = document.getElementById("table-scroll") as HTMLDivElement;
 const tableHead = document.getElementById("table-head") as HTMLTableSectionElement;
 const tableBody = document.getElementById("table-body") as HTMLTableSectionElement;
@@ -198,11 +227,107 @@ for (const size of PAGE_SIZES) {
   pagerPageSizeSelect.appendChild(option);
 }
 
-// ---- Messaging ----------------------------------------------------------
+// ---- Worker lifecycle ---------------------------------------------------
+//
+// The worker script can't be loaded from its vscode-resource/webview URI
+// directly (workers can't fetch cross-scheme like that under the
+// webview's CSP) — instead we fetch its *text* from that URI (allowed via
+// `connect-src` in extension.ts's CSP) and load it from a `blob:` URL
+// (allowed via `worker-src blob:`). The Playwright harness sets up an
+// equivalent `data-worker-src` for the same code path to exercise (see
+// harness.ts).
+
+let worker: Worker | null = null;
+let workerPromise: Promise<Worker> | null = null;
+let workerBlobUrlPromise: Promise<string> | null = null;
+
+async function getWorkerBlobUrl(): Promise<string> {
+  if (!workerBlobUrlPromise) {
+    workerBlobUrlPromise = (async () => {
+      const src = app.dataset.workerSrc;
+      if (!src) throw new Error("csv-viewer: #app is missing data-worker-src");
+      const res = await fetch(src);
+      const text = await res.text();
+      const blob = new Blob([text], { type: "application/javascript" });
+      return URL.createObjectURL(blob);
+    })();
+  }
+  return workerBlobUrlPromise;
+}
+
+function createWorker(blobUrl: string): Worker {
+  const w = new Worker(blobUrl);
+  w.onmessage = handleWorkerMessage;
+  return w;
+}
+
+/** Ensures a worker exists, creating it (once — concurrent callers share
+ * the same in-flight creation) if needed. */
+async function ensureWorker(): Promise<Worker> {
+  if (!workerPromise) {
+    workerPromise = (async () => createWorker(await getWorkerBlobUrl()))();
+  }
+  worker = await workerPromise;
+  return worker;
+}
+
+/** Replaces the current worker with a fresh one — used after terminating
+ * a worker stuck in catastrophic regex backtracking. The blob URL itself
+ * is already cached (its script never changes), so this resolves fast. */
+async function respawnWorker(): Promise<Worker> {
+  const blobUrl = await getWorkerBlobUrl();
+  worker = createWorker(blobUrl);
+  workerPromise = Promise.resolve(worker);
+  return worker;
+}
+
+function postToWorker(message: WorkerRequest): void {
+  worker?.postMessage(message);
+}
+
+// ---- Request bookkeeping (staleness guards + regex timeout) -----------
+
+let nextRequestId = 1;
+let pendingInitRequestId = -1;
+let pendingInitIsFreshParse = true;
+let latestQueryRequestId = -1;
+let latestPageRequestId = -1;
+let queryInFlight = false;
+/** Set by an explicit page navigation that arrived while a query was
+ * still in flight (e.g. clicking Next during a regex-timeout recovery) —
+ * consumed by the next queryResult instead of `state.page`, so the UI
+ * stays responsive to navigation even while the worker is busy/recovering. */
+let pendingPageAfterQuery: number | null = null;
+let regexTimeoutHandle: number | undefined;
+
+// ---- "Working…" indicator ----------------------------------------------
+//
+// Shown only once an interactive request (filter/sort/search/page change)
+// has been in flight for a while — never during the initial `load`
+// (which already shows "Loading…" in the status bar).
+
+let operationToken = 0;
+let workingTimerHandle: number | undefined;
+
+function startOperation(): void {
+  operationToken++;
+  const token = operationToken;
+  window.clearTimeout(workingTimerHandle);
+  workingTimerHandle = window.setTimeout(() => {
+    if (operationToken === token) workingIndicator.hidden = false;
+  }, WORKING_INDICATOR_DELAY_MS);
+}
+
+function endOperation(): void {
+  window.clearTimeout(workingTimerHandle);
+  workingIndicator.hidden = true;
+}
+
+// ---- Messaging (extension host) -----------------------------------------
 
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => {
   const message = event.data;
-  if (message.type === "load") onLoad(message);
+  if (message.type === "load") void onLoad(message);
 });
 
 vscode.postMessage({ type: "ready" });
@@ -224,7 +349,7 @@ function sameColumnVisibility(a: ColumnVisibilityMap, b: ColumnVisibilityMap): b
 }
 
 /** Yield one frame so a "Loading…" placeholder actually paints before a
- * potentially expensive parse blocks the main thread. */
+ * potentially expensive parse (in the worker) starts. */
 function yieldFrame(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
@@ -243,88 +368,67 @@ async function onLoad(message: HostToWebviewMessage): Promise<void> {
 
   // A `load` for the same file the webview is already showing is a live
   // reload (the document changed on disk) — keep the current page instead
-  // of jumping back to page 1. It gets clamped to the new page count below.
+  // of jumping back to page 1. It gets clamped to the new page count once
+  // the fresh query answers.
   const isReload = state !== null && state.fileKey === message.fileKey;
   const previousPage = isReload ? state!.page : 1;
 
   statusBar.textContent = "Loading…";
   await yieldFrame();
-
-  const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
-  const parsed = parseCsv(message.text, {
-    delimiter: delimiterOption,
-    firstRowIsHeader: view.firstRowIsHeader,
-    quotes: view.quotes,
-  });
-
-  const previousVisibility = view.columnVisibility;
-  const reconciled = reconcileVisibility(parsed.headers, previousVisibility, message.defaultTableColumns);
-  const visibilityChanged = !sameColumnVisibility(previousVisibility, reconciled);
-  view.columnVisibility = reconciled;
+  await ensureWorker();
 
   state = {
     fileKey: message.fileKey,
     text: message.text,
     defaultDelimiter: message.defaultDelimiter,
-    headers: parsed.headers,
-    rows: parsed.rows.map((cells, id) => ({ id, cells })),
+    headers: [],
+    totalRows: 0,
     view,
     defaultTableColumns: message.defaultTableColumns,
     expanded: new Set<number>(),
-    filtered: [],
+    filteredCount: 0,
     page: previousPage,
-    detectedDelimiter: parsed.delimiter,
-    quoteProblems: parsed.quoteProblems,
+    currentPageRows: [],
+    detectedDelimiter: "",
+    quoteProblems: [],
     quoteBannerDismissed: false,
+    timedOutRuleIds: new Set<string>(),
     testHooksEnabled: message.testHooks === true,
   };
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
   quotesCheckbox.checked = state.view.quotes;
   quickSearchInput.value = state.view.quickSearch;
-  renderColumnsPopover();
-  renderFilterPanel();
-  renderSeparatorControl();
-  renderQuoteWarningBanner();
-  recomputeAndRender();
 
-  // Only write state back if reconciliation actually changed the stored
-  // visibility map — a plain reopen of a file whose visibility is already
-  // settled shouldn't cause a write on every open.
-  if (visibilityChanged) saveState();
+  pendingPageAfterQuery = previousPage;
+  const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
+  beginInit(message.text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader, quotes: view.quotes }, true);
 }
 
 /**
- * Re-parse `state.text` with the current view options (separator, "first
- * row is header") without a host round-trip, reconciling column visibility
- * against the new headers. Used by both the separator control and the
- * "first row is header" toggle.
+ * Re-parse `state.text` (in the worker) with the current view options
+ * (separator, "first row is header") without a host round-trip,
+ * reconciling column visibility against the new headers once the worker
+ * answers. Used by both the separator control, the "Quoted fields"
+ * checkbox, and the "first row is header" toggle.
  */
 function reparseFromText(options: { resetPage: boolean }): void {
   if (!state) return;
   const delimiterOption = resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter);
-  const parsed = parseCsv(state.text, {
-    delimiter: delimiterOption,
-    firstRowIsHeader: state.view.firstRowIsHeader,
-    quotes: state.view.quotes,
-  });
-
-  state.headers = parsed.headers;
-  state.rows = parsed.rows.map((cells, id) => ({ id, cells }));
-  state.detectedDelimiter = parsed.delimiter;
-  state.quoteProblems = parsed.quoteProblems;
-  state.quoteBannerDismissed = false;
-  state.view.columnVisibility = reconcileVisibility(parsed.headers, state.view.columnVisibility, state.defaultTableColumns);
+  pendingPageAfterQuery = options.resetPage ? 1 : state.page;
   // Row identity is re-tokenized from scratch, so previously expanded rows
   // (tracked by id) no longer correspond to the same content — reset, same
-  // as a live reload does.
+  // as a live reload does. Done synchronously (not gated on the worker's
+  // answer) since the old ids are meaningless the moment we decide to
+  // re-parse.
   state.expanded = new Set<number>();
+  beginInit(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, true);
+}
 
-  quotesCheckbox.checked = state.view.quotes;
-  renderColumnsPopover();
-  renderFilterPanel();
-  renderSeparatorControl();
-  renderQuoteWarningBanner();
-  recomputeAndRender({ resetPage: options.resetPage });
+function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean): void {
+  const requestId = nextRequestId++;
+  pendingInitRequestId = requestId;
+  pendingInitIsFreshParse = isFreshParse;
+  postToWorker({ type: "init", requestId, text, options });
 }
 
 function newRuleId(): string {
@@ -343,36 +447,147 @@ function saveState(): void {
 // observe render completion without scraping the DOM.
 function notifyRendered(): void {
   if (!state || !state.testHooksEnabled) return;
-  vscode.postMessage({ type: "rendered", rowCount: state.filtered.length, headers: state.headers });
+  vscode.postMessage({ type: "rendered", rowCount: state.filteredCount, headers: state.headers });
 }
 // ---- END TEST HOOK ---------------------------------------------------------
 
-// ---- Derived rows (filter + sort while preserving row identity) --------
+// ---- Worker responses ----------------------------------------------------
 
-/**
- * Re-derives `state.filtered` from the raw rows plus quick search/filter
- * rules/sort, then reconciles the current page against the (possibly
- * changed) result. Quick search, filter rule, and sort changes pass
- * `resetPage: true` so the page goes back to 1; everything else (column
- * visibility, a live reload) keeps the current page, clamped in range.
- */
-function recomputeAndRender(options: { resetPage?: boolean } = {}): void {
+function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
+  const msg = event.data;
+  switch (msg.type) {
+    case "initResult":
+      onInitResult(msg);
+      break;
+    case "queryResult":
+      onQueryResult(msg);
+      break;
+    case "pageResult":
+      onPageResult(msg);
+      break;
+    case "workerError":
+      // Defensive only — src/core's own tests (including a fast-check
+      // property test) establish that applyFilters/sortRows/parseCsv never
+      // throw for any input shape, so this should never actually fire.
+      // eslint-disable-next-line no-console
+      console.error("csv-viewer: worker error:", msg.message);
+      break;
+  }
+}
+
+function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   if (!state) return;
-  const idByCells = new Map<string[], number>();
-  for (const row of state.rows) idByCells.set(row.cells, row.id);
+  if (msg.requestId !== pendingInitRequestId) return; // superseded by a newer load/reparse
 
-  const filteredCells = applyFilters(state.headers, state.rows.map((r) => r.cells), state.view.quickSearch, state.view.filterRules);
-  const sortedCells = sortRows(filteredCells, state.headers, state.view.sortKeys);
+  state.headers = msg.headers;
+  state.detectedDelimiter = msg.detectedDelimiter;
+  state.quoteProblems = msg.quoteProblems;
+  state.totalRows = msg.totalRows;
+  if (pendingInitIsFreshParse) state.quoteBannerDismissed = false;
 
-  state.filtered = sortedCells.map((cells) => ({ id: idByCells.get(cells)!, cells }));
-  state.page = options.resetPage ? 1 : clampPage(state.page, state.filtered.length, state.view.pageSize);
+  const previousVisibility = state.view.columnVisibility;
+  const reconciled = reconcileVisibility(msg.headers, previousVisibility, state.defaultTableColumns);
+  const visibilityChanged = !sameColumnVisibility(previousVisibility, reconciled);
+  state.view.columnVisibility = reconciled;
 
+  renderColumnsPopover();
+  renderFilterPanel();
+  renderSeparatorControl();
+  renderQuoteWarningBanner();
+
+  // Only write state back if reconciliation actually changed the stored
+  // visibility map — a plain reopen of a file whose visibility is already
+  // settled shouldn't cause a write on every open.
+  if (visibilityChanged) saveState();
+
+  continueAfterInit();
+}
+
+/** Sends the next query using the view's current quickSearch/filterRules/
+ * sortKeys (with any timed-out regex rules excluded), for whatever just
+ * finished happening on the init side (a load, a reparse, or a
+ * regex-timeout recovery — all three need exactly this same follow-up). */
+function continueAfterInit(): void {
+  if (!state) return;
+  queryInFlight = true;
+  const { requestId, rulesSent } = sendQueryNow();
+  latestQueryRequestId = requestId;
+  maybeArmRegexTimeout(requestId, rulesSent);
+}
+
+function sendQueryNow(): { requestId: number; rulesSent: FilterRule[] } {
+  if (!state) return { requestId: -1, rulesSent: [] };
+  const rulesSent = state.view.filterRules.filter((r) => !state!.timedOutRuleIds.has(r.id));
+  const requestId = nextRequestId++;
+  postToWorker({ type: "query", requestId, quickSearch: state.view.quickSearch, filterRules: rulesSent, sortKeys: state.view.sortKeys });
+  return { requestId, rulesSent };
+}
+
+function onQueryResult(msg: { type: "queryResult" } & WorkerResponse): void {
+  if (!state) return;
+  if (msg.requestId !== latestQueryRequestId) return; // stale — a newer query has since been sent
+  window.clearTimeout(regexTimeoutHandle); // this query answered before the regex watchdog fired
+
+  state.filteredCount = msg.filteredCount;
+  const desired = pendingPageAfterQuery ?? state.page;
+  pendingPageAfterQuery = null;
+  state.page = clampPage(desired, state.filteredCount, state.view.pageSize);
+  queryInFlight = false;
+
+  const requestId = nextRequestId++;
+  latestPageRequestId = requestId;
+  postToWorker({ type: "page", requestId, page: state.page, pageSize: state.view.pageSize });
+}
+
+function onPageResult(msg: { type: "pageResult" } & WorkerResponse): void {
+  if (!state) return;
+  if (msg.requestId !== latestPageRequestId) return; // stale — a newer page/query has since been sent
+  state.currentPageRows = msg.rows;
+  finishRender();
+}
+
+/** The single point where a completed worker round-trip becomes visible
+ * DOM — head, body, status bar, and pager bar always update together, so
+ * anything a test polls for (a sort indicator, a row count, "Showing X of
+ * Y rows"...) is only ever observed once every other part of the same
+ * render has already settled too. */
+function finishRender(): void {
   renderTableHead();
   renderSortBySelect();
   renderTableBody();
   renderStatusBar();
   renderPagerBar();
+  endOperation();
   notifyRendered();
+}
+
+// ---- Regex timeout watchdog ----------------------------------------------
+
+function maybeArmRegexTimeout(requestId: number, rulesSent: FilterRule[]): void {
+  window.clearTimeout(regexTimeoutHandle);
+  const risky = rulesSent.some((r) => r.enabled && r.operator === "regex" && isValidRule(r));
+  if (!risky) return;
+  regexTimeoutHandle = window.setTimeout(() => {
+    if (!state) return;
+    if (latestQueryRequestId !== requestId) return; // already answered or superseded
+    void handleRegexTimeout(rulesSent);
+  }, REGEX_TIMEOUT_MS);
+}
+
+async function handleRegexTimeout(rulesSent: FilterRule[]): Promise<void> {
+  if (!state) return;
+  worker?.terminate();
+  worker = null;
+
+  for (const r of rulesSent) {
+    if (r.enabled && r.operator === "regex" && isValidRule(r)) state.timedOutRuleIds.add(r.id);
+  }
+  renderFilterPanel(); // show "Regex too slow — rule disabled" immediately
+
+  await respawnWorker();
+  if (!state) return; // a load/dispose could have raced this
+  const delimiterOption = resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter);
+  beginInit(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, false);
 }
 
 // ---- Table head ----------------------------------------------------------
@@ -380,6 +595,18 @@ function recomputeAndRender(options: { resetPage?: boolean } = {}): void {
 function renderTableHead(): void {
   if (!state) return;
   const columns = visibleColumns(state.headers, state.view.columnVisibility);
+
+  // Restore focus to the header cell of the same column after this
+  // function rebuilds the whole <tr> — otherwise a keyboard-only user
+  // cycling a column's sort direction with repeated Space/Enter loses
+  // focus after the very first press (see keyboard.spec.ts). Matched by
+  // the column's label text (not DOM position), since visibility changes
+  // can reorder/remove columns between renders.
+  let previousFocusColumn: string | null = null;
+  if (document.activeElement instanceof HTMLElement && tableHead.contains(document.activeElement)) {
+    previousFocusColumn = document.activeElement.firstElementChild?.textContent ?? null;
+  }
+
   const tr = document.createElement("tr");
 
   const chevronTh = document.createElement("th");
@@ -418,12 +645,21 @@ function renderTableHead(): void {
 
   tableHead.innerHTML = "";
   tableHead.appendChild(tr);
+
+  if (previousFocusColumn !== null) {
+    for (const th of Array.from(tr.querySelectorAll<HTMLTableCellElement>("th.sortable"))) {
+      if (th.firstElementChild?.textContent === previousFocusColumn) {
+        th.focus();
+        break;
+      }
+    }
+  }
 }
 
 function onHeaderClick(column: string, shiftKey: boolean): void {
   if (!state) return;
   state.view.sortKeys = cycleSortForColumn(state.view.sortKeys, column, shiftKey);
-  recomputeAndRender({ resetPage: true });
+  requery();
   saveState();
 }
 
@@ -433,11 +669,9 @@ function renderTableBody(): void {
   if (!state) return;
   tableBody.innerHTML = "";
   const columns = visibleColumns(state.headers, state.view.columnVisibility);
-  const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
   const fragment = document.createDocumentFragment();
 
-  for (let i = start; i < end; i++) {
-    const row = state.filtered[i];
+  for (const row of state.currentPageRows) {
     fragment.appendChild(buildRowTr(row, columns));
     fragment.appendChild(buildDetailTr(row, columns.length + 1));
   }
@@ -445,7 +679,7 @@ function renderTableBody(): void {
   tableBody.appendChild(fragment);
 }
 
-function buildRowTr(row: RowWithId, columns: string[]): HTMLTableRowElement {
+function buildRowTr(row: WorkerRow, columns: string[]): HTMLTableRowElement {
   const tr = document.createElement("tr");
   tr.className = "data-row";
   tr.dataset.rowId = String(row.id);
@@ -462,7 +696,11 @@ function buildRowTr(row: RowWithId, columns: string[]): HTMLTableRowElement {
   for (const column of columns) {
     const td = document.createElement("td");
     const value = row.cells[indexByHeader.get(column)!] ?? "";
-    td.textContent = value;
+    // Table cells render at most 500 characters — a huge (e.g. 15 MB
+    // single-line) cell used to freeze rendering / trip VS Code's
+    // unresponsive-webview watchdog. Quick-add (below) always uses the
+    // FULL value; only the rendered text is truncated.
+    td.textContent = truncateForTable(value).text;
     td.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, column, value));
     tr.appendChild(td);
   }
@@ -471,7 +709,7 @@ function buildRowTr(row: RowWithId, columns: string[]): HTMLTableRowElement {
   return tr;
 }
 
-function buildDetailTr(row: RowWithId, colSpan: number): HTMLTableRowElement {
+function buildDetailTr(row: WorkerRow, colSpan: number): HTMLTableRowElement {
   const tr = document.createElement("tr");
   tr.className = "detail-row";
   tr.hidden = !state!.expanded.has(row.id);
@@ -487,10 +725,26 @@ function buildDetailTr(row: RowWithId, colSpan: number): HTMLTableRowElement {
   for (const field of fields) {
     const dt = document.createElement("dt");
     dt.textContent = field;
+
     const dd = document.createElement("dd");
     const value = row.cells[indexByHeader.get(field)!] ?? "";
-    dd.textContent = value;
+    const { text, truncated, fullLength } = truncateForDetail(value);
+    dd.appendChild(document.createTextNode(text));
+    if (truncated) {
+      const showAllBtn = document.createElement("button");
+      showAllBtn.type = "button";
+      showAllBtn.className = "show-all-btn";
+      showAllBtn.textContent = `Show all (${fullLength} characters)`;
+      if (fullLength > DETAIL_WARN_CHARS) {
+        showAllBtn.title = "This value is very large — showing it in full may be slow.";
+      }
+      showAllBtn.addEventListener("click", () => {
+        dd.textContent = value; // expands in place; removes the button too
+      });
+      dd.appendChild(showAllBtn);
+    }
     dd.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, field, value));
+
     dl.appendChild(dt);
     dl.appendChild(dd);
   }
@@ -518,14 +772,14 @@ function toggleExpanded(rowId: number): void {
 
 function renderStatusBar(): void {
   if (!state) return;
-  statusBar.textContent = `Showing ${state.filtered.length} of ${state.rows.length} rows`;
+  statusBar.textContent = `Showing ${state.filteredCount} of ${state.totalRows} rows`;
 }
 
 // ---- Pager bar ----------------------------------------------------------
 
 function renderPagerBar(): void {
   if (!state) return;
-  const total = state.filtered.length;
+  const total = state.filteredCount;
   const size = state.view.pageSize;
   const count = pageCount(total, size);
   const { start, end } = pageSlice(total, state.page, size);
@@ -544,32 +798,47 @@ function renderPagerBar(): void {
   pagerPageInput.disabled = noRows;
 }
 
-/** Jump to `page` (clamped in range), re-rendering only if it actually
- * changes, and scroll the table area back to top. */
-function goToPage(page: number): void {
+/** Requests page `page` (clamped in range) from the worker. If a query is
+ * still in flight (e.g. mid regex-timeout recovery), the request is
+ * queued rather than dropped: the main thread stays responsive to the
+ * click immediately (the page-number input updates optimistically) and
+ * the actual fetch happens as soon as the in-flight query settles.
+ *
+ * `force` skips the "page number unchanged, nothing to do" shortcut —
+ * needed when the page *size* changed but happens to land back on the
+ * same page *number* (e.g. shrinking the page size while already on
+ * page 1), where the rows themselves are still different and must be
+ * re-fetched even though `state.page` itself didn't move. */
+function requestPage(page: number, force = false): void {
   if (!state) return;
-  const clamped = clampPage(page, state.filtered.length, state.view.pageSize);
-  if (clamped === state.page) {
+  if (queryInFlight) {
+    pendingPageAfterQuery = page;
+    pagerPageInput.value = String(page);
+    return;
+  }
+  const clamped = clampPage(page, state.filteredCount, state.view.pageSize);
+  if (!force && clamped === state.page) {
     renderPagerBar(); // still resync e.g. the page-number input's text
     notifyRendered();
     return;
   }
   state.page = clamped;
-  renderTableBody();
-  renderPagerBar();
+  startOperation();
+  const requestId = nextRequestId++;
+  latestPageRequestId = requestId;
+  postToWorker({ type: "page", requestId, page: clamped, pageSize: state.view.pageSize });
   tableScroll.scrollTop = 0;
-  notifyRendered();
 }
 
-pagerFirstBtn.addEventListener("click", () => goToPage(1));
+pagerFirstBtn.addEventListener("click", () => requestPage(1));
 pagerPrevBtn.addEventListener("click", () => {
-  if (state) goToPage(state.page - 1);
+  if (state) requestPage(state.page - 1);
 });
 pagerNextBtn.addEventListener("click", () => {
-  if (state) goToPage(state.page + 1);
+  if (state) requestPage(state.page + 1);
 });
 pagerLastBtn.addEventListener("click", () => {
-  if (state) goToPage(pageCount(state.filtered.length, state.view.pageSize));
+  if (state) requestPage(pageCount(state.filteredCount, state.view.pageSize));
 });
 
 function commitPageInput(): void {
@@ -580,7 +849,7 @@ function commitPageInput(): void {
     renderPagerBar(); // invalid input: restore the current page
     return;
   }
-  goToPage(parsed);
+  requestPage(parsed);
 }
 
 pagerPageInput.addEventListener("keydown", (ev) => {
@@ -594,16 +863,12 @@ pagerPageInput.addEventListener("blur", commitPageInput);
 pagerPageSizeSelect.addEventListener("change", () => {
   if (!state) return;
   const oldSize = state.view.pageSize;
-  const { start: firstRowIndex } = pageSlice(state.filtered.length, state.page, oldSize);
+  const { start: firstRowIndex } = pageSlice(state.filteredCount, state.page, oldSize);
   const newSize = normalizePageSize(Number(pagerPageSizeSelect.value));
 
   state.view.pageSize = newSize;
-  state.page = clampPage(pageForRow(firstRowIndex, newSize), state.filtered.length, newSize);
-
-  renderTableBody();
-  renderPagerBar();
-  tableScroll.scrollTop = 0;
   saveState();
+  requestPage(pageForRow(firstRowIndex, newSize), true);
 });
 
 // ---- Quick search ----------------------------------------------------------
@@ -615,7 +880,7 @@ quickSearchInput.addEventListener("input", () => {
   searchDebounceHandle = window.setTimeout(() => {
     if (!state) return;
     state.view.quickSearch = value;
-    recomputeAndRender({ resetPage: true });
+    requery();
     saveState();
   }, SEARCH_DEBOUNCE_MS);
 });
@@ -625,8 +890,9 @@ quickSearchInput.addEventListener("input", () => {
 firstRowHeaderCheckbox.addEventListener("change", () => {
   if (!state) return;
   state.view.firstRowIsHeader = firstRowHeaderCheckbox.checked;
-  // Re-parses locally from the text already held in state (no host round
-  // trip); keeps the current page, same as the old host-driven reload did.
+  // Re-parses (in the worker) from the text already held in state (no
+  // host round trip); keeps the current page, same as the old
+  // host-driven reload did.
   reparseFromText({ resetPage: false });
   saveState();
 });
@@ -770,19 +1036,20 @@ openAsTextBtn.addEventListener("click", () => {
 });
 
 // ---- Expand page / collapse page (current page only) ----------------------
+//
+// Purely local: the current page's rows (with full cell values) are
+// already cached in state.currentPageRows, so this never needs the worker.
 
 expandAllBtn.addEventListener("click", () => {
   if (!state) return;
-  const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
-  for (let i = start; i < end; i++) state.expanded.add(state.filtered[i].id);
+  for (const row of state.currentPageRows) state.expanded.add(row.id);
   renderTableBody();
   notifyRendered();
 });
 
 collapseAllBtn.addEventListener("click", () => {
   if (!state) return;
-  const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
-  for (let i = start; i < end; i++) state.expanded.delete(state.filtered[i].id);
+  for (const row of state.currentPageRows) state.expanded.delete(row.id);
   renderTableBody();
   notifyRendered();
 });
@@ -815,7 +1082,7 @@ sortBySelect.addEventListener("change", () => {
   if (!state) return;
   const column = sortBySelect.value;
   state.view.sortKeys = column === "" ? [] : [{ column, direction: "asc" }];
-  recomputeAndRender({ resetPage: true });
+  requery();
   saveState();
 });
 
@@ -823,11 +1090,15 @@ sortDirBtn.addEventListener("click", () => {
   if (!state || state.view.sortKeys.length === 0) return;
   const [primary, ...rest] = state.view.sortKeys;
   state.view.sortKeys = [{ ...primary, direction: primary.direction === "asc" ? "desc" : "asc" }, ...rest];
-  recomputeAndRender({ resetPage: true });
+  requery();
   saveState();
 });
 
 // ---- Columns popover ----------------------------------------------------------
+//
+// Purely local: visibility doesn't change which rows match or their
+// order, only which columns render — always re-rendered from the already-
+// cached state.currentPageRows, no worker round-trip.
 
 columnsBtn.addEventListener("click", () => {
   filterPanel.hidden = true;
@@ -849,7 +1120,7 @@ function renderColumnsPopover(): void {
     checkbox.addEventListener("change", () => {
       if (!state) return;
       setVisibility(state.view.columnVisibility, header, checkbox.checked);
-      recomputeAndRender(); // column visibility keeps the current page
+      renderLocalOnly(); // column visibility keeps the current page
       saveState();
     });
     label.appendChild(checkbox);
@@ -860,13 +1131,22 @@ function renderColumnsPopover(): void {
   }
 }
 
+/** Re-renders head/body from already-known state (no worker round-trip) —
+ * for changes that only affect which columns/fields are shown, not which
+ * rows match or their order. */
+function renderLocalOnly(): void {
+  renderTableHead();
+  renderTableBody();
+  notifyRendered();
+}
+
 columnsSearch.addEventListener("input", renderColumnsPopover);
 
 columnsShowAll.addEventListener("click", () => {
   if (!state) return;
   for (const header of state.headers) setVisibility(state.view.columnVisibility, header, true);
   renderColumnsPopover();
-  recomputeAndRender();
+  renderLocalOnly();
   saveState();
 });
 
@@ -874,7 +1154,7 @@ columnsHideAll.addEventListener("click", () => {
   if (!state) return;
   for (const header of state.headers) setVisibility(state.view.columnVisibility, header, false);
   renderColumnsPopover();
-  recomputeAndRender();
+  renderLocalOnly();
   saveState();
 });
 
@@ -892,6 +1172,43 @@ const OPERATORS: { value: FilterOperator; label: string; needsValue: boolean }[]
   { value: "gte", label: ">=", needsValue: true },
   { value: "lte", label: "<=", needsValue: true },
 ];
+
+/** Sends the next filter/sort/search query, always resetting to page 1 —
+ * every interactive change here (quick search, a filter rule, a sort
+ * key) is documented to reset the page. */
+function requery(): void {
+  if (!state) return;
+  pendingPageAfterQuery = 1;
+  startOperation();
+  queryInFlight = true;
+  const { requestId, rulesSent } = sendQueryNow();
+  latestQueryRequestId = requestId;
+  maybeArmRegexTimeout(requestId, rulesSent);
+}
+
+/**
+ * Debounced (150ms) requery, shared across every filter-rule control —
+ * not just the value text box. Configuring one rule is rarely a single
+ * field: picking a column, then an operator, then typing a value are
+ * each their own DOM event, and at scale (hundreds of thousands of rows)
+ * each undebounced requery() re-filters AND re-sorts the full dataset in
+ * the worker — with sort keys from an earlier interaction still active,
+ * even an "inactive rule, nothing really changed yet" intermediate step
+ * pays that full cost. Coalescing the whole gesture into the query that
+ * reflects its *final* state (same as quick search already does) is what
+ * keeps "add/change a filter rule" under its latency target at scale;
+ * `syncRuleError()` (the error/hint display) is called separately and
+ * immediately at every call site, never debounced, so error feedback
+ * stays instant regardless.
+ */
+let filterDebounceHandle: number | undefined;
+function debouncedRequery(): void {
+  window.clearTimeout(filterDebounceHandle);
+  filterDebounceHandle = window.setTimeout(() => {
+    requery();
+    saveState();
+  }, FILTER_RULE_DEBOUNCE_MS);
+}
 
 filtersBtn.addEventListener("click", () => {
   columnsPopover.hidden = true;
@@ -911,8 +1228,7 @@ addRuleBtn.addEventListener("click", () => {
   };
   state.view.filterRules.push(rule);
   renderFilterPanel();
-  recomputeAndRender({ resetPage: true });
-  saveState();
+  debouncedRequery();
 });
 
 function renderFilterPanel(): void {
@@ -931,8 +1247,8 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   enabledCheckbox.title = "Enabled";
   enabledCheckbox.addEventListener("change", () => {
     rule.enabled = enabledCheckbox.checked;
-    recomputeAndRender({ resetPage: true });
-    saveState();
+    syncRuleError();
+    debouncedRequery();
   });
   row.appendChild(enabledCheckbox);
 
@@ -951,8 +1267,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   columnSelect.addEventListener("change", () => {
     rule.column = columnSelect.value === "" ? null : columnSelect.value;
     syncRuleError();
-    recomputeAndRender({ resetPage: true });
-    saveState();
+    debouncedRequery();
   });
   row.appendChild(columnSelect);
 
@@ -967,9 +1282,9 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   operatorSelect.addEventListener("change", () => {
     rule.operator = operatorSelect.value as FilterOperator;
     valueInput.hidden = rule.operator === "isEmpty";
+    state?.timedOutRuleIds.delete(rule.id);
     syncRuleError();
-    recomputeAndRender({ resetPage: true });
-    saveState();
+    debouncedRequery();
   });
   row.appendChild(operatorSelect);
 
@@ -980,9 +1295,11 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   valueInput.placeholder = "value";
   valueInput.addEventListener("input", () => {
     rule.value = valueInput.value;
-    syncRuleError();
-    recomputeAndRender({ resetPage: true });
-    saveState();
+    // Editing the value clears a "too slow" mark immediately — the rule
+    // gets a fresh chance the next time it's actually queried.
+    state?.timedOutRuleIds.delete(rule.id);
+    syncRuleError(); // instant feedback, never debounced
+    debouncedRequery();
   });
   row.appendChild(valueInput);
 
@@ -992,8 +1309,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   caseCheckbox.title = "Case-sensitive";
   caseCheckbox.addEventListener("change", () => {
     rule.caseSensitive = caseCheckbox.checked;
-    recomputeAndRender({ resetPage: true });
-    saveState();
+    debouncedRequery();
   });
   const caseLabel = document.createElement("label");
   caseLabel.className = "inline-checkbox-label";
@@ -1008,8 +1324,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   modeToggle.addEventListener("click", () => {
     rule.mode = rule.mode === "include" ? "exclude" : "include";
     modeToggle.textContent = rule.mode === "include" ? "Include" : "Exclude";
-    recomputeAndRender({ resetPage: true });
-    saveState();
+    debouncedRequery();
   });
   row.appendChild(modeToggle);
 
@@ -1021,9 +1336,9 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   removeBtn.addEventListener("click", () => {
     if (!state) return;
     state.view.filterRules = state.view.filterRules.filter((r) => r.id !== rule.id);
+    state.timedOutRuleIds.delete(rule.id);
     renderFilterPanel();
-    recomputeAndRender({ resetPage: true });
-    saveState();
+    debouncedRequery();
   });
   row.appendChild(removeBtn);
 
@@ -1032,24 +1347,30 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   row.appendChild(error);
 
   // isRuleActive (src/core/filter.ts) is the single source of truth for
-  // "will this rule do anything", shared with applyFilters, so the hint
-  // shown here always agrees with what's actually being filtered. Checked
-  // in priority order: an invalid regex and a missing column are both
-  // real errors (same strong styling); a missing value is a softer,
-  // "you're not done yet" hint.
+  // "will this rule do anything", shared with applyFilters (in the
+  // worker), so the hint shown here always agrees with what's actually
+  // being filtered. A timed-out regex rule is checked first (strongest,
+  // most specific state); then an invalid regex and a missing column
+  // (same strong styling); a missing value is a softer, "you're not done
+  // yet" hint.
   function syncRuleError(): void {
     if (!state) return;
-    const regexInvalid = !isValidRule(rule);
-    const columnMissing = !regexInvalid && rule.column !== null && state.headers.indexOf(rule.column) === -1;
-    const needsValue = !regexInvalid && !columnMissing && rule.operator !== "isEmpty" && rule.value === "";
+    const timedOut = state.timedOutRuleIds.has(rule.id);
+    const regexInvalid = !timedOut && !isValidRule(rule);
+    const columnMissing = !timedOut && !regexInvalid && rule.column !== null && state.headers.indexOf(rule.column) === -1;
+    const needsValue = !timedOut && !regexInvalid && !columnMissing && rule.operator !== "isEmpty" && rule.value === "";
     // isRuleActive is the single source of truth applyFilters itself uses
     // for "does this rule do anything"; gating on it here (rather than
-    // just the three checks above) keeps the UI from silently drifting out
-    // of sync with applyFilters if either is ever changed alone.
-    const inactive = !isRuleActive(rule, state.headers);
-    row.classList.toggle("rule-error", inactive && (regexInvalid || columnMissing));
+    // just the checks above) keeps the UI from silently drifting out of
+    // sync with applyFilters if either is ever changed alone. A
+    // timed-out rule is also inactive from the worker's perspective (it's
+    // excluded from the query entirely — see sendQueryNow), even though
+    // isRuleActive itself doesn't know about that webview-only concept.
+    const inactive = timedOut || !isRuleActive(rule, state.headers);
+    row.classList.toggle("rule-error", inactive && (timedOut || regexInvalid || columnMissing));
     row.classList.toggle("rule-hint", inactive && needsValue);
-    if (regexInvalid) error.textContent = "Invalid regex — rule ignored";
+    if (timedOut) error.textContent = "Regex too slow — rule disabled";
+    else if (regexInvalid) error.textContent = "Invalid regex — rule ignored";
     else if (columnMissing) error.textContent = "Column not found — rule ignored";
     else if (needsValue) error.textContent = "Enter a value — rule ignored";
     error.hidden = !inactive;
@@ -1080,6 +1401,24 @@ function onCellContextMenu(ev: MouseEvent, column: string, value: string): void 
   contextMenu.style.left = `${ev.pageX}px`;
   contextMenu.style.top = `${ev.pageY}px`;
   contextMenu.hidden = false;
+  clampContextMenuToViewport(ev.pageX, ev.pageY);
+}
+
+/** Clamps the (already-shown) context menu inside the viewport, flipping
+ * left/up instead of overflowing right/bottom — measured only after the
+ * menu is visible and laid out, since its size is otherwise unknown. */
+function clampContextMenuToViewport(x: number, y: number): void {
+  const rect = contextMenu.getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  let left = x;
+  let top = y;
+  if (left + rect.width > viewportWidth) left = Math.max(0, viewportWidth - rect.width);
+  if (top + rect.height > viewportHeight) top = Math.max(0, viewportHeight - rect.height);
+
+  contextMenu.style.left = `${left}px`;
+  contextMenu.style.top = `${top}px`;
 }
 
 function addQuickFilter(column: string, value: string, mode: "include" | "exclude"): void {
@@ -1097,7 +1436,7 @@ function addQuickFilter(column: string, value: string, mode: "include" | "exclud
   contextMenu.hidden = true;
   renderFilterPanel();
   filterPanel.hidden = false;
-  recomputeAndRender({ resetPage: true });
+  requery();
   saveState();
 }
 
@@ -1122,6 +1461,6 @@ document.addEventListener("keydown", (ev) => {
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
     if (!state) return;
     ev.preventDefault();
-    goToPage(state.page + (ev.key === "ArrowRight" ? 1 : -1));
+    requestPage(state.page + (ev.key === "ArrowRight" ? 1 : -1));
   }
 });

@@ -22,6 +22,17 @@ window.acquireVsCodeApi = function () {
 };
 `;
 
+/** A fake absolute URL for the worker script, routed (see bootShell) to
+ * out/webview/worker.js's actual content. main.ts fetches this exactly
+ * the way it would fetch a real webview-resource URI in production —
+ * this is the harness's equivalent of extension.ts's `data-worker-src`,
+ * so the same Blob-URL loading code path is exercised here too, not just
+ * in the real-VS-Code integration suite. An absolute (fake-origin) URL,
+ * not a relative path, since the page's own content is set via
+ * `page.setContent` (no meaningful base URL to resolve a relative one
+ * against). */
+const WORKER_SRC_URL = "https://csv-viewer.invalid/out/webview/worker.js";
+
 /** Every message the client has posted to the host, oldest first. */
 export async function posted(page: Page): Promise<Array<Record<string, unknown>>> {
   return page.evaluate(() => (window as unknown as { __posted: Array<Record<string, unknown>> }).__posted);
@@ -51,7 +62,19 @@ export async function bootShell(page: Page): Promise<void> {
   page.on("pageerror", (err) => {
     throw new Error(`uncaught error in webview: ${err.message}`);
   });
-  await page.setContent('<!doctype html><html><head><meta charset="utf-8"></head><body><div id="app"></div></body></html>');
+  // Serve out/webview/worker.js for the fake worker-src URL main.ts fetches
+  // to build its Blob URL — the same loading path used against the real
+  // webview-resource URI in production (see extension.ts/main.ts).
+  await page.route(WORKER_SRC_URL, async (route) => {
+    await route.fulfill({
+      path: outFile("webview", "worker.js"),
+      contentType: "application/javascript",
+      headers: { "Access-Control-Allow-Origin": "*" },
+    });
+  });
+  await page.setContent(
+    `<!doctype html><html><head><meta charset="utf-8"></head><body><div id="app" data-worker-src="${WORKER_SRC_URL}"></div></body></html>`,
+  );
   await page.addStyleTag({ path: outFile("webview", "main.css") });
   await page.addScriptTag({ content: VSCODE_API_STUB });
   await page.addScriptTag({ path: outFile("webview", "main.js") });
