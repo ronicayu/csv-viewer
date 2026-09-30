@@ -67,6 +67,9 @@ interface AppState {
    * "Auto (…)" option even when it was forced by defaultDelimiter rather
    * than truly auto-detected. */
   detectedDelimiter: string;
+  /** TEST HOOK: mirrors `message.testHooks` from the last `load`. See the
+   * "BEGIN TEST HOOK" block below. */
+  testHooksEnabled: boolean;
 }
 
 let state: AppState | null = null;
@@ -243,6 +246,7 @@ async function onLoad(message: HostToWebviewMessage): Promise<void> {
     filtered: [],
     page: previousPage,
     detectedDelimiter: parsed.delimiter,
+    testHooksEnabled: message.testHooks === true,
   };
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
   quickSearchInput.value = state.view.quickSearch;
@@ -292,6 +296,17 @@ function saveState(): void {
   vscode.postMessage({ type: "saveState", state: state.view });
 }
 
+// ---- BEGIN TEST HOOK (CSV_VIEWER_TEST_HOOKS) ------------------------------
+// Inert unless the host set `testHooks: true` on the `load` message (which
+// only happens when the extension host activated with
+// CSV_VIEWER_TEST_HOOKS=1 — see extension.ts). Lets the integration suite
+// observe render completion without scraping the DOM.
+function notifyRendered(): void {
+  if (!state || !state.testHooksEnabled) return;
+  vscode.postMessage({ type: "rendered", rowCount: state.filtered.length, headers: state.headers });
+}
+// ---- END TEST HOOK ---------------------------------------------------------
+
 // ---- Derived rows (filter + sort while preserving row identity) --------
 
 /**
@@ -317,6 +332,7 @@ function recomputeAndRender(options: { resetPage?: boolean } = {}): void {
   renderTableBody();
   renderStatusBar();
   renderPagerBar();
+  notifyRendered();
 }
 
 // ---- Table head ----------------------------------------------------------
@@ -495,12 +511,14 @@ function goToPage(page: number): void {
   const clamped = clampPage(page, state.filtered.length, state.view.pageSize);
   if (clamped === state.page) {
     renderPagerBar(); // still resync e.g. the page-number input's text
+    notifyRendered();
     return;
   }
   state.page = clamped;
   renderTableBody();
   renderPagerBar();
   tableScroll.scrollTop = 0;
+  notifyRendered();
 }
 
 pagerFirstBtn.addEventListener("click", () => goToPage(1));
@@ -649,6 +667,7 @@ expandAllBtn.addEventListener("click", () => {
   const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
   for (let i = start; i < end; i++) state.expanded.add(state.filtered[i].id);
   renderTableBody();
+  notifyRendered();
 });
 
 collapseAllBtn.addEventListener("click", () => {
@@ -656,6 +675,7 @@ collapseAllBtn.addEventListener("click", () => {
   const { start, end } = pageSlice(state.filtered.length, state.page, state.view.pageSize);
   for (let i = start; i < end; i++) state.expanded.delete(state.filtered[i].id);
   renderTableBody();
+  notifyRendered();
 });
 
 // ---- Sort by… dropdown (for detail-only columns, which have no header) ------

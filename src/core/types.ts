@@ -90,6 +90,12 @@ export interface LoadMessage {
    * .tsv/.tab files, otherwise `""` (meaning fall through to real
    * auto-detection in parseCsv). */
   defaultDelimiter: string;
+  /** TEST HOOK (see extension.ts / main.ts "BEGIN TEST HOOK" blocks): only
+   * ever `true` when the extension host activated with
+   * `CSV_VIEWER_TEST_HOOKS=1`. Tells the webview to also emit
+   * `RenderedMessage`s so the integration suite can observe render
+   * completion. Omitted (falsy) in every normal run. */
+  testHooks?: boolean;
 }
 
 export interface ReadyMessage {
@@ -105,5 +111,13 @@ export interface OpenAsTextMessage {
   type: "openAsText";
 }
 
+/** TEST HOOK: posted by the webview after each render, only when `load` was
+ * flagged with `testHooks: true`. Never sent otherwise. */
+export interface RenderedMessage {
+  type: "rendered";
+  rowCount: number;
+  headers: string[];
+}
+
 export type HostToWebviewMessage = LoadMessage;
-export type WebviewToHostMessage = ReadyMessage | SaveStateMessage | OpenAsTextMessage;
+export type WebviewToHostMessage = ReadyMessage | SaveStateMessage | OpenAsTextMessage | RenderedMessage;

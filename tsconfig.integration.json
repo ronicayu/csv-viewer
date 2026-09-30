@@ -1,0 +1,19 @@
+{
+  "//": "Compiles the extension-host integration suite (src/test/integration), which runs inside a real VS Code Extension Test Host via @vscode/test-electron. Separate from tsconfig.json so `npm run compile` / `npm test` never pull in mocha/@vscode/test-electron types, and so integration specs (*.itest.ts) never get pulled into the vitest run.",
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2022",
+    "outDir": "out-integration",
+    "rootDir": "src",
+    "lib": ["ES2022"],
+    "sourceMap": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/test/integration/**/*.ts", "src/core/**/*.ts"]
+}
