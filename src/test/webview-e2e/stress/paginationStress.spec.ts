@@ -1,0 +1,129 @@
+// Pagination stress: every control at its bounds, hostile page-input
+// values, Alt+Arrow with focus on a button vs. an input, a page-size change
+// on the last page, and filtering to 0 rows and back.
+
+import { expect, test } from "@playwright/test";
+import { bootAndLoad, defaultViewState } from "../harness";
+import { trackConsoleErrors, wideFixture } from "./stressHelpers";
+
+const fixture = wideFixture(250, 4); // pageSize 100 -> pages of 100,100,50
+
+test.beforeEach(async ({ page }) => {
+  await bootAndLoad(page, {
+    fileKey: "file:///pagestress.csv",
+    headers: fixture.headers,
+    rows: fixture.rows,
+    state: defaultViewState(),
+    defaultTableColumns: 4,
+  });
+});
+
+async function commit(page: import("@playwright/test").Page, value: string): Promise<void> {
+  const input = page.locator("#pager-page-input");
+  await input.fill(value);
+  await input.press("Enter");
+}
+
+test("page input '0' clamps up to page 1", async ({ page }) => {
+  await page.locator("#pager-next-btn").click();
+  await commit(page, "0");
+  await expect(page.locator("#pager-page-input")).toHaveValue("1");
+});
+
+test("page input '-1' clamps up to page 1", async ({ page }) => {
+  await page.locator("#pager-next-btn").click();
+  await commit(page, "-1");
+  await expect(page.locator("#pager-page-input")).toHaveValue("1");
+});
+
+test("page input '1e9' clamps down to the last page without hanging or erroring", async ({ page }) => {
+  const consoleErrors = trackConsoleErrors(page);
+  await commit(page, "1e9");
+  await expect(page.locator("#pager-page-input")).toHaveValue("3");
+  expect(consoleErrors).toEqual([]);
+});
+
+test("page input 'abc' can't actually be typed (native type=number input rejects it outright), and forcing it in normalizes to empty and is rejected the same way as a blank input", async ({
+  page,
+}) => {
+  await page.locator("#pager-next-btn").click();
+  await expect(page.locator("#pager-page-input")).toHaveValue("2");
+
+  // A real keyboard user literally cannot get "abc" into a type=number
+  // input — Playwright's own `.fill()` refuses to try. Prove that, then
+  // exercise the underlying defensive branch (commitPageInput's `!
+  // Number.isFinite(parsed)` check) via the one way non-numeric text can
+  // reach it: the browser itself normalizes an assigned non-numeric value
+  // on a number input down to "".
+  await expect(async () => {
+    await page.locator("#pager-page-input").fill("abc");
+  }).rejects.toThrow();
+
+  const input = page.locator("#pager-page-input");
+  const normalized = await input.evaluate((el: HTMLInputElement) => {
+    el.value = "abc";
+    return el.value;
+  });
+  expect(normalized).toBe(""); // the browser's own normalization, not our code
+  await input.press("Enter");
+  await expect(input).toHaveValue("2"); // same restore-current-page behavior as a blank input
+});
+
+test("page input '2.7' truncates (not rounds) to page 2", async ({ page }) => {
+  await commit(page, "2.7");
+  await expect(page.locator("#pager-page-input")).toHaveValue("2");
+  await expect(page.locator("#pager-row-range")).toHaveText("Rows 101–200 of 250");
+});
+
+test("page input left empty then blurred restores the current page", async ({ page }) => {
+  await page.locator("#pager-last-btn").click();
+  await expect(page.locator("#pager-page-input")).toHaveValue("3");
+
+  const input = page.locator("#pager-page-input");
+  await input.fill("");
+  await input.blur();
+  await expect(input).toHaveValue("3");
+});
+
+test("Alt+ArrowRight changes pages when focus is on a button (only form controls are exempted)", async ({ page }) => {
+  await page.locator("#pager-next-btn").focus();
+  await page.keyboard.press("Alt+ArrowRight");
+  await expect(page.locator("#pager-page-input")).toHaveValue("2");
+});
+
+test("Alt+ArrowRight is ignored when focus is on the page-number input itself", async ({ page }) => {
+  await page.locator("#pager-page-input").focus();
+  await page.keyboard.press("Alt+ArrowRight");
+  await expect(page.locator("#pager-page-input")).toHaveValue("1");
+});
+
+test("changing the page size while on the last page keeps the first-visible row in view", async ({ page }) => {
+  await page.locator("#pager-last-btn").click();
+  await expect(page.locator("#pager-page-input")).toHaveValue("3"); // rows 201-250
+  await page.locator("#pager-page-size-select").selectOption("50");
+
+  // Row 201 (index 200) at size 50 falls on page 5 (the new last page).
+  await expect(page.locator("#pager-page-input")).toHaveValue("5");
+  await expect(page.locator("#pager-page-count")).toHaveText("5");
+  await expect(page.locator("tr.data-row")).toHaveCount(50);
+});
+
+test("filtering down to 0 rows disables every nav control, and clearing the filter recovers to page 1 with everything re-enabled", async ({
+  page,
+}) => {
+  await page.locator("#pager-next-btn").click();
+  await expect(page.locator("#pager-page-input")).toHaveValue("2");
+
+  await page.locator("#quick-search").fill("zzz-nothing-matches-zzz");
+  await expect(page.locator("#pager-row-range")).toHaveText("No matching rows");
+  for (const id of ["#pager-first-btn", "#pager-prev-btn", "#pager-next-btn", "#pager-last-btn", "#pager-page-input"]) {
+    await expect(page.locator(id)).toBeDisabled();
+  }
+
+  await page.locator("#quick-search").fill("");
+  await expect(page.locator("#pager-page-input")).toHaveValue("1");
+  for (const id of ["#pager-next-btn", "#pager-last-btn"]) {
+    await expect(page.locator(id)).toBeEnabled();
+  }
+  await expect(page.locator("tr.data-row")).toHaveCount(100);
+});
