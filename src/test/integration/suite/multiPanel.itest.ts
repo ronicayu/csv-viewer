@@ -65,7 +65,11 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
   test("two different files open in two viewers at once render independently, with no cross-talk", async () => {
     const uriA = fixture("fileA.csv");
     const uriB = fixture("fileB.csv");
+    // Let A finish loading before B's tab covers it: VS Code holds messages
+    // to a hidden webview until it is visible again, so opening B straight
+    // away can leave A unrendered for as long as it stays in the background.
     await openInViewer(uriA);
+    await waitForRender(await getTestApi(), fileKeyFor(uriA));
     await openInViewer(uriB);
 
     const api = await getTestApi();
@@ -89,7 +93,11 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
   test("delimiter state is keyed per file, not shared, verified through the real webview via a synthetic load", async () => {
     const uriA = fixture("fileA.csv");
     const uriB = fixture("fileB.csv");
+    // Let A finish loading before B's tab covers it: VS Code holds messages
+    // to a hidden webview until it is visible again, so opening B straight
+    // away can leave A unrendered for as long as it stays in the background.
     await openInViewer(uriA);
+    await waitForRender(await getTestApi(), fileKeyFor(uriA));
     await openInViewer(uriB);
     const api = await getTestApi();
     const keyA = fileKeyFor(uriA);
