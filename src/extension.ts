@@ -7,6 +7,14 @@ import {
   type WebviewToHostMessage,
 } from "./core/types";
 
+/** Injectable so tests can observe and answer the prompt: VS Code's real
+ * `showInformationMessage` can't be driven by a click in the Extension
+ * Test Host. Default implementation below is the real thing; the test
+ * hook block swaps in a version that records the prompt and waits for
+ * `choosePromptButton` instead of showing anything. */
+type ShowPromptFn = (message: string, ...items: string[]) => Thenable<string | undefined>;
+let showPrompt: ShowPromptFn = (message, ...items) => vscode.window.showInformationMessage(message, ...items);
+
 const VIEW_TYPE = "csvViewer.table";
 const STATE_PREFIX = "csvViewer.state:";
 const LARGE_FILE_BYTES = 50 * 1024 * 1024;
@@ -19,6 +27,20 @@ const RELOAD_DEBOUNCE_MS = 300;
 /** How long to wait after a delete event before treating the file as gone. */
 const DELETE_GRACE_MS = 500;
 
+/** globalState flag: once true, the first-run "View as a table?" prompt
+ * (see maybeSuggestOpenAsTable) never shows again for this user, in any
+ * workspace. Set on any prompt response (including dismissing with the X)
+ * and also the moment the user demonstrates they already know the viewer
+ * exists — opening it themselves (resolveCustomEditor runs for ANY
+ * invocation path: the command, "Open With", or an editor association) or
+ * using "Open as Text". */
+const SUGGEST_DONE_KEY = "csvViewer.suggestOnOpen.done";
+/** globalState key for the per-user set of one-time webview hint ids the
+ * user has already dismissed (see HintSeenMessage / LoadMessage.hintsSeen
+ * in core/types.ts). Lives on the host, not per-file, so a hint dismissed
+ * once never resurfaces in any file. */
+const HINTS_SEEN_KEY = "csvViewer.hintsSeen";
+
 // ---- BEGIN TEST HOOK (CSV_VIEWER_TEST_HOOKS) ------------------------------
 // Test-only instrumentation for src/test/integration. Completely inert
 // (zero extra state, zero extra work, activate() returns undefined as
@@ -28,17 +50,38 @@ const DELETE_GRACE_MS = 500;
 const TEST_HOOKS_ENABLED = process.env.CSV_VIEWER_TEST_HOOKS === "1";
 /** fileKey (document.uri.toString()) -> live panel, for postToWebview(). */
 const testHookPanels = new Map<string, vscode.WebviewPanel>();
+/** fileKey -> the exact onDidReceiveMessage handler resolveCustomEditor
+ * registered for that panel, so the test hook can simulate a
+ * WebviewToHostMessage (like hintSeen) without needing a real webview to
+ * send one — there's no in-test way to run code inside the actual webview
+ * context the way the Playwright webview-e2e suite can. */
+const testHookMessageHandlers = new Map<string, (message: WebviewToHostMessage) => void>();
 /** fileKey -> every WebviewToHostMessage received so far, in order. */
 const testHookMessages = new Map<string, WebviewToHostMessage[]>();
+/** fileKey -> every HostToWebviewMessage the host has sent, in order (so
+ * tests can assert on messages like fileDeleted/fileRestored that never
+ * come back from the webview and so wouldn't show up in testHookMessages). */
+const testHookOutgoing = new Map<string, HostToWebviewMessage[]>();
 /** Every warning/error notification the extension has shown, in order. */
 const testHookNotifications: { level: "warning" | "error"; message: string }[] = [];
+/** The most recent first-run "View as a table?" prompt still awaiting a
+ * response, plus the function to resolve it — set by the test-hook
+ * showPrompt implementation, consumed by choosePromptButton(). */
+let testHookPendingPrompt: { message: string; buttons: string[]; resolve: (choice: string | undefined) => void } | undefined;
 
 export interface CsvViewerTestApi {
   /** Messages received from the webview for a given document, in order. */
   getMessages(fileKey: string): WebviewToHostMessage[];
+  /** Messages the host has sent to a given document's webview, in order
+   * (including ones no webview build acts on, like fileDeleted/fileRestored). */
+  getOutgoing(fileKey: string): HostToWebviewMessage[];
   /** Post a message directly into a given document's live webview,
    * bypassing the UI. Returns false if no panel is open for that fileKey. */
   postToWebview(fileKey: string, message: HostToWebviewMessage): boolean;
+  /** Feeds a message directly into a given document's onDidReceiveMessage
+   * handler, as if the webview had sent it. Returns false if no panel
+   * (and thus no handler) is registered for that fileKey. */
+  simulateWebviewMessage(fileKey: string, message: WebviewToHostMessage): boolean;
   /** Warning/error messages shown via vscode.window.show*Message so far. */
   getNotifications(): { level: "warning" | "error"; message: string }[];
   /** Number of currently-live CSV Viewer panels (for disposal/leak checks). */
@@ -47,11 +90,37 @@ export interface CsvViewerTestApi {
    * verifying the rename-migration behavior (see onDidRenameFiles below)
    * directly rather than only inferring it from webview messages. */
   getWorkspaceStateKeys(): string[];
+  /** The first-run suggestion prompt currently awaiting a response (if
+   * any), so a test can assert it appeared and read its exact copy. */
+  getPendingPrompt(): { message: string; buttons: string[] } | undefined;
+  /** Answers the pending prompt as if the user clicked `button` (must be
+   * one of its `buttons`), or dismissed it (pass undefined, matching the
+   * X button / Escape). Throws if there's no pending prompt. */
+  choosePromptButton(button: string | undefined): void;
+  /** The per-user hint ids currently recorded in globalState
+   * (`csvViewer.hintsSeen`), for asserting hintSeen round-trips. */
+  getHintsSeen(): string[];
+  /** Clears the "never ask again" flag for the first-run suggestion prompt
+   * (and drops any currently-pending prompt), so a test suite can exercise
+   * the prompt more than once within the same Extension Test Host run
+   * without it being permanently suppressed by an earlier test. Real users
+   * never get this — it only exists for test isolation. */
+  resetSuggestPromptState(): void;
 }
 // ---- END TEST HOOK setup ---------------------------------------------------
 
 export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | undefined {
   const provider = new CsvEditorProvider(context);
+
+  if (TEST_HOOKS_ENABLED) {
+    // Real showInformationMessage can't be clicked from the Extension Test
+    // Host. Route the prompt through a recorder the test hook API can
+    // observe and answer instead of actually showing anything.
+    showPrompt = (message, ...buttons) =>
+      new Promise<string | undefined>((resolve) => {
+        testHookPendingPrompt = { message, buttons, resolve };
+      });
+  }
 
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider(VIEW_TYPE, provider, {
@@ -77,9 +146,28 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
     vscode.commands.registerCommand("csvViewer.openAsText", async () => {
       const uri = CsvEditorProvider.activeUri;
       if (!uri) return;
+      // The user just used the explicit escape hatch back to plain text,
+      // which demonstrates they already know the viewer exists — never
+      // show the first-run suggestion prompt again (see
+      // maybeSuggestOpenAsTable).
+      void context.globalState.update(SUGGEST_DONE_KEY, true);
       await vscode.commands.executeCommand("vscode.openWith", uri, "default");
     }),
   );
+
+  // First-run discoverability (pm-review.md §3, option C): the first time a
+  // .csv/.tsv/.tab file becomes the active *text* editor after install,
+  // suggest opening it as a table. Needs `onStartupFinished` (declared in
+  // package.json's activationEvents) plus this listener, since there's no
+  // built-in language id to activate on for a plain CSV text document.
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      void maybeSuggestOpenAsTable(context, editor);
+    }),
+  );
+  // Also check whatever's already active at activation time (e.g. a CSV
+  // opened before the extension finished activating on startup).
+  void maybeSuggestOpenAsTable(context, vscode.window.activeTextEditor);
 
   // Renaming a file (or a folder containing one) moves it to a new URI, but
   // per-file view state (column visibility, filters, sort, ...) is keyed by
@@ -99,15 +187,34 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
   if (TEST_HOOKS_ENABLED) {
     return {
       getMessages: (fileKey) => (testHookMessages.get(fileKey) ?? []).slice(),
+      getOutgoing: (fileKey) => (testHookOutgoing.get(fileKey) ?? []).slice(),
       postToWebview: (fileKey, message) => {
         const panel = testHookPanels.get(fileKey);
         if (!panel) return false;
         void panel.webview.postMessage(message);
         return true;
       },
+      simulateWebviewMessage: (fileKey, message) => {
+        const handler = testHookMessageHandlers.get(fileKey);
+        if (!handler) return false;
+        handler(message);
+        return true;
+      },
       getNotifications: () => testHookNotifications.slice(),
       panelCount: () => testHookPanels.size,
       getWorkspaceStateKeys: () => context.workspaceState.keys().filter((k) => k.startsWith(STATE_PREFIX)),
+      getPendingPrompt: () => (testHookPendingPrompt ? { message: testHookPendingPrompt.message, buttons: testHookPendingPrompt.buttons } : undefined),
+      choosePromptButton: (button) => {
+        if (!testHookPendingPrompt) throw new Error("choosePromptButton: no prompt is currently pending");
+        const { resolve } = testHookPendingPrompt;
+        testHookPendingPrompt = undefined;
+        resolve(button);
+      },
+      getHintsSeen: () => context.globalState.get<string[]>(HINTS_SEEN_KEY, []),
+      resetSuggestPromptState: () => {
+        void context.globalState.update(SUGGEST_DONE_KEY, undefined);
+        testHookPendingPrompt = undefined;
+      },
     };
   }
   return undefined;
@@ -116,6 +223,71 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
 export function deactivate(): void {
   // No teardown needed: everything is disposed via context.subscriptions
   // and per-panel listeners registered in resolveCustomEditor.
+}
+
+/** First-run discoverability prompt (pm-review.md §3, option C). Shows at
+ * most once per user, ever: any response (including dismissing with the
+ * X) permanently disables it via SUGGEST_DONE_KEY, and it's also disabled
+ * the moment the user shows they already know the viewer exists (opening
+ * it themselves, or using "Open as Text" — see resolveCustomEditor and the
+ * openAsText command above). */
+async function maybeSuggestOpenAsTable(context: vscode.ExtensionContext, editor: vscode.TextEditor | undefined): Promise<void> {
+  if (!editor) return;
+  if (!vscode.workspace.getConfiguration("csvViewer").get<boolean>("suggestOnOpen", true)) return;
+  if (context.globalState.get<boolean>(SUGGEST_DONE_KEY, false)) return;
+
+  const uri = editor.document.uri;
+  // Untitled documents have no real file path/extension to match; skip
+  // them (and, with the same check, any other scheme with no real
+  // extension — e.g. a diff editor's virtual document side, which also
+  // won't match the extension regex below).
+  if (uri.scheme === "untitled") return;
+  if (!/\.(csv|tsv|tab)$/i.test(uri.path)) return;
+  if (isViewerAlreadyOpenFor(uri)) return;
+
+  const name = basename(uri);
+  const OPEN_AS_TABLE = "Open as Table";
+  const ALWAYS_FOR_CSV = "Always for CSV Files";
+  const DONT_ASK_AGAIN = "Don't Ask Again";
+  const choice = await showPrompt(`View "${name}" as a table?`, OPEN_AS_TABLE, ALWAYS_FOR_CSV, DONT_ASK_AGAIN);
+
+  // Any response at all — including dismissing with the X, which resolves
+  // to undefined — means never ask again.
+  void context.globalState.update(SUGGEST_DONE_KEY, true);
+
+  if (choice === OPEN_AS_TABLE) {
+    await vscode.commands.executeCommand("vscode.openWith", uri, VIEW_TYPE);
+  } else if (choice === ALWAYS_FOR_CSV) {
+    await addCsvEditorAssociations();
+    await vscode.commands.executeCommand("vscode.openWith", uri, VIEW_TYPE);
+    void vscode.window.showInformationMessage(`CSV files will now open as tables. Use "Open as Text" in the editor title to go back.`);
+  }
+  // DONT_ASK_AGAIN (or a dismiss): nothing further to do.
+}
+
+/** Writes `workbench.editorAssociations` at user (global) scope, adding
+ * *.csv/*.tsv/*.tab -> csvViewer.table while preserving every existing
+ * entry (including one already covering an unrelated extension). */
+async function addCsvEditorAssociations(): Promise<void> {
+  const config = vscode.workspace.getConfiguration();
+  const current = config.get<Record<string, string>>("workbench.editorAssociations") ?? {};
+  const updated: Record<string, string> = { ...current, "*.csv": VIEW_TYPE, "*.tsv": VIEW_TYPE, "*.tab": VIEW_TYPE };
+  await config.update("workbench.editorAssociations", updated, vscode.ConfigurationTarget.Global);
+}
+
+/** True if `uri` is already open in a csvViewer.table tab in any editor
+ * group — used to avoid suggesting the viewer for a file the user has
+ * already opened there (e.g. side-by-side with its text editor). */
+function isViewerAlreadyOpenFor(uri: vscode.Uri): boolean {
+  const target = uri.toString();
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      if (tab.input instanceof vscode.TabInputCustom && tab.input.viewType === VIEW_TYPE && tab.input.uri.toString() === target) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** Moves every workspaceState entry keyed under `oldUri` (exactly, or
@@ -189,6 +361,34 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
     const fileKey = uri.toString();
     CsvEditorProvider.activeUri = uri;
     if (TEST_HOOKS_ENABLED) testHookPanels.set(fileKey, webviewPanel);
+    // The viewer is actually open now, regardless of how it got here (the
+    // command, "Open With", or an editor association) — the user
+    // demonstrably knows it exists, so the first-run suggestion prompt
+    // should never show again (see maybeSuggestOpenAsTable above). Skip
+    // the write once it's already set, so repeatedly opening/closing the
+    // viewer (as the disposal/multi-panel suites do, dozens of times)
+    // doesn't re-persist the same value over and over.
+    if (!this.context.globalState.get<boolean>(SUGGEST_DONE_KEY, false)) {
+      void this.context.globalState.update(SUGGEST_DONE_KEY, true);
+    }
+
+    // Every message this panel sends to its webview goes through here so
+    // the test hook can record it (see CsvViewerTestApi.getOutgoing) —
+    // needed for messages like fileDeleted/fileRestored that the webview
+    // never echoes back, so they'd otherwise be unobservable from a test.
+    const send = (message: HostToWebviewMessage): void => {
+      if (TEST_HOOKS_ENABLED) {
+        const arr = testHookOutgoing.get(fileKey) ?? [];
+        arr.push(message);
+        testHookOutgoing.set(fileKey, arr);
+      }
+      void webview.postMessage(message);
+    };
+
+    // Tracks whether the webview currently believes the file is deleted
+    // (see the watcher's onDidDelete handler below), so a later successful
+    // reload can tell the webview the file came back.
+    let isDeleted = false;
 
     // Reads the file fresh from disk via workspace.fs (works for files of
     // any size VS Code will let us stat/read, and outside the workspace,
@@ -255,9 +455,15 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
         state,
         defaultTableColumns: this.defaultTableColumns(),
         defaultDelimiter: this.delimiterFor(uri) ?? "",
+        hintsSeen: this.context.globalState.get<string[]>(HINTS_SEEN_KEY, []),
         testHooks: TEST_HOOKS_ENABLED,
       };
-      void webview.postMessage(message);
+      send(message);
+
+      if (isDeleted) {
+        isDeleted = false;
+        send({ type: "fileRestored" });
+      }
     };
 
     // Live reload: watch exactly this file on disk (not the whole
@@ -298,9 +504,12 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
           await vscode.workspace.fs.stat(uri);
           scheduleReload();
         } catch {
-          const msg = "CSV Viewer: File was deleted — showing last loaded contents.";
+          const name = basename(uri);
+          const msg = `CSV Viewer: "${name}" was deleted. Showing the last loaded contents.`;
           if (TEST_HOOKS_ENABLED) testHookNotifications.push({ level: "warning", message: msg });
           void vscode.window.showWarningMessage(msg);
+          isDeleted = true;
+          send({ type: "fileDeleted", name });
         }
       }, DELETE_GRACE_MS);
     });
@@ -309,7 +518,7 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
       if (e.webviewPanel.active) CsvEditorProvider.activeUri = uri;
     });
 
-    const messageSub = webview.onDidReceiveMessage((message: WebviewToHostMessage) => {
+    const handleWebviewMessage = (message: WebviewToHostMessage): void => {
       if (TEST_HOOKS_ENABLED) {
         const arr = testHookMessages.get(fileKey) ?? [];
         arr.push(message);
@@ -325,8 +534,13 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
         case "openAsText":
           void vscode.commands.executeCommand("vscode.openWith", uri, "default");
           break;
+        case "hintSeen":
+          this.markHintSeen(message.id);
+          break;
       }
-    });
+    };
+    const messageSub = webview.onDidReceiveMessage(handleWebviewMessage);
+    if (TEST_HOOKS_ENABLED) testHookMessageHandlers.set(fileKey, handleWebviewMessage);
 
     webviewPanel.onDidDispose(() => {
       if (reloadDebounceHandle) clearTimeout(reloadDebounceHandle);
@@ -337,7 +551,10 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
       watcher.dispose();
       viewStateSub.dispose();
       messageSub.dispose();
-      if (TEST_HOOKS_ENABLED) testHookPanels.delete(fileKey);
+      if (TEST_HOOKS_ENABLED) {
+        testHookPanels.delete(fileKey);
+        testHookMessageHandlers.delete(fileKey);
+      }
     });
   }
 
@@ -370,6 +587,16 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
 
   private saveState(fileKey: string, state: ViewState): void {
     void this.context.workspaceState.update(STATE_PREFIX + fileKey, state);
+  }
+
+  /** Records a per-user hint id as seen (HintSeenMessage), globally (not
+   * per-file), so it's included in every future `load`'s `hintsSeen` and
+   * the webview never shows that hint again for this user. */
+  private markHintSeen(id: string): void {
+    const seen = this.context.globalState.get<string[]>(HINTS_SEEN_KEY, []);
+    if (!seen.includes(id)) {
+      void this.context.globalState.update(HINTS_SEEN_KEY, [...seen, id]);
+    }
   }
 
   private buildHtml(webview: vscode.Webview): string {

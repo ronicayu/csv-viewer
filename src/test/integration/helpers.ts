@@ -12,10 +12,16 @@ export const EXTENSION_ID = "ronica.csv-viewer";
  * is compiled separately, bundled by esbuild) into its program. */
 export interface CsvViewerTestApi {
   getMessages(fileKey: string): WebviewToHostMessage[];
+  getOutgoing(fileKey: string): HostToWebviewMessage[];
   postToWebview(fileKey: string, message: HostToWebviewMessage): boolean;
+  simulateWebviewMessage(fileKey: string, message: WebviewToHostMessage): boolean;
   getNotifications(): { level: "warning" | "error"; message: string }[];
   panelCount(): number;
   getWorkspaceStateKeys(): string[];
+  getPendingPrompt(): { message: string; buttons: string[] } | undefined;
+  choosePromptButton(button: string | undefined): void;
+  getHintsSeen(): string[];
+  resetSuggestPromptState(): void;
 }
 
 export async function getTestApi(): Promise<CsvViewerTestApi> {
@@ -101,6 +107,26 @@ export async function waitForSaveState(
   });
   const msgs = api.getMessages(fileKey).filter((m): m is SaveStateMessage => m.type === "saveState");
   return msgs[msgs.length - 1];
+}
+
+/** Waits until the first-run suggestion prompt (see
+ * maybeSuggestOpenAsTable in extension.ts) is pending, and returns it. */
+export async function waitForPrompt(api: CsvViewerTestApi, opts: { timeoutMs?: number } = {}): Promise<{ message: string; buttons: string[] }> {
+  await waitFor(() => api.getPendingPrompt() !== undefined, {
+    timeoutMs: opts.timeoutMs,
+    message: "the first-run suggestion prompt never appeared",
+  });
+  return api.getPendingPrompt()!;
+}
+
+/** Asserts no prompt becomes pending within a short window — used to prove
+ * the suggestion prompt does NOT show in a given scenario. Keep this
+ * window short; it only needs to be long enough for the (synchronous-ish)
+ * onDidChangeActiveTextEditor handler to have run. */
+export async function assertNoPromptAppears(api: CsvViewerTestApi, windowMs = 1000): Promise<void> {
+  await sleep(windowMs);
+  const pending = api.getPendingPrompt();
+  if (pending) throw new Error(`expected no prompt, but one is pending: ${JSON.stringify(pending)}`);
 }
 
 export async function waitForReady(api: CsvViewerTestApi, fileKey: string, opts: { timeoutMs?: number } = {}): Promise<void> {

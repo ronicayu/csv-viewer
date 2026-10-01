@@ -247,5 +247,46 @@ suite("Live reload", () => {
 
     const deletedWarning = newNotifications.find((n) => n.level === "warning" && /deleted/i.test(n.message) && /last loaded/i.test(n.message));
     assert.ok(deletedWarning, `expected a "File was deleted — showing last loaded contents" warning, got: ${JSON.stringify(newNotifications)}`);
+    // The toast names the file (pm-review.md §3 / ux-review.md §4: the old
+    // copy "File was deleted — showing last loaded contents." didn't).
+    assert.ok(
+      deletedWarning!.message.includes('"live-delete.csv"'),
+      `expected the toast to name the file, got: ${deletedWarning!.message}`,
+    );
+
+    // A fileDeleted message naming the file was posted to the webview too
+    // (core/types.ts's FileDeletedMessage), independent of the toast.
+    const outgoing = api.getOutgoing(key);
+    const fileDeletedMsgs = outgoing.filter((m) => m.type === "fileDeleted") as { type: "fileDeleted"; name: string }[];
+    assert.strictEqual(fileDeletedMsgs.length, 1, `expected exactly one fileDeleted message, got: ${JSON.stringify(fileDeletedMsgs)}`);
+    assert.strictEqual(fileDeletedMsgs[0].name, "live-delete.csv");
+  });
+
+  test("a file reported deleted that later reappears triggers a reload plus a fileRestored message", async () => {
+    const filePath = path.join(await freshDir("live-restore-dir"), "live-restore.csv");
+    await fsp.writeFile(filePath, "id,val\n1,a\n");
+    const uri = vscode.Uri.file(filePath);
+    await openInViewer(uri);
+    const api = await getTestApi();
+    const key = fileKeyFor(uri);
+    await waitForRender(api, key);
+
+    await fsp.unlink(filePath);
+    await waitFor(() => api.getOutgoing(key).some((m) => m.type === "fileDeleted"), {
+      timeoutMs: 8000,
+      message: "expected a fileDeleted message after deleting the open file",
+    });
+
+    await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n3,c\n");
+    await waitFor(
+      () => {
+        const renders = api.getMessages(key).filter((m) => m.type === "rendered") as { rowCount: number }[];
+        return renders[renders.length - 1]?.rowCount === 3;
+      },
+      { timeoutMs: 8000, message: "the recreated file's content was never reflected" },
+    );
+
+    const outgoing = api.getOutgoing(key);
+    assert.strictEqual(outgoing.filter((m) => m.type === "fileRestored").length, 1, `expected exactly one fileRestored message, got: ${JSON.stringify(outgoing)}`);
   });
 });

@@ -124,6 +124,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
       state: { columnVisibility: {}, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: ";", quotes: true },
       defaultTableColumns: 8,
       defaultDelimiter: "",
+      hintsSeen: [],
       testHooks: true,
     });
     assert.ok(posted, "postToWebview found no live panel for fileA");
