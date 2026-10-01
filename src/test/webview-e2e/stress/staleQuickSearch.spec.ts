@@ -41,7 +41,7 @@ async function loadWideFixtureInBrowser(
       }
       const text = lines.join("\n");
       window.postMessage(
-        { type: "load", fileKey: "file:///stale-search.csv", text, state, defaultTableColumns: 8, defaultDelimiter: "" },
+        { type: "load", fileKey: "file:///stale-search.csv", text, state, defaultTableColumns: 8, defaultDelimiter: "", testHooks: true, hintsSeen: [] },
         "*",
       );
     },
@@ -77,13 +77,34 @@ test("a slow-to-answer quick search never overwrites a newer one's result, even 
   const searchB = ""; // cleared — matches every row again
   const searchBText = `Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`;
 
-  await page.locator("#quick-search").fill(searchA);
-  // Long enough for A's debounce (150ms) to fire and its query to reach
-  // the worker, nowhere near long enough for that query to finish
-  // (quick search across every column of 200k x 30 rows is the ~300-500ms
-  // operation this test relies on being slow).
-  await page.waitForTimeout(200);
-  await page.locator("#quick-search").fill(searchB);
+  // Both inputs are driven from inside the page, not through two separate
+  // Playwright calls: on a busy machine the gap between two calls can
+  // stretch to seconds, by which time A has legitimately finished and
+  // rendered before B was ever typed. Here B is typed in the same task
+  // that observes A's query being sent, so the only timing left is the one
+  // the test is about: A's query (a full scan of 200k x 30) outlasting
+  // B's 150ms debounce.
+  await page.evaluate(
+    ({ a, b }) =>
+      new Promise<void>((resolve) => {
+        const w = window as unknown as { __workerQueryCount?: number };
+        const input = document.getElementById("quick-search") as HTMLInputElement;
+        const sentBefore = w.__workerQueryCount ?? 0;
+        input.value = a;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const poll = (): void => {
+          if ((w.__workerQueryCount ?? 0) > sentBefore) {
+            input.value = b;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            resolve();
+          } else {
+            setTimeout(poll, 5);
+          }
+        };
+        poll();
+      }),
+    { a: searchA, b: searchB },
+  );
 
   // Once everything settles, the *only* thing that should ever have
   // rendered is B's result — A's answer, however late it arrives from the

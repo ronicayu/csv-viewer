@@ -22,14 +22,7 @@ import { cycleSortForColumn } from "../core/sort";
 import { detailOnlyColumns, getVisibility, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
-import type {
-  ColumnVisibilityMap,
-  FilterOperator,
-  FilterRule,
-  HostToWebviewMessage,
-  ViewState,
-  WebviewToHostMessage,
-} from "../core/types";
+import type { ColumnVisibilityMap, FilterOperator, FilterRule, HostToWebviewMessage, ViewState, WebviewToHostMessage, LoadMessage } from "../core/types";
 import { REGEX_TIMEOUT_MS, WORKING_INDICATOR_DELAY_MS } from "./workerProtocol";
 import type { ParseOptionsMsg, WorkerRequest, WorkerResponse, WorkerRow } from "./workerProtocol";
 
@@ -441,7 +434,7 @@ function yieldFrame(): Promise<void> {
   });
 }
 
-async function onLoad(message: HostToWebviewMessage): Promise<void> {
+async function onLoad(message: LoadMessage): Promise<void> {
   const view = message.state;
   // Defense in depth: normalize fields that might be missing from state
   // saved before they existed (or a bare message a test pushes directly)

@@ -145,6 +145,7 @@ export interface FixtureLoad {
    * messages, or the worker-query-sent counter on `window`) opts in
    * explicitly. */
   testHooks?: boolean;
+  hintsSeen?: string[];
 }
 
 /** A `load` message built from raw CSV/TSV text instead of headers/rows —
@@ -157,6 +158,7 @@ export interface TextLoad {
   defaultTableColumns: number;
   defaultDelimiter?: string;
   testHooks?: boolean;
+  hintsSeen?: string[];
 }
 
 function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
@@ -168,6 +170,7 @@ function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
     testHooks: data.testHooks ?? false,
+    hintsSeen: data.hintsSeen ?? [],
   };
 }
 
@@ -179,6 +182,7 @@ function toTextLoadMessage(data: TextLoad): Omit<LoadMessage, "type"> {
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
     testHooks: data.testHooks ?? false,
+    hintsSeen: data.hintsSeen ?? [],
   };
 }
 
