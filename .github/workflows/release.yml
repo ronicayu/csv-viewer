@@ -1,0 +1,105 @@
+name: Release
+
+# Builds the vsix once, attaches it to a GitHub Release for the tag, and
+# publishes that same file to the Marketplace and Open VSX — but only when
+# the corresponding secret exists, so a fork or a repo that hasn't set up
+# publishing yet can still tag a release without the workflow failing.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      vsix_name: ${{ steps.package.outputs.vsix_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Package the extension (.vsix)
+        id: package
+        run: |
+          npm run package
+          vsix=$(ls -1 *.vsix | head -n 1)
+          echo "vsix_name=$vsix" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: csv-viewer-vsix
+          path: ${{ steps.package.outputs.vsix_name }}
+          if-no-files-found: error
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download .vsix artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: csv-viewer-vsix
+
+      - name: Attach the .vsix to the GitHub Release for this tag
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ needs.build.outputs.vsix_name }}
+          generate_release_notes: true
+
+  publish-marketplace:
+    needs: build
+    runs-on: ubuntu-latest
+    # Each step below checks its own secret and skips cleanly (rather than
+    # failing the run) when it hasn't been configured yet — see
+    # CONTRIBUTING.md's "Publishing" section for how to obtain VSCE_PAT.
+    steps:
+      - name: Download .vsix artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: csv-viewer-vsix
+
+      - name: Publish to the Visual Studio Marketplace
+        if: ${{ env.VSCE_PAT != '' }}
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx @vscode/vsce publish --no-dependencies --packagePath "${{ needs.build.outputs.vsix_name }}" -p "$VSCE_PAT"
+
+      - name: Skip (no VSCE_PAT secret configured)
+        if: ${{ env.VSCE_PAT == '' }}
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: echo "VSCE_PAT is not set — skipping Marketplace publish. See CONTRIBUTING.md."
+
+  publish-open-vsx:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download .vsix artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: csv-viewer-vsix
+
+      - name: Publish to Open VSX
+        if: ${{ env.OVSX_PAT != '' }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: npx ovsx publish "${{ needs.build.outputs.vsix_name }}" -p "$OVSX_PAT"
+
+      - name: Skip (no OVSX_PAT secret configured)
+        if: ${{ env.OVSX_PAT == '' }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: echo "OVSX_PAT is not set — skipping Open VSX publish. See CONTRIBUTING.md."
