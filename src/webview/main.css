@@ -625,3 +625,109 @@ tr.detail-row td {
 [hidden] {
   display: none !important;
 }
+
+/* ============================================================
+ * BEGIN "reading" ownership (rows/cells, detail panel content,
+ * cell/row context menu, row keyboard nav, numeric alignment).
+ * See the "ux-step2-reading" task — keep this section separate
+ * from the toolbar/chrome styles above, owned elsewhere.
+ * ============================================================ */
+
+/* Item 2: numeric columns right-aligned in the table body only — header
+ * cells are untouched (owned elsewhere). */
+td.numeric-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Roving-tabindex focus ring on the focused row — `:focus-visible` so a
+ * mouse click never leaves a lingering ring, matching every other control
+ * in this file. HC gets the same list-focus treatment VS Code's own lists
+ * use; the variable is undefined outside HC, so it's a no-op elsewhere. */
+tr.data-row:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+@media (forced-colors: active), (prefers-contrast: more) {
+  tr.data-row:focus-visible {
+    outline: 1px solid var(--vscode-list-focusOutline, var(--vscode-focusBorder));
+  }
+}
+
+/* Item 3: detail panel values ------------------------------------------- */
+
+.detail-fields dt {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.detail-field-label {
+  overflow-wrap: anywhere;
+}
+
+.field-copy-btn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+}
+
+.field-copy-btn .codicon {
+  font-size: 0.9em;
+}
+
+.detail-value-text {
+  display: block;
+}
+
+/* 6-line height clamp (collapsed state) — removed by the "More"/"Less"
+ * toggle, which measures overflow via scrollHeight vs. clientHeight right
+ * after this class is applied (see populateDetailValue in main.ts). Works
+ * for prose (pre-wrap, inherited from .detail-fields dd) and pretty-printed
+ * JSON alike, since both are plain text content of the same element. */
+.detail-value-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+}
+
+/* JSON pretty-print: the editor's own monospace font, not the UI font —
+ * distinguishes formatted JSON from prose at a glance. */
+.detail-value-json {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 1em);
+  white-space: pre-wrap;
+}
+
+.detail-value-controls {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.detail-value-controls .link-btn {
+  font-size: 0.85em;
+  display: inline;
+}
+
+.detail-empty-value {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Containment: tint the expanded block relative to the next row (on top
+ * of the existing left rule) — the editorWidget-background/editor-
+ * background pair is close in Dark Modern but visibly distinct in Light
+ * Modern, where the plain editor background would otherwise blend in. Key/
+ * value grid starts under the first DATA column, not under the twisty —
+ * the chevron column is 24px (see .chevron-col) plus the cell's own 8px
+ * padding. */
+.detail-wrap {
+  padding-left: 32px;
+}
+
+/* ============================================================
+ * END "reading" ownership
+ * ============================================================ */

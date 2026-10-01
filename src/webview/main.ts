@@ -19,7 +19,8 @@
 
 import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
-import { detailOnlyColumns, getVisibility, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
+import { detailOnlyColumns, getVisibility, isNumericColumn, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
+import { tryParseJsonValue } from "../core/json";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
 import type { ColumnVisibilityMap, FilterOperator, FilterRule, HostToWebviewMessage, ViewState, WebviewToHostMessage, LoadMessage } from "../core/types";
@@ -67,6 +68,16 @@ interface AppState {
   view: ViewState;
   defaultTableColumns: number;
   expanded: Set<number>;
+  /** Columns the worker's last profile classified as numeric (see
+   * src/core/columns.ts's isNumericColumn) — right-aligned in the table
+   * body. Exposed here (not just used internally) so a future header
+   * treatment (owned elsewhere — see AGENTS notes) can read it too. */
+  numericColumns: Set<string>;
+  /** Roving-tabindex target for the row keyboard model: the one row (by
+   * stable id) currently in the Tab order. Reset to null on a fresh
+   * load/reparse (old ids are meaningless), then set to the first row of
+   * the first page once rows exist. */
+  focusedRowId: number | null;
   /** Row count after the last filter query — NOT the page size. */
   filteredCount: number;
   /** 1-based. Not persisted — only pageSize is. */
@@ -463,6 +474,8 @@ async function onLoad(message: LoadMessage): Promise<void> {
     view,
     defaultTableColumns: message.defaultTableColumns,
     expanded: new Set<number>(),
+    numericColumns: new Set<string>(),
+    focusedRowId: null,
     filteredCount: 0,
     page: previousPage,
     currentPageRows: [],
@@ -496,8 +509,10 @@ function reparseFromText(options: { resetPage: boolean }): void {
   // (tracked by id) no longer correspond to the same content — reset, same
   // as a live reload does. Done synchronously (not gated on the worker's
   // answer) since the old ids are meaningless the moment we decide to
-  // re-parse.
+  // re-parse. The roving-tabindex target is an id too, so it resets the
+  // same way.
   state.expanded = new Set<number>();
+  state.focusedRowId = null;
   beginInit(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, true);
 }
 
@@ -583,9 +598,10 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   if (pendingInitIsFreshParse) state.quoteBannerDismissed = false;
 
   const previousVisibility = state.view.columnVisibility;
-  const reconciled = reconcileVisibility(msg.headers, previousVisibility, state.defaultTableColumns);
+  const reconciled = reconcileVisibility(msg.headers, previousVisibility, state.defaultTableColumns, msg.columnProfiles);
   const visibilityChanged = !sameColumnVisibility(previousVisibility, reconciled);
   state.view.columnVisibility = reconciled;
+  state.numericColumns = new Set(msg.headers.filter((_h, i) => isNumericColumn(msg.columnProfiles[i])));
 
   renderColumnsPopover();
   renderFilterPanel();
@@ -854,6 +870,14 @@ function onRowClick(ev: MouseEvent, rowId: number): void {
 
 function renderTableBody(): void {
   if (!state) return;
+
+  // Captured BEFORE tableBody.innerHTML is cleared below (which would
+  // otherwise blur whatever currently has focus) — see the "Focus survives
+  // re-render" rule in docs/reviews/ux-review.md P1-13: focus moves to the
+  // first row after a sort/filter/page change only if a row had focus
+  // before, and an input/select/textarea's focus is never stolen.
+  const hadRowFocus = document.activeElement instanceof HTMLElement && document.activeElement.classList.contains("data-row");
+
   tableBody.innerHTML = "";
   const columns = visibleColumns(state.headers, state.view.columnVisibility);
   const fragment = document.createDocumentFragment();
@@ -868,15 +892,24 @@ function renderTableBody(): void {
     // explains where the columns went and offers the fix, instead of
     // leaving a table of anonymous arrows with no context.
     if (columns.length === 0) fragment.appendChild(buildEmptyStateRow(1, "all-hidden"));
+    const rovingRowId = determineRovingRowId();
     for (const row of state.currentPageRows) {
-      fragment.appendChild(buildRowTr(row, columns));
+      fragment.appendChild(buildRowTr(row, columns, rovingRowId));
       fragment.appendChild(buildDetailTr(row, columns.length + 1));
     }
+    // hadRowFocus forces the roving target to the page's FIRST row (not
+    // whatever determineRovingRowId above picked, which prefers keeping
+    // the same id) — that's the literal "focus goes to the first row"
+    // rule, distinct from "keep pointing at the same row's Tab stop even
+    // when nothing is actually focused right now".
+    state.focusedRowId = hadRowFocus ? state.currentPageRows[0].id : rovingRowId;
   }
 
   tableBody.appendChild(fragment);
   updateDetailViewportWidth();
   populateExpandedDetails(columns);
+
+  if (hadRowFocus && state.currentPageRows.length > 0) focusRowById(state.focusedRowId);
 }
 
 function buildEmptyStateRow(colSpan: number, kind: "zero-file" | "zero-matches" | "all-hidden"): HTMLTableRowElement {
@@ -940,17 +973,30 @@ function buildEmptyStateRow(colSpan: number, kind: "zero-file" | "zero-matches" 
   return tr;
 }
 
-function buildRowTr(row: WorkerRow, columns: string[]): HTMLTableRowElement {
+function buildRowTr(row: WorkerRow, columns: string[], rovingRowId: number | null): HTMLTableRowElement {
   const tr = document.createElement("tr");
   tr.className = "data-row";
   tr.dataset.rowId = String(row.id);
+  // Roving tabindex: exactly one row is in the Tab order at a time (see
+  // "Keyboard row model" in docs/reviews/ux-review.md P1-13) — moved
+  // between rows by onRowKeyDown's Arrow/Home/End handling, never by a
+  // full re-render putting every row back in the sequence.
+  tr.tabIndex = row.id === rovingRowId ? 0 : -1;
+  const expanded = state!.expanded.has(row.id);
+  // aria-expanded lives on the row itself (screen readers need the row's
+  // own cell text to stay readable — an aria-label here would replace
+  // it), not just on the twisty button.
+  tr.setAttribute("aria-expanded", String(expanded));
 
   const chevronTd = document.createElement("td");
   chevronTd.className = "chevron-col";
-  const expanded = state!.expanded.has(row.id);
   const twisty = document.createElement("button");
   twisty.type = "button";
   twisty.className = "twisty";
+  // The twisty stays clickable (mouse users) but leaves the Tab order —
+  // the row itself is what Tab stops on; a dedicated chevron stop for
+  // every row would make Tab unusable on a long page.
+  twisty.tabIndex = -1;
   const chevronIcon = document.createElement("span");
   chevronIcon.className = `codicon ${expanded ? "codicon-chevron-down" : "codicon-chevron-right"}`;
   chevronIcon.setAttribute("aria-hidden", "true");
@@ -968,6 +1014,7 @@ function buildRowTr(row: WorkerRow, columns: string[]): HTMLTableRowElement {
   const indexByHeader = new Map(state!.headers.map((h, i) => [h, i]));
   for (const column of columns) {
     const td = document.createElement("td");
+    if (state!.numericColumns.has(column)) td.classList.add("numeric-cell");
     const value = row.cells[indexByHeader.get(column)!] ?? "";
     // Table cells render at most 500 characters — a huge (e.g. 15 MB
     // single-line) cell used to freeze rendering / trip VS Code's
@@ -984,13 +1031,25 @@ function buildRowTr(row: WorkerRow, columns: string[]): HTMLTableRowElement {
         td.classList.add("clipped-cell");
       }
     });
-    td.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, column, value));
+    td.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, column, value, row));
     tr.appendChild(td);
   }
 
   tr.addEventListener("mousedown", onRowMouseDown);
   tr.addEventListener("click", (ev) => onRowClick(ev, row.id));
   return tr;
+}
+
+/** Which row id should hold the roving tabindex right now: the previously
+ * focused row if it's still on this page, else the page's first row, else
+ * null (no rows at all). Computed fresh on every render so a row that
+ * scrolled off the current page/filter doesn't leave the whole table
+ * without a Tab stop. */
+function determineRovingRowId(): number | null {
+  if (!state || state.currentPageRows.length === 0) return null;
+  const focusedRowId = state.focusedRowId;
+  if (focusedRowId !== null && state.currentPageRows.some((r) => r.id === focusedRowId)) return focusedRowId;
+  return state.currentPageRows[0].id;
 }
 
 /** Builds the (initially empty) detail <tr> — its content is filled in by
@@ -1069,52 +1128,214 @@ function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, co
     return value.includes("\n");
   });
 
+  // Each buildDetailFieldList call defers filling in its <dd> values (see
+  // `pending` below) until AFTER every group's <dl> is actually appended
+  // to `wrap` (which is already live in the document) — populateDetailValue
+  // measures line-clamp overflow via scrollHeight, which only works once
+  // its element has real layout, i.e. is attached, not while the <dl> is
+  // still being built as a detached tree.
+  const pending: { dd: HTMLElement; value: string }[] = [];
+
   if (detailOnly.length === 0 && alsoInTable.length === 0) {
-    wrap.appendChild(buildDetailFieldList(row, state.headers, indexByHeader));
-    return;
+    wrap.appendChild(buildDetailFieldList(row, state.headers, indexByHeader, pending));
+  } else {
+    if (detailOnly.length > 0) wrap.appendChild(buildDetailFieldList(row, detailOnly, indexByHeader, pending));
+    if (alsoInTable.length > 0) {
+      const heading = document.createElement("p");
+      heading.className = "detail-group-heading";
+      heading.textContent = "Also in table";
+      wrap.appendChild(heading);
+      wrap.appendChild(buildDetailFieldList(row, alsoInTable, indexByHeader, pending));
+    }
   }
-  if (detailOnly.length > 0) wrap.appendChild(buildDetailFieldList(row, detailOnly, indexByHeader));
-  if (alsoInTable.length > 0) {
-    const heading = document.createElement("p");
-    heading.className = "detail-group-heading";
-    heading.textContent = "Also in table";
-    wrap.appendChild(heading);
-    wrap.appendChild(buildDetailFieldList(row, alsoInTable, indexByHeader));
-  }
+
+  for (const { dd, value } of pending) populateDetailValue(dd, value);
 }
 
-function buildDetailFieldList(row: WorkerRow, fields: string[], indexByHeader: Map<string, number>): HTMLDListElement {
+function buildDetailFieldList(
+  row: WorkerRow,
+  fields: string[],
+  indexByHeader: Map<string, number>,
+  pending: { dd: HTMLElement; value: string }[],
+): HTMLDListElement {
   const dl = document.createElement("dl");
   dl.className = "detail-fields";
 
   for (const field of fields) {
+    const value = row.cells[indexByHeader.get(field)!] ?? "";
+
     const dt = document.createElement("dt");
-    dt.textContent = field;
+    const label = document.createElement("span");
+    label.className = "detail-field-label";
+    label.textContent = field;
+    dt.appendChild(label);
+    dt.appendChild(buildFieldCopyButton(field, value));
 
     const dd = document.createElement("dd");
-    const value = row.cells[indexByHeader.get(field)!] ?? "";
-    const { text, truncated, fullLength } = truncateForDetail(value);
-    dd.appendChild(document.createTextNode(text));
-    if (truncated) {
-      const showAllBtn = document.createElement("button");
-      showAllBtn.type = "button";
-      showAllBtn.className = "show-all-btn link-btn";
-      showAllBtn.textContent = `Show all (${fullLength.toLocaleString()} characters)`;
-      if (fullLength > DETAIL_WARN_CHARS) {
-        showAllBtn.title = "This value is very large — showing it in full may be slow.";
-      }
-      showAllBtn.addEventListener("click", () => {
-        dd.textContent = value; // expands in place; removes the button too
-      });
-      dd.appendChild(showAllBtn);
-    }
-    dd.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, field, value));
+    pending.push({ dd, value });
+    dd.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, field, value, row));
 
     dl.appendChild(dt);
     dl.appendChild(dd);
   }
 
   return dl;
+}
+
+/** A small codicon `copy` button at the end of a detail field's key,
+ * copying the FULL raw value (never the pretty-printed or truncated
+ * display text) — see docs/reviews/pm-review.md §4 "Copy". Gives a brief
+ * (~1s) visual confirmation by swapping to a `check` icon. */
+function buildFieldCopyButton(field: string, rawValue: string): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "icon-btn field-copy-btn";
+  btn.setAttribute("aria-label", `Copy ${field} value`);
+  const icon = document.createElement("span");
+  icon.className = "codicon codicon-copy";
+  icon.setAttribute("aria-hidden", "true");
+  btn.appendChild(icon);
+  let confirmHandle: number | undefined;
+  btn.addEventListener("click", () => {
+    void copyToClipboard(rawValue);
+    window.clearTimeout(confirmHandle);
+    icon.className = "codicon codicon-check";
+    confirmHandle = window.setTimeout(() => {
+      icon.className = "codicon codicon-copy";
+    }, 1000);
+  });
+  return btn;
+}
+
+function emptyValueNode(): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.className = "detail-empty-value";
+  span.textContent = "—";
+  return span;
+}
+
+/**
+ * Fills in one detail field's <dd>: a dimmed "—" for an empty value;
+ * otherwise the value (or, for a value that parses as JSON — see
+ * src/core/json.ts — its pretty-printed form, with a Raw/Formatted
+ * toggle), clamped to 6 lines with a More/Less link, composed with the
+ * existing 10,000-character cap's Show all/Show less (see
+ * docs/reviews/pm-review.md §4 and docs/reviews/ux-review.md P1-10).
+ *
+ * The three controls (format, height, char-cap) mutate this closure's
+ * `formatMode`/`heightExpanded`/`charExpanded` and re-run `render()`
+ * directly, rather than calling back into populateDetailContent — so
+ * toggling one doesn't reset the others, and an unrelated full
+ * repopulate (a sort/filter/page re-render while the row stays expanded)
+ * is the only thing that resets a field back to its initial view, same
+ * as the pre-existing "Show all" behavior already did.
+ */
+function populateDetailValue(dd: HTMLElement, rawValue: string): void {
+  dd.innerHTML = "";
+  if (rawValue === "") {
+    dd.appendChild(emptyValueNode());
+    return;
+  }
+
+  const parsedJson = tryParseJsonValue(rawValue);
+  const isJson = parsedJson !== null;
+  const formatted = isJson ? JSON.stringify(parsedJson, null, 2) : "";
+
+  let formatMode: "raw" | "formatted" = isJson ? "formatted" : "raw";
+  let charExpanded = false;
+  let heightExpanded = false;
+
+  const valueText = document.createElement("span");
+  valueText.className = "detail-value-text";
+  dd.appendChild(valueText);
+
+  const controls = document.createElement("div");
+  controls.className = "detail-value-controls";
+  dd.appendChild(controls);
+
+  const formatToggle = document.createElement("button");
+  formatToggle.type = "button";
+  formatToggle.className = "link-btn format-toggle-btn";
+  formatToggle.hidden = !isJson;
+  controls.appendChild(formatToggle);
+
+  const heightToggle = document.createElement("button");
+  heightToggle.type = "button";
+  heightToggle.className = "link-btn height-toggle-btn";
+  heightToggle.hidden = true; // revealed by render() once overflow is measured
+  controls.appendChild(heightToggle);
+
+  const charToggle = document.createElement("button");
+  charToggle.type = "button";
+  charToggle.className = "link-btn show-all-btn";
+  charToggle.hidden = true;
+  controls.appendChild(charToggle);
+
+  function currentSource(): string {
+    return formatMode === "formatted" ? formatted : rawValue;
+  }
+
+  function render(): void {
+    const source = currentSource();
+    const { text, truncated, fullLength } = truncateForDetail(source);
+    valueText.textContent = charExpanded ? source : text;
+    valueText.classList.toggle("detail-value-json", isJson && formatMode === "formatted");
+
+    // Overflow detection always happens against the UNCLAMPED natural
+    // height, never interleaved with applying `-webkit-line-clamp` —
+    // reading scrollHeight in the same synchronous pass as adding that
+    // class is unreliable (it can still report the pre-clamp height,
+    // since the clamp is a legacy -webkit-box layout mode some engines
+    // don't re-flow synchronously on the same tick). Comparing against
+    // 6 line-heights instead sidesteps that entirely; the clamp class
+    // below is applied purely as a RESULT of heightExpanded, never as
+    // part of the measurement itself.
+    valueText.classList.remove("detail-value-clamped");
+    const lineHeight = parseFloat(getComputedStyle(valueText).lineHeight) || parseFloat(getComputedStyle(valueText).fontSize) * 1.2 || 16;
+    const overflowing = valueText.scrollHeight > lineHeight * 6 + 1;
+    valueText.classList.toggle("detail-value-clamped", !heightExpanded);
+
+    // `hidden` (via main.css's `[hidden]{display:none!important}`) only
+    // keeps a control out of the LAYOUT — its textContent still exists
+    // and would otherwise leak into any test (or screen reader text
+    // resolution) that reads the <dd>'s combined text. Every hidden
+    // control here is cleared to "" for exactly that reason; the field's
+    // displayed value is always valueText's own text, never these.
+    formatToggle.textContent = isJson ? (formatMode === "formatted" ? "Raw" : "Formatted") : "";
+
+    charToggle.hidden = !truncated;
+    if (truncated) {
+      charToggle.textContent = charExpanded ? "Show less" : `Show all (${fullLength.toLocaleString()} characters)`;
+      if (!charExpanded && fullLength > DETAIL_WARN_CHARS) {
+        charToggle.title = "This value is very large — showing it in full may be slow.";
+      } else {
+        charToggle.removeAttribute("title");
+      }
+    } else {
+      charToggle.textContent = "";
+      charToggle.removeAttribute("title");
+    }
+
+    heightToggle.hidden = !overflowing;
+    heightToggle.textContent = overflowing ? (heightExpanded ? "Less" : "More") : "";
+  }
+
+  formatToggle.addEventListener("click", () => {
+    formatMode = formatMode === "formatted" ? "raw" : "formatted";
+    charExpanded = false;
+    heightExpanded = false;
+    render();
+  });
+  heightToggle.addEventListener("click", () => {
+    heightExpanded = !heightExpanded;
+    render();
+  });
+  charToggle.addEventListener("click", () => {
+    charExpanded = !charExpanded;
+    render();
+  });
+
+  render();
 }
 
 function toggleExpanded(rowId: number): void {
@@ -1125,6 +1346,7 @@ function toggleExpanded(rowId: number): void {
 
   const rowTr = tableBody.querySelector<HTMLTableRowElement>(`tr.data-row[data-row-id="${rowId}"]`);
   const detailTr = document.getElementById(`detail-row-${rowId}`) as HTMLTableRowElement | null;
+  rowTr?.setAttribute("aria-expanded", String(opening));
   const twisty = rowTr?.querySelector<HTMLButtonElement>(".twisty");
   if (twisty) {
     const icon = twisty.querySelector(".codicon");
@@ -1133,14 +1355,104 @@ function toggleExpanded(rowId: number): void {
     twisty.setAttribute("aria-label", `${opening ? "Hide" : "Show"} details for row ${rowId + 1}`);
   }
   if (detailTr) {
+    // Unhidden BEFORE populating (not after) — populateDetailContent's
+    // height-clamp measurement (see populateDetailValue) needs real
+    // layout, which a `[hidden]` ("display: none") subtree never has.
+    detailTr.hidden = !opening;
     if (opening && rowTr) {
       const columns = visibleColumns(state.headers, state.view.columnVisibility);
       const row = state.currentPageRows.find((r) => r.id === rowId);
       if (row) populateDetailContent(row, detailTr, columns, clippedVisibleColumnsForRow(rowTr, columns));
     }
-    detailTr.hidden = !opening;
   }
 }
+
+// ---- Row keyboard model (roving tabindex) ----------------------------------
+//
+// See docs/reviews/ux-review.md P1-13. One row at a time is in the Tab
+// order (tr.tabIndex, managed here and in buildRowTr/renderTableBody);
+// ArrowUp/Down move it, Home/End jump to the page's first/last row,
+// Enter/Space/→/← toggle expand/collapse, and Shift+F10/ContextMenu open
+// the row-level context menu (Copy Row as CSV/JSON — see buildCopyRowItems).
+
+/** Moves the roving tabindex to `rowId` (a no-op if it's already there)
+ * and focuses that row's <tr>. Does NOT touch state.expanded. */
+function focusRowById(rowId: number | null): void {
+  if (!state || rowId === null) return;
+  state.focusedRowId = rowId;
+  const rows = tableBody.querySelectorAll<HTMLTableRowElement>("tr.data-row");
+  rows.forEach((tr) => {
+    tr.tabIndex = Number(tr.dataset.rowId) === rowId ? 0 : -1;
+  });
+  tableBody.querySelector<HTMLTableRowElement>(`tr.data-row[data-row-id="${rowId}"]`)?.focus();
+}
+
+function focusRowAtIndex(index: number): void {
+  if (!state || state.currentPageRows.length === 0) return;
+  const clamped = Math.max(0, Math.min(index, state.currentPageRows.length - 1));
+  focusRowById(state.currentPageRows[clamped].id);
+}
+
+function moveRowFocus(delta: number): void {
+  if (!state || state.currentPageRows.length === 0) return;
+  const currentIndex = state.currentPageRows.findIndex((r) => r.id === state!.focusedRowId);
+  focusRowAtIndex((currentIndex === -1 ? 0 : currentIndex) + delta);
+}
+
+/** Delegated on #table-body (attached once — survives every innerHTML
+ * rebuild, unlike a per-row listener). `ev.target` can be the <tr> itself
+ * or something inside it (the twisty, a <td>); closest() finds the row
+ * either way. */
+function onRowKeyDown(ev: KeyboardEvent): void {
+  if (!state) return;
+  const tr = (ev.target as HTMLElement).closest<HTMLTableRowElement>("tr.data-row");
+  if (!tr) return;
+  const rowId = Number(tr.dataset.rowId);
+
+  switch (ev.key) {
+    case "ArrowDown":
+      ev.preventDefault();
+      moveRowFocus(1);
+      break;
+    case "ArrowUp":
+      ev.preventDefault();
+      moveRowFocus(-1);
+      break;
+    case "Home":
+      ev.preventDefault();
+      focusRowAtIndex(0);
+      break;
+    case "End":
+      ev.preventDefault();
+      focusRowAtIndex(state.currentPageRows.length - 1);
+      break;
+    case "ArrowRight":
+      ev.preventDefault();
+      if (!state.expanded.has(rowId)) toggleExpanded(rowId);
+      break;
+    case "ArrowLeft":
+      ev.preventDefault();
+      if (state.expanded.has(rowId)) toggleExpanded(rowId);
+      break;
+    case "Enter":
+    case " ":
+      ev.preventDefault();
+      toggleExpanded(rowId);
+      break;
+    case "F10":
+      if (ev.shiftKey) {
+        ev.preventDefault();
+        openRowContextMenu(rowId, tr);
+      }
+      break;
+    case "ContextMenu":
+      ev.preventDefault();
+      openRowContextMenu(rowId, tr);
+      break;
+  }
+}
+
+tableBody.addEventListener("keydown", onRowKeyDown);
 
 // ---- Status bar ----------------------------------------------------------
 
@@ -1955,17 +2267,30 @@ function truncateForMenuLabel(value: string, maxChars = 40): string {
   return value.length > maxChars ? value.slice(0, maxChars) + "…" : value;
 }
 
-function onCellContextMenu(ev: MouseEvent, column: string, value: string): void {
+/** Mouse-right-click side: the invoking element the context menu should
+ * NOT return focus to on close (there isn't one — the row-level keyboard
+ * path below is the only one that needs this). */
+let contextMenuInvoker: HTMLElement | null = null;
+
+function closeContextMenu(): void {
+  contextMenu.hidden = true;
+  const invoker = contextMenuInvoker;
+  contextMenuInvoker = null;
+  invoker?.focus();
+}
+
+function onCellContextMenu(ev: MouseEvent, column: string, value: string, row: WorkerRow): void {
   ev.preventDefault();
   contextMenu.innerHTML = "";
+  contextMenuInvoker = null;
 
   const copyItem = document.createElement("button");
   copyItem.type = "button";
   copyItem.setAttribute("role", "menuitem");
-  copyItem.textContent = "Copy value";
+  copyItem.textContent = "Copy Value";
   copyItem.addEventListener("click", () => {
     void copyToClipboard(value);
-    contextMenu.hidden = true;
+    closeContextMenu();
   });
   contextMenu.appendChild(copyItem);
   contextMenu.appendChild(document.createElement("hr"));
@@ -1985,6 +2310,9 @@ function onCellContextMenu(ev: MouseEvent, column: string, value: string): void 
 
   contextMenu.appendChild(includeItem);
   contextMenu.appendChild(excludeItem);
+  contextMenu.appendChild(document.createElement("hr"));
+  for (const item of buildCopyRowItems(row)) contextMenu.appendChild(item);
+
   // The menu is `position: fixed` (see main.css), so viewport-relative
   // client coordinates are what it needs — not page coordinates, which
   // would drift from the pointer once the table has scrolled.
@@ -1993,6 +2321,94 @@ function onCellContextMenu(ev: MouseEvent, column: string, value: string): void 
   contextMenu.hidden = false;
   clampContextMenuToViewport(ev.clientX, ev.clientY);
 }
+
+// ---- Row-level context menu items (Copy Row as CSV/JSON) ------------------
+//
+// Shared by the mouse cell menu above (appended after the filter items)
+// and the keyboard row menu below (Shift+F10/ContextMenu on a focused
+// row, which has no single cell/column in context, so it offers only
+// these two). See docs/reviews/pm-review.md §4 "Context menu additions".
+
+/** One RFC 4180 line (no trailing newline) for `row`'s values, in file
+ * column order, covering every column — not just the table-visible
+ * ones — quoted only where needed (a field containing the delimiter, a
+ * quote, or a newline). */
+function rowToCsvLine(headers: string[], row: WorkerRow): string {
+  const quote = (field: string): string => (/[",\r\n]/.test(field) ? `"${field.replace(/"/g, '""')}"` : field);
+  return headers.map((_, i) => quote(row.cells[i] ?? "")).join(",");
+}
+
+/** `row` as a JSON object keyed by header (file order, every column),
+ * 2-space indented. */
+function rowToJsonText(headers: string[], row: WorkerRow): string {
+  const obj: Record<string, string> = {};
+  headers.forEach((h, i) => {
+    obj[h] = row.cells[i] ?? "";
+  });
+  return JSON.stringify(obj, null, 2);
+}
+
+function buildCopyRowItems(row: WorkerRow): HTMLButtonElement[] {
+  const csvItem = document.createElement("button");
+  csvItem.type = "button";
+  csvItem.setAttribute("role", "menuitem");
+  csvItem.textContent = "Copy Row as CSV";
+  csvItem.addEventListener("click", () => {
+    void copyToClipboard(rowToCsvLine(state!.headers, row));
+    closeContextMenu();
+  });
+
+  const jsonItem = document.createElement("button");
+  jsonItem.type = "button";
+  jsonItem.setAttribute("role", "menuitem");
+  jsonItem.textContent = "Copy Row as JSON";
+  jsonItem.addEventListener("click", () => {
+    void copyToClipboard(rowToJsonText(state!.headers, row));
+    closeContextMenu();
+  });
+
+  return [csvItem, jsonItem];
+}
+
+/** Shift+F10 / ContextMenu key on a focused row (see onRowKeyDown):
+ * row-level items only — there's no single cell/column in context here,
+ * unlike the mouse-driven cell menu above. Focus returns to `anchorEl`
+ * (the row) when the menu closes. */
+function openRowContextMenu(rowId: number, anchorEl: HTMLTableRowElement): void {
+  if (!state) return;
+  const row = state.currentPageRows.find((r) => r.id === rowId);
+  if (!row) return;
+  contextMenu.innerHTML = "";
+  for (const item of buildCopyRowItems(row)) contextMenu.appendChild(item);
+
+  const rect = anchorEl.getBoundingClientRect();
+  contextMenu.style.left = `${rect.left}px`;
+  contextMenu.style.top = `${rect.bottom}px`;
+  contextMenu.hidden = false;
+  clampContextMenuToViewport(rect.left, rect.bottom);
+  contextMenuInvoker = anchorEl;
+  contextMenu.querySelector<HTMLButtonElement>("button")?.focus();
+}
+
+/** Arrow-key roving focus and Escape inside the (already-open) context
+ * menu — Enter/Space on a focused <button> already triggers its own
+ * click handler natively, so only navigation needs wiring here. */
+contextMenu.addEventListener("keydown", (ev) => {
+  const items = Array.from(contextMenu.querySelectorAll<HTMLButtonElement>("button"));
+  if (items.length === 0) return;
+  const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+  if (ev.key === "ArrowDown") {
+    ev.preventDefault();
+    items[(currentIndex + 1 + items.length) % items.length]?.focus();
+  } else if (ev.key === "ArrowUp") {
+    ev.preventDefault();
+    items[(currentIndex - 1 + items.length) % items.length]?.focus();
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    ev.stopPropagation(); // the document-level Escape handler below would otherwise also run closeContextMenu() redundantly
+    closeContextMenu();
+  }
+});
 
 /** Clamps the (already-shown) context menu inside the viewport, flipping
  * left/up instead of overflowing right/bottom — measured only after the
@@ -2023,7 +2439,7 @@ function addQuickFilter(column: string, value: string, mode: "include" | "exclud
     enabled: true,
   };
   state.view.filterRules.push(rule);
-  contextMenu.hidden = true;
+  closeContextMenu();
   renderFilterPanel();
   openFilterPanel(filtersBtn);
   requery();
@@ -2032,7 +2448,7 @@ function addQuickFilter(column: string, value: string, mode: "include" | "exclud
 
 document.addEventListener("click", (ev) => {
   if (contextMenu.hidden) return;
-  if (!contextMenu.contains(ev.target as Node)) contextMenu.hidden = true;
+  if (!contextMenu.contains(ev.target as Node)) closeContextMenu();
 });
 
 document.addEventListener("keydown", (ev) => {
@@ -2047,7 +2463,7 @@ document.addEventListener("keydown", (ev) => {
   }
 
   if (ev.key === "Escape") {
-    contextMenu.hidden = true;
+    if (!contextMenu.hidden) closeContextMenu();
     if (!columnsPopover.hidden || !filterPanel.hidden) closeAllPopovers(true);
     return;
   }
