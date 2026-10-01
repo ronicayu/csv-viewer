@@ -138,6 +138,15 @@ test.describe("detail panel: JSON pretty-print", () => {
     await expect(toggle).toHaveText("Raw");
   });
 
+  test("formatted JSON shows every literal exactly as written (big integers, trailing zeros, duplicate keys)", async ({ page }) => {
+    // JSON.stringify(JSON.parse(x)) would turn 9007199254740993 into
+    // ...992, 1.10 into 1.1 and drop the first "a": a viewer must not.
+    const raw = '{"id":9007199254740993,"price":1.10,"a":1,"a":2}';
+    await loadSingleField(page, raw, "file:///json-exact.csv");
+    const valueText = page.locator("tr.detail-row").first().locator("dd").first().locator(".detail-value-text");
+    await expect(valueText).toHaveText('{\n  "id": 9007199254740993,\n  "price": 1.10,\n  "a": 1,\n  "a": 2\n}');
+  });
+
   test("a JSON array value is also pretty-printed", async ({ page }) => {
     const arr = [1, "two", { three: 3 }];
     await loadSingleField(page, JSON.stringify(arr), "file:///json-arr.csv");
@@ -292,6 +301,17 @@ test.describe("Copy Row as CSV / Copy Row as JSON", () => {
     await page.locator("#context-menu button", { hasText: "Copy Row as JSON" }).click();
     const copied = await page.evaluate(() => (window as unknown as { __copied?: string }).__copied);
     expect(copied).toBe(JSON.stringify({ id: "1", note: 'has "quotes" and, commas' }, null, 2));
+  });
+
+  test("Copy Row as JSON keeps a column literally named __proto__", async ({ page }) => {
+    await stubClipboard(page);
+    const text = toCsvText(["id", "__proto__"], [["1", "kept"]]);
+    await bootAndLoadText(page, { fileKey: "file:///protorow.csv", text, state: defaultViewState(), defaultTableColumns: 2 });
+
+    await page.locator("tr.data-row").first().locator("td").nth(1).click({ button: "right" });
+    await page.locator("#context-menu button", { hasText: "Copy Row as JSON" }).click();
+    const copied = await page.evaluate(() => (window as unknown as { __copied?: string }).__copied);
+    expect(copied).toBe('{\n  "id": "1",\n  "__proto__": "kept"\n}');
   });
 
   test("Copy Row as CSV/JSON cover every column, including ones hidden in the table", async ({ page }) => {

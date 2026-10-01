@@ -20,7 +20,7 @@
 import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
 import { detailOnlyColumns, getVisibility, isNumericColumn, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
-import { tryParseJsonValue } from "../core/json";
+import { formatJsonText, tryParseJsonValue } from "../core/json";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
 import type {
@@ -1453,7 +1453,7 @@ function populateDetailValue(dd: HTMLElement, rawValue: string): void {
 
   const parsedJson = tryParseJsonValue(rawValue);
   const isJson = parsedJson !== null;
-  const formatted = isJson ? JSON.stringify(parsedJson, null, 2) : "";
+  const formatted = isJson ? formatJsonText(rawValue) : "";
 
   let formatMode: "raw" | "formatted" = isJson ? "formatted" : "raw";
   let charExpanded = false;
@@ -2706,7 +2706,9 @@ function rowToCsvLine(headers: string[], row: WorkerRow): string {
 /** `row` as a JSON object keyed by header (file order, every column),
  * 2-space indented. */
 function rowToJsonText(headers: string[], row: WorkerRow): string {
-  const obj: Record<string, string> = {};
+  // Null prototype: a header literally named `__proto__` must become an
+  // ordinary key instead of hitting Object.prototype's setter.
+  const obj: Record<string, string> = Object.create(null);
   headers.forEach((h, i) => {
     obj[h] = row.cells[i] ?? "";
   });
