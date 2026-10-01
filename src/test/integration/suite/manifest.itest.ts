@@ -172,7 +172,14 @@ suite("package.json manifest sanity", () => {
     for (const bad of ["excel", "xlsx"]) {
       assert.ok(!manifest.keywords.includes(bad), `keywords should not include "${bad}"`);
     }
-    assert.strictEqual(manifest.version, "0.4.0");
+  });
+
+  test("the manifest version matches the newest CHANGELOG entry", () => {
+    const manifest = readManifest();
+    const changelogPath = path.resolve(__dirname, "..", "..", "..", "..", "CHANGELOG.md");
+    const newest = /^## (\d+\.\d+\.\d+)/m.exec(fs.readFileSync(changelogPath, "utf8"));
+    assert.ok(newest, "expected CHANGELOG.md to contain a '## x.y.z' heading");
+    assert.strictEqual(manifest.version, newest[1]);
   });
 });
 
