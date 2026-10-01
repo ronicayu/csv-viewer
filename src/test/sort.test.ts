@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { buildColumnSortKeys, cycleSortForColumn, sortRowIdsByCachedKeys, sortRows } from "../core/sort";
+import { buildColumnSortKeys, cellSortKey, compareCellSortKeys, cycleSortForColumn, sortRowIdsByCachedKeys, sortRows } from "../core/sort";
 import type { SortDirection, SortKey } from "../core/types";
 
 const headers = ["name", "age", "score"];
@@ -251,5 +251,42 @@ describe("buildColumnSortKeys / sortRowIdsByCachedKeys (worker sort-key cache pr
       ),
       { numRuns: 200 },
     );
+  });
+});
+
+describe("mostly-unique text columns (index-sort ranking path)", () => {
+  // Above 20,000 distinct text values buildColumnSortKeys ranks by sorting
+  // row indexes instead of hashing strings. It must order exactly like a
+  // plain stable sort with the per-pair comparator.
+  const rows: string[][] = [];
+  for (let i = 0; i < 30_000; i++) {
+    const n = (i * 7919) % 26_000; // > 20k distinct, with repeats
+    let value: string;
+    if (i % 97 === 0) value = "";
+    else if (i % 53 === 0) value = String(n); // numeric cells mixed in
+    else value = i % 2 === 0 ? `Name ${n}` : `name ${n}`; // collator-equal case variants
+    rows.push([value, String(i)]);
+  }
+  rows.push(["Zeta tie", "30000"], ["zeta TIE", "30001"]);
+
+  for (const direction of ["asc", "desc"] as const) {
+    it(`matches a reference stable sort (${direction})`, () => {
+      const reference = rows
+        .map((row, i) => ({ row, i, key: cellSortKey(row[0]) }))
+        .sort((x, y) => compareCellSortKeys(x.key, y.key, direction) || x.i - y.i)
+        .map((e) => e.row[1]);
+
+      const sorted = sortRows(rows, ["v", "i"], [{ column: "v", direction }]);
+      expect(sorted.map((r) => r[1])).toEqual(reference);
+    });
+  }
+
+  it("gives collator-equal values the same rank so a second key can break the tie", () => {
+    const keys = buildColumnSortKeys(rows, 0);
+    const a = rows.findIndex((r) => r[0] === "Zeta tie");
+    const b = rows.findIndex((r) => r[0] === "zeta TIE");
+    expect(a).toBeGreaterThan(-1);
+    expect(b).toBeGreaterThan(-1);
+    expect(keys[a].rank).toBe(keys[b].rank);
   });
 });

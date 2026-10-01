@@ -111,24 +111,55 @@ function compareResolvedCellSortKeys(a: ResolvedCellSortKey, b: ResolvedCellSort
  * subset's relative order via `sortRowIdsByCachedKeys`, with identical
  * results to calling this per-subset every time.
  */
+/** Above this many distinct text values, ranking through a Set + Map of
+ * strings costs more in hashing than sorting row indexes directly. */
+const DISTINCT_TEXT_HASH_LIMIT = 20_000;
+
 export function buildColumnSortKeys(rows: string[][], columnIndex: number): ResolvedCellSortKey[] {
   const cells = rows.map((row) => cellSortKey(row[columnIndex] ?? "")) as ResolvedCellSortKey[];
+
+  // Few distinct values (status, country, ...): rank each distinct value
+  // once and look it up per cell. Bail out as soon as the column turns out
+  // to be mostly-unique text (names, ids, notes).
   const distinctText = new Set<string>();
-  for (const k of cells) if (k.kind === "text") distinctText.add(k.text);
-  const sortedText = Array.from(distinctText).sort((a, b) => collator.compare(a, b));
-  // Values the collator considers equal (e.g. "a" and "A") share a rank,
-  // so they tie and fall through to later keys / original row order.
-  const rankOf = new Map<string, number>();
+  let fewDistinct = true;
+  for (const k of cells) {
+    if (k.kind !== "text") continue;
+    distinctText.add(k.text);
+    if (distinctText.size > DISTINCT_TEXT_HASH_LIMIT) {
+      fewDistinct = false;
+      break;
+    }
+  }
+
+  if (fewDistinct) {
+    const sortedText = Array.from(distinctText).sort((a, b) => collator.compare(a, b));
+    // Values the collator considers equal (e.g. "a" and "A") share a rank,
+    // so they tie and fall through to later keys / original row order.
+    const rankOf = new Map<string, number>();
+    let rank = 0;
+    sortedText.forEach((text, i) => {
+      if (i > 0 && collator.compare(sortedText[i - 1], text) !== 0) rank++;
+      rankOf.set(text, rank);
+    });
+    for (const k of cells) k.rank = k.kind === "text" ? (rankOf.get(k.text) as number) : 0;
+    return cells;
+  }
+
+  // Many distinct values: sort the text cells' indexes by the collator and
+  // hand out ranks in one pass, with no per-string hashing. Collator-equal
+  // neighbours share a rank, same as above.
+  const textIndexes: number[] = [];
+  for (let i = 0; i < cells.length; i++) {
+    if (cells[i].kind === "text") textIndexes.push(i);
+    else cells[i].rank = 0;
+  }
+  textIndexes.sort((x, y) => collator.compare(cells[x].text, cells[y].text));
   let rank = 0;
-  sortedText.forEach((text, i) => {
-    if (i > 0 && collator.compare(sortedText[i - 1], text) !== 0) rank++;
-    rankOf.set(text, rank);
-  });
-  // Mutate in place (these cell-key objects were just freshly allocated
-  // above and aren't shared with anything else) rather than spreading
-  // into a second array of objects — halves the allocation for large
-  // datasets.
-  for (const k of cells) k.rank = k.kind === "text" ? (rankOf.get(k.text) as number) : 0;
+  for (let j = 0; j < textIndexes.length; j++) {
+    if (j > 0 && collator.compare(cells[textIndexes[j - 1]].text, cells[textIndexes[j]].text) !== 0) rank++;
+    cells[textIndexes[j]].rank = rank;
+  }
   return cells;
 }
 
