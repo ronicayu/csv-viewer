@@ -20,8 +20,14 @@ test.describe("detail panel: Also in table", () => {
     await bootAndLoadText(page, {
       fileKey: "file:///clip.csv",
       text,
-      state: defaultViewState(),
-      defaultTableColumns: 3, // all three columns visible in the table
+      // "long"'s median value length puts it over the smart default
+      // column split's "short" threshold (see src/core/columns.ts), so it
+      // would default to row details on its own — force all three
+      // columns into the table explicitly (a stored choice always wins),
+      // since this test is specifically about a long value that's
+      // visually clipped WHILE still in the table.
+      state: defaultViewState({ columnVisibility: { id: true, short: true, long: true } }),
+      defaultTableColumns: 3,
     });
 
     await page.locator("tr.data-row").first().click();
@@ -59,7 +65,9 @@ test.describe("detail panel: Also in table", () => {
     await bootAndLoadText(page, {
       fileKey: "file:///tooltip.csv",
       text,
-      state: defaultViewState(),
+      // Force "long" into the table explicitly — see the identical note
+      // in the "Also in table" test above.
+      state: defaultViewState({ columnVisibility: { id: true, long: true } }),
       defaultTableColumns: 2,
     });
 
@@ -159,7 +167,7 @@ test.describe("row click vs. text selection", () => {
   });
 });
 
-test.describe("context menu: Copy value and relabeled filter items", () => {
+test.describe("context menu: Copy Value and relabeled filter items", () => {
   test.beforeEach(async ({ page }) => {
     await bootAndLoad(page, {
       fileKey: "file:///menu.csv",
@@ -170,7 +178,7 @@ test.describe("context menu: Copy value and relabeled filter items", () => {
     });
   });
 
-  test("Copy value puts the full value on the clipboard", async ({ page }) => {
+  test("Copy Value puts the full value on the clipboard", async ({ page }) => {
     // The harness's page (via page.setContent, with no real https origin)
     // isn't a secure context, so the real navigator.clipboard API is
     // undefined here altogether — unlike a real VS Code webview, which
@@ -193,7 +201,7 @@ test.describe("context menu: Copy value and relabeled filter items", () => {
     });
     const cell = page.locator("tr.data-row").first().locator("td").nth(2); // chevron, id, name
     await cell.click({ button: "right" });
-    await page.locator("#context-menu button", { hasText: "Copy value" }).click();
+    await page.locator("#context-menu button", { hasText: "Copy Value" }).click();
     await expect(page.locator("#context-menu")).toBeHidden();
     const copied = await page.evaluate(() => (window as unknown as { __copied?: string }).__copied);
     expect(copied).toBe("Alice");

@@ -84,7 +84,7 @@ test("Expand page followed by a page-size change keeps the previously-expanded r
   await expect(page.locator("tr.detail-row:visible")).toHaveCount(0);
 });
 
-test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a 'Show all' button, which expands it in place", async ({
+test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a 'Show all' button, which expands it in place and gains a 'Show less' counterpart", async ({
   page,
 }) => {
   // Decision: the detail view renders at most 10,000 characters plus a
@@ -92,6 +92,14 @@ test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a
   // a 15 MB single-line cell used to be rendered in full and trip VS
   // Code's unresponsive-webview watchdog. Table cells truncate to 500
   // characters; the detail view's higher cap is exercised here.
+  //
+  // MIGRATED (docs/reviews/pm-review.md §4 "Detail view: 10k truncation +
+  // Show all"): "Show all" used to remove itself once clicked — it now
+  // becomes a "Show less" toggle instead, so the same button can collapse
+  // back to the truncated view. The value's own text is read from
+  // .detail-value-text specifically (not the whole <dd>), since the <dd>
+  // also holds that control plus the JSON format-toggle and height-clamp
+  // "More"/"Less" controls introduced alongside it.
   const bigValue = "x".repeat(100_000);
   const text = toCsvText(["id", "big", "note"], [["1", bigValue, "n"]]);
   await bootAndLoadText(page, {
@@ -103,17 +111,23 @@ test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a
 
   await page.locator("tr.data-row").first().click();
   const dd = page.locator("tr.detail-row").first().locator("dd").first();
+  const valueText = dd.locator(".detail-value-text");
 
-  const initialLength = await dd.evaluate((el) => (el.childNodes[0]?.textContent ?? "").length);
+  const initialLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
   expect(initialLength).toBe(10_001); // 10,000 chars + the "…" marker
 
   const showAllBtn = dd.locator(".show-all-btn");
   await expect(showAllBtn).toHaveText("Show all (100,000 characters)");
 
   await showAllBtn.click();
-  const fullLength = await dd.evaluate((el) => el.textContent?.length ?? 0);
+  const fullLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
   expect(fullLength).toBe(100_000);
-  await expect(showAllBtn).toHaveCount(0); // expands in place, button removed
+  await expect(showAllBtn).toHaveText("Show less"); // gains a counterpart instead of disappearing
+
+  await showAllBtn.click();
+  const collapsedAgainLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
+  expect(collapsedAgainLength).toBe(10_001); // "Show less" returns to the truncated view
+  await expect(showAllBtn).toHaveText("Show all (100,000 characters)");
 });
 
 test("multi-line cell values preserve their newlines in the detail panel (CSS pre-wrap, not literal collapsing)", async ({
@@ -153,7 +167,11 @@ test("a huge table cell renders truncated to 500 characters, but right-click qui
   await bootAndLoadText(page, {
     fileKey: "file:///bigtablecell.csv",
     text,
-    state: defaultViewState(),
+    // "big"'s median length is far past the smart default split's "short"
+    // threshold, so it would default to row details on its own now (see
+    // src/core/columns.ts) — force it into the table explicitly, since
+    // this test is specifically about table-cell truncation.
+    state: defaultViewState({ columnVisibility: { id: true, big: true } }),
     defaultTableColumns: 2, // "big" visible in the table
   });
 

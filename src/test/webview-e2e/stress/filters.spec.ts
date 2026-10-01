@@ -134,7 +134,12 @@ test("right-click quick-add works on an empty cell value, a value containing quo
   await bootAndLoadText(page, {
     fileKey: "file:///quickadd-edge.csv",
     text,
-    state: defaultViewState(),
+    // "val"'s median value length (one entry is 400 chars) now makes it
+    // NOT "short" under the smart default column split (see
+    // src/core/columns.ts's reconcileVisibility) — force it into the
+    // table explicitly, same as an already-configured file would, since
+    // this test is about right-click quick-add on table cells.
+    state: defaultViewState({ columnVisibility: { id: true, val: true } }),
     defaultTableColumns: 2,
   });
 

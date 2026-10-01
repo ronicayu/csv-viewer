@@ -104,9 +104,11 @@ test("right-clicking the evil cell opens the quick-add context menu without exec
   await expect(page.locator("#context-menu")).toBeVisible();
   const escapedHeader = EVIL_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   await expect(page.locator("#context-menu button")).toHaveText([
-    "Copy value",
+    "Copy Value",
     new RegExp(`^Show only rows where ${escapedHeader} = "`),
     new RegExp(`^Hide rows where ${escapedHeader} = "`),
+    "Copy Row as CSV",
+    "Copy Row as JSON",
   ]);
 
   const fired = await page.evaluate(() => (window as unknown as { __xssFired?: number }).__xssFired);
