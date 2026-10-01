@@ -30,7 +30,23 @@
   everywhere.
 - Renaming a file or folder keeps its remembered column/filter/sort settings.
 
-<!-- webview UX changes are added here by the integrator -->
+**Reading, copying and accessibility**
+- Expanding a row now also shows any table column whose value is cut off or spans
+  several lines ("Also in table"), and cut-off cells show their full value on hover.
+- The expanded row stays inside the visible width in narrow or side-by-side editors.
+- Right-click a cell for **Copy value**; the filter shortcuts name the column and
+  value ("Show only rows where status = "active""). Selecting text no longer
+  expands or collapses the row.
+- Rows can be expanded from the keyboard, and column headers, sort state, pager
+  buttons and row counts are announced properly by screen readers.
+- Cmd/Ctrl+F jumps to the search box.
+- Buttons, icons and checkboxes follow the editor's theme (including dark and
+  high-contrast), and the Columns and Filters popovers open under their buttons and
+  close when you click elsewhere.
+- Clear messages when a file has no rows, nothing matches (with one-click "Clear
+  search" / "Turn off filters"), or every column is hidden.
+- Filter hints say which column is missing or why a rule was skipped.
+
 
 See [docs/engineering-notes-0.4.0.md](docs/engineering-notes-0.4.0.md) for the full
 implementation-level detail behind this release.
