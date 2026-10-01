@@ -33,6 +33,7 @@
 // the main thread via a Blob URL (see main.ts) since a webview can't load
 // a vscode-resource: URL directly as a Worker script.
 
+import { profileColumns } from "../core/columns";
 import { parseCsv } from "../core/csvParse";
 import { applyFilters } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
@@ -83,6 +84,7 @@ function onInit(requestId: number, text: string, options: { delimiter?: string; 
     detectedDelimiter: parsed.delimiter,
     quoteProblems: parsed.quoteProblems,
     totalRows: rawRows.length,
+    columnProfiles: profileColumns(headers, rawRows),
   });
 }
 

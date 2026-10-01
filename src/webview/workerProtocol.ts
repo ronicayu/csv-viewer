@@ -12,6 +12,7 @@
 // main.ts (browser/DOM bundle) and worker.ts (Worker global scope bundle)
 // without pulling either into the other.
 
+import type { ColumnProfile } from "../core/columns";
 import type { FilterRule, SortKey } from "../core/types";
 
 export interface ParseOptionsMsg {
@@ -38,6 +39,11 @@ export type WorkerResponse =
       detectedDelimiter: string;
       quoteProblems: { row: number }[];
       totalRows: number;
+      /** One profile per header, in the same order, sampled over the
+       * first PROFILE_SAMPLE_ROWS data rows — see src/core/columns.ts.
+       * Drives the smart default column split and numeric-column
+       * right-alignment. */
+      columnProfiles: ColumnProfile[];
     }
   /** Posted right before the worker begins `applyFilters` for this
    * request — i.e. once it has actually started running, not merely been
