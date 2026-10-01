@@ -197,4 +197,28 @@ suite("First-run 'View as a table?' suggestion prompt", () => {
     await openAsPlainText(textUri);
     await assertNoPromptAppears(api);
   });
+
+  test("switching to a second CSV while the prompt is unanswered doesn't stack another prompt", async () => {
+    const first = await freshCsv();
+    const second = await freshCsv();
+    const api = await getTestApi();
+
+    await openAsPlainText(first);
+    const prompt = await waitForPrompt(api);
+    await openAsPlainText(second);
+    await sleep(1000);
+
+    assert.strictEqual(api.getPendingPrompt()?.message, prompt.message, "the pending prompt should still be the first file's");
+    api.choosePromptButton("Don't Ask Again");
+    await assertNoPromptAppears(api);
+  });
+
+  test("doesn't prompt for a diff editor showing a CSV", async () => {
+    const left = await freshCsv();
+    const right = await freshCsv();
+    const api = await getTestApi();
+
+    await vscode.commands.executeCommand("vscode.diff", left, right, "csv diff");
+    await assertNoPromptAppears(api);
+  });
 });

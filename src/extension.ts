@@ -214,6 +214,7 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
       resetSuggestPromptState: () => {
         void context.globalState.update(SUGGEST_DONE_KEY, undefined);
         testHookPendingPrompt = undefined;
+        suggestPromptInFlight = false;
       },
     };
   }
@@ -231,8 +232,13 @@ export function deactivate(): void {
  * the moment the user shows they already know the viewer exists (opening
  * it themselves, or using "Open as Text" — see resolveCustomEditor and the
  * openAsText command above). */
+let suggestPromptInFlight = false;
+
 async function maybeSuggestOpenAsTable(context: vscode.ExtensionContext, editor: vscode.TextEditor | undefined): Promise<void> {
   if (!editor) return;
+  // One prompt at a time: switching to another CSV while the first prompt
+  // is still unanswered must not stack a second one.
+  if (suggestPromptInFlight) return;
   if (!vscode.workspace.getConfiguration("csvViewer").get<boolean>("suggestOnOpen", true)) return;
   if (context.globalState.get<boolean>(SUGGEST_DONE_KEY, false)) return;
 
@@ -244,12 +250,23 @@ async function maybeSuggestOpenAsTable(context: vscode.ExtensionContext, editor:
   if (uri.scheme === "untitled") return;
   if (!/\.(csv|tsv|tab)$/i.test(uri.path)) return;
   if (isViewerAlreadyOpenFor(uri)) return;
+  // Only for a plain text tab. A diff editor's modified side is also an
+  // active text editor with a file uri, but someone reviewing a diff isn't
+  // asking to read the file as a table.
+  const activeInput = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  if (!(activeInput instanceof vscode.TabInputText) || activeInput.uri.toString() !== uri.toString()) return;
 
   const name = basename(uri);
   const OPEN_AS_TABLE = "Open as Table";
   const ALWAYS_FOR_CSV = "Always for CSV Files";
   const DONT_ASK_AGAIN = "Don't Ask Again";
-  const choice = await showPrompt(`View "${name}" as a table?`, OPEN_AS_TABLE, ALWAYS_FOR_CSV, DONT_ASK_AGAIN);
+  suggestPromptInFlight = true;
+  let choice: string | undefined;
+  try {
+    choice = await showPrompt(`View "${name}" as a table?`, OPEN_AS_TABLE, ALWAYS_FOR_CSV, DONT_ASK_AGAIN);
+  } finally {
+    suggestPromptInFlight = false;
+  }
 
   // Any response at all — including dismissing with the X, which resolves
   // to undefined — means never ask again.
