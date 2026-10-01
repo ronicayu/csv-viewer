@@ -32,6 +32,7 @@ test("sorting a column posts saveState with the new sort keys", async ({ page })
 });
 
 test("toggling 'first row is header' posts saveState", async ({ page }) => {
+  await page.locator("#format-btn").click();
   await clearPosted(page);
   await page.locator("#first-row-header").uncheck();
 

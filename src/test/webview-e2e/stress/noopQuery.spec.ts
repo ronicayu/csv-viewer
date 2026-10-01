@@ -45,12 +45,12 @@ test("adding an empty rule and picking its column/operator (before it has a valu
   const afterAddRule = await queryCount(page);
   expect(afterAddRule).toBe(afterLoad); // still inactive (no value) — no query sent
 
-  await rule.locator("select").nth(0).selectOption("col_2");
+  await rule.locator('select[aria-label="Column"]').selectOption("col_2");
   await page.waitForTimeout(250);
   const afterColumn = await queryCount(page);
   expect(afterColumn).toBe(afterLoad); // still no value — still inactive, still no query
 
-  await rule.locator("select").nth(1).selectOption("contains");
+  await rule.locator('select[aria-label="Condition"]').selectOption("contains");
   await page.waitForTimeout(250);
   const afterOperator = await queryCount(page);
   expect(afterOperator).toBe(afterLoad); // "contains" needs a value too — still inactive
@@ -79,13 +79,13 @@ test("toggling a rule's case-sensitivity or Include/Exclude on an ALREADY-active
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption("col_2");
-  await rule.locator("select").nth(1).selectOption("contains");
+  await rule.locator('select[aria-label="Column"]').selectOption("col_2");
+  await rule.locator('select[aria-label="Condition"]').selectOption("contains");
   await rule.locator('input[type="text"]').fill("v1");
   await expect(page.locator("#status-bar")).not.toHaveText(`Showing ${fixture.rows.length} of ${fixture.rows.length} rows`);
   const afterActive = await queryCount(page);
 
-  await rule.locator(".mode-toggle").click(); // Include -> Exclude: changes the result
+  await rule.locator(".mode-select").selectOption("exclude"); // Keep -> Hide: changes the result
   await page.waitForTimeout(250);
   const afterToggle = await queryCount(page);
   expect(afterToggle).toBe(afterActive + 1);

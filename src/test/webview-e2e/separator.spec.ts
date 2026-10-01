@@ -1,8 +1,8 @@
-// Separator feature: the toolbar "Separator" dropdown (Auto/Comma/
-// Semicolon/Tab/Pipe/Custom…), its precedence rules (stored per-file choice
-// > host defaultDelimiter > real auto-detect), and the stray-quote parsing
-// regression Papa Parse fixes, exercised end to end against the built
-// webview bundle.
+// Separator feature: the File format popover's "Separator" dropdown (Auto/
+// Comma/Semicolon/Tab/Pipe/Custom…), its precedence rules (stored per-file
+// choice > host defaultDelimiter > real auto-detect), and the stray-quote
+// parsing regression Papa Parse fixes, exercised end to end against the
+// built webview bundle.
 
 import Papa from "papaparse";
 import { expect, test } from "@playwright/test";
@@ -11,6 +11,14 @@ import { largeFixture, smallFixture } from "./fixtures";
 
 function textWithDelimiter(headers: string[], rows: string[][], delimiter: string): string {
   return Papa.unparse({ fields: headers, data: rows }, { delimiter });
+}
+
+/** The separator/header/quotes controls moved into the File format popover
+ * (see docs/reviews/ux-review.md §2's regroup sketch) but kept their ids —
+ * every test here opens it first. */
+async function openFormatPopover(page: import("@playwright/test").Page): Promise<void> {
+  await page.locator("#format-btn").click();
+  await expect(page.locator("#format-popover")).toBeVisible();
 }
 
 test("separator dropdown shows the detected 'Auto (;)' for a semicolon fixture", async ({ page }) => {
@@ -22,6 +30,7 @@ test("separator dropdown shows the detected 'Auto (;)' for a semicolon fixture",
     defaultTableColumns: 4,
   });
 
+  await openFormatPopover(page);
   await expect(page.locator("#separator-select")).toHaveValue("");
   await expect(page.locator("#separator-select option:checked")).toHaveText("Auto (;)");
   // And it actually split on ';', not just guessed the label.
@@ -42,6 +51,7 @@ test("switching the separator to Comma re-splits the columns and resets to page 
   await page.locator("#pager-next-btn").click();
   await expect(page.locator("#pager-page-input")).toHaveValue("2");
 
+  await openFormatPopover(page);
   // None of the fixture's fields contain a literal comma, so re-parsing
   // with "," as the delimiter collapses every row to a single column.
   await page.locator("#separator-select").selectOption(",");
@@ -67,6 +77,7 @@ test("Custom… reveals an input, and a custom || delimiter re-parses correctly"
     defaultTableColumns: 8,
   });
 
+  await openFormatPopover(page);
   await page.locator("#separator-select").selectOption("custom");
   await expect(page.locator("#separator-custom")).toBeVisible();
   await page.locator("#separator-custom").fill("||");
@@ -88,6 +99,7 @@ test("an empty custom value falls back to Auto", async ({ page }) => {
     state: defaultViewState({ delimiter: "||" }), // starts on an unmatched custom value
     defaultTableColumns: 4,
   });
+  await openFormatPopover(page);
   await expect(page.locator("#separator-select")).toHaveValue("custom");
   await expect(page.locator("#separator-custom")).toBeVisible();
 
@@ -111,6 +123,7 @@ test("a load with state.delimiter set honors it, taking precedence over auto-det
 
   await expect(page.locator("#table-head th.sortable")).toHaveCount(2);
   await expect(page.locator("tr.data-row").first()).toContainText("Widget, Inc");
+  await openFormatPopover(page);
   await expect(page.locator("#separator-select")).toHaveValue("|");
 });
 
@@ -125,6 +138,7 @@ test("defaultDelimiter '\\t' is used when the stored state has none", async ({ p
   });
 
   await expect(page.locator("#table-head th.sortable")).toHaveCount(3);
+  await openFormatPopover(page);
   await expect(page.locator("#separator-select")).toHaveValue("");
   await expect(page.locator("#separator-select option:checked")).toHaveText("Auto (Tab)");
 });
@@ -145,4 +159,22 @@ test("a stray mid-field quote renders as 3 cells end to end, not a swallowed res
   await expect(firstRowCells).toHaveCount(3);
   await expect(firstRowCells.nth(1)).toHaveText('5" screen');
   await expect(firstRowCells.nth(2)).toHaveText("TV");
+});
+
+test("the File format button's tooltip states the current format", async ({ page }) => {
+  const text = textWithDelimiter(smallFixture.headers, smallFixture.rows, ";");
+  await bootAndLoadText(page, {
+    fileKey: "file:///tooltip.csv",
+    text,
+    state: defaultViewState(),
+    defaultTableColumns: 4,
+  });
+  await expect(page.locator("#format-btn")).toHaveAttribute("title", "File format: semicolon, first row is header, quoted fields on");
+
+  await openFormatPopover(page);
+  await page.locator("#first-row-header").uncheck();
+  await expect(page.locator("#format-btn")).toHaveAttribute("title", "File format: semicolon, no header row, quoted fields on");
+
+  await page.locator("#quotes-checkbox").uncheck();
+  await expect(page.locator("#format-btn")).toHaveAttribute("title", "File format: semicolon, no header row, quoted fields off");
 });

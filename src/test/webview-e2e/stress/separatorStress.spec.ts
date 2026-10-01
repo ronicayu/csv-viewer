@@ -1,10 +1,17 @@
 // Separator stress: cycling through every preset on a 20k-row file, Custom
 // with a quote character, a space, and empty, and switching separators
 // while a filter rule references a column that the new parse removes.
+// The separator/header/quotes controls live inside the File format popover
+// (see docs/reviews/ux-review.md §2) but kept their element ids.
 
 import { expect, test } from "@playwright/test";
 import { bootAndLoadText, defaultViewState, pushLoadText } from "../harness";
 import { trackConsoleErrors, wideFixtureText } from "./stressHelpers";
+
+async function openFormatPopover(page: import("@playwright/test").Page): Promise<void> {
+  await page.locator("#format-btn").click();
+  await expect(page.locator("#format-popover")).toBeVisible();
+}
 
 test("cycling through Auto/Comma/Semicolon/Tab/Pipe on a 20k-row comma file re-parses correctly (or collapses to 1 column) every time, without errors", async ({
   page,
@@ -18,6 +25,7 @@ test("cycling through Auto/Comma/Semicolon/Tab/Pipe on a 20k-row comma file re-p
     defaultTableColumns: 5,
   });
   await expect(page.locator("th.sortable")).toHaveCount(5);
+  await openFormatPopover(page);
 
   // Comma explicitly -> still 5 columns.
   await page.locator("#separator-select").selectOption(",");
@@ -56,6 +64,7 @@ test("a Custom separator of a single space can now actually be applied — the i
     defaultTableColumns: 3,
   });
 
+  await openFormatPopover(page);
   await page.locator("#separator-select").selectOption("custom");
   await page.locator("#separator-custom").fill(" ");
 
@@ -63,7 +72,7 @@ test("a Custom separator of a single space can now actually be applied — the i
   await expect(page.locator("tr.data-row").first()).toContainText("2");
 });
 
-test('a Custom separator of a double-quote is rejected with an inline error when Quoted fields is on, and honored once Quoted fields is turned off', async ({
+test('a Custom separator of a double-quote is rejected with an inline error when Quoted fields is on, and honored once Quoted fields is turned off (manually, or via the error\'s "Turn Off" link)', async ({
   page,
 }) => {
   // FIXED (decision): `"` conflicts with Papa's quoteChar while quoting is
@@ -86,20 +95,39 @@ test('a Custom separator of a double-quote is rejected with an inline error when
   // since it's not the first character of either field).
   await expect(page.locator("th.sortable")).toHaveCount(1);
 
+  await openFormatPopover(page);
   await page.locator("#separator-select").selectOption("custom");
   await page.locator("#separator-custom").fill('"');
 
   // Rejected: an inline error appears, and the table is unchanged (still
   // 1 column) — the rejected value was never applied (state.view.delimiter
-  // stays "", i.e. Auto).
+  // stays "", i.e. Auto). aria-invalid/aria-describedby tie it to the input.
   await expect(page.locator("#separator-custom-error")).toBeVisible();
-  await expect(page.locator("#separator-custom-error")).toHaveText('" is the quote character — turn off Quoted fields to use it');
+  await expect(page.locator("#separator-custom-error")).toContainText('Can\'t use " while Quoted fields is on.');
+  await expect(page.locator("#separator-custom")).toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator("#separator-custom")).toHaveAttribute("aria-describedby", "separator-custom-error");
   await expect(page.locator("th.sortable")).toHaveCount(1);
 
-  // Turn off "Quoted fields", then try the same custom value again — the
-  // rejected attempt above never got as far as being stored, so the
-  // control reset back to Auto/hidden; picking "Custom…" and typing `"`
-  // fresh is now accepted since there's no quoteChar conflict anymore.
+  // The error's own "Turn Off" link does both steps in one click: unchecks
+  // Quoted fields AND applies the pending `"` separator.
+  await page.locator("#separator-custom-error button", { hasText: "Turn Off" }).click();
+
+  await expect(page.locator("#separator-custom-error")).toBeHidden();
+  await expect(page.locator("#quotes-checkbox")).not.toBeChecked();
+  await expect(page.locator("th.sortable")).toHaveCount(2);
+  await expect(page.locator("tr.data-row").first()).toContainText("2");
+  expect(consoleErrors).toEqual([]);
+});
+
+test('manually turning off Quoted fields first, then typing a Custom "` separator, is accepted the same way', async ({ page }) => {
+  const text = 'a"b\n1"2';
+  await bootAndLoadText(page, {
+    fileKey: "file:///quote-sep-manual.csv",
+    text,
+    state: defaultViewState(),
+    defaultTableColumns: 2,
+  });
+  await openFormatPopover(page);
   await page.locator("#quotes-checkbox").uncheck();
   await page.locator("#separator-select").selectOption("custom");
   await page.locator("#separator-custom").fill('"');
@@ -107,7 +135,6 @@ test('a Custom separator of a double-quote is rejected with an inline error when
   await expect(page.locator("#separator-custom-error")).toBeHidden();
   await expect(page.locator("th.sortable")).toHaveCount(2);
   await expect(page.locator("tr.data-row").first()).toContainText("2");
-  expect(consoleErrors).toEqual([]);
 });
 
 test("switching the separator so a filter rule's column disappears leaves that rule ignored (inert), not filtering out the whole file", async ({
@@ -134,6 +161,7 @@ test("switching the separator so a filter rule's column disappears leaves that r
 
   // Force "|" as the separator; nothing in the text contains it, so the
   // three original columns collapse into one and "age" no longer exists.
+  await openFormatPopover(page);
   await page.locator("#separator-select").selectOption("|");
   await expect(page.locator("th.sortable")).toHaveCount(1);
   // The stale include-rule on "age" is now ignored, so all rows remain.
@@ -152,6 +180,7 @@ test("a reload landing while Custom… is being edited keeps the custom input op
   const load = { fileKey: "file:///race.csv", text, state: defaultViewState(), defaultTableColumns: 2 };
   await bootAndLoadText(page, load);
 
+  await openFormatPopover(page);
   await page.locator("#separator-select").selectOption("custom");
   await expect(page.locator("#separator-custom")).toBeVisible();
 

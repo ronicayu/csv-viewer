@@ -18,6 +18,7 @@ test("toggling 'first row is header' off and on 10 times in a row never throws a
     defaultTableColumns: 3,
   });
 
+  await page.locator("#format-btn").click();
   const checkbox = page.locator("#first-row-header");
   for (let i = 0; i < 10; i++) {
     await checkbox.uncheck();
@@ -56,6 +57,7 @@ test("a column-visibility customization survives toggling 'first row is header' 
   // hasn't changed and firstRowIsHeader ends up back at its original
   // value (true) — from the user's perspective this round trip should be
   // a no-op.
+  await page.locator("#format-btn").click();
   await page.locator("#first-row-header").uncheck();
   await page.locator("#first-row-header").check();
 

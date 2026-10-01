@@ -72,7 +72,7 @@ test("page input 'abc' can't actually be typed (native type=number input rejects
 test("page input '2.7' truncates (not rounds) to page 2", async ({ page }) => {
   await commit(page, "2.7");
   await expect(page.locator("#pager-page-input")).toHaveValue("2");
-  await expect(page.locator("#pager-row-range")).toHaveText("Rows 101–200 of 250");
+  await expect(page.locator("#pager-row-range")).toHaveText("101–200 of 250 rows");
 });
 
 test("page input left empty then blurred restores the current page", async ({ page }) => {
@@ -115,7 +115,7 @@ test("filtering down to 0 rows disables every nav control, and clearing the filt
   await expect(page.locator("#pager-page-input")).toHaveValue("2");
 
   await page.locator("#quick-search").fill("zzz-nothing-matches-zzz");
-  await expect(page.locator("#pager-row-range")).toHaveText("No matching rows");
+  await expect(page.locator("#pager-row-range")).toHaveText("0 rows (filtered from 250)");
   for (const id of ["#pager-first-btn", "#pager-prev-btn", "#pager-next-btn", "#pager-last-btn", "#pager-page-input"]) {
     await expect(page.locator(id)).toBeDisabled();
   }
@@ -144,5 +144,5 @@ test("a render landing while the user is typing a page number doesn't overwrite 
   await expect(page.locator("#status-bar")).toHaveText("Showing 250 of 250 rows");
   await expect(input).toHaveValue("3");
   await input.press("Enter");
-  await expect(page.locator("#pager-row-range")).toHaveText("Rows 201–250 of 250");
+  await expect(page.locator("#pager-row-range")).toHaveText("201–250 of 250 rows");
 });

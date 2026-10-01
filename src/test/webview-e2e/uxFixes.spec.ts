@@ -216,17 +216,21 @@ test.describe("context menu: Copy Value and relabeled filter items", () => {
     await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
     await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 5 rows");
     const rule = page.locator(".rule-row").first();
-    await expect(rule.locator("select").nth(0)).toHaveValue("age");
+    await expect(rule.locator('select[aria-label="Column"]')).toHaveValue("age");
     await expect(rule.locator('input[type="text"]')).toHaveValue("25");
-    await expect(rule.locator(".mode-toggle")).toHaveText("Include");
+    await expect(rule.locator(".mode-select")).toHaveValue("include");
 
     await rule.locator(".remove-rule-btn").click();
     await expect(page.locator("#status-bar")).toHaveText("Showing 5 of 5 rows");
+    // Close the still-open Filters panel before the next right-click — see
+    // docs/reviews/ux-review.md §2 (the search box grows, moving the
+    // panel's anchor further right than it sat before).
+    await page.keyboard.press("Escape");
 
     await cell.click({ button: "right" });
     await page.locator("#context-menu button", { hasText: /^Hide rows where/ }).click();
     const rule2 = page.locator(".rule-row").first();
-    await expect(rule2.locator(".mode-toggle")).toHaveText("Exclude");
+    await expect(rule2.locator(".mode-select")).toHaveValue("exclude");
     await expect(page.locator("#status-bar")).toHaveText("Showing 4 of 5 rows");
   });
 });
@@ -338,7 +342,9 @@ test.describe("popovers", () => {
     await expect(page.locator("#columns-btn")).toBeFocused();
   });
 
-  test("opening Filters closes an already-open Columns popover, anchored under the Filters button", async ({ page }) => {
+  test("opening Filters closes an already-open Columns popover, anchored under the Filters button (clamped inside the viewport)", async ({
+    page,
+  }) => {
     await page.locator("#columns-btn").click();
     await expect(page.locator("#columns-popover")).toBeVisible();
 
@@ -347,7 +353,14 @@ test.describe("popovers", () => {
     await expect(page.locator("#columns-popover")).toBeHidden();
     await expect(page.locator("#filter-panel")).toBeVisible();
     const panelBox = (await page.locator("#filter-panel").boundingBox())!;
-    expect(Math.abs(panelBox.x - filtersBox.x)).toBeLessThanOrEqual(8);
+    // The Filters panel is wide enough to keep a rule on one line (see
+    // docs/reviews/ux-review.md §2/§4), so at this viewport its right
+    // edge would overflow if anchored flush to the button — same
+    // viewport clamping as every other popover, not a fixed offset.
+    const viewport = page.viewportSize()!;
+    expect(panelBox.y).toBeGreaterThan(filtersBox.y); // below the button
+    expect(panelBox.x).toBeGreaterThanOrEqual(0);
+    expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width);
   });
 });
 
@@ -374,7 +387,7 @@ test("empty state: search matches nothing offers Clear search", async ({ page })
   });
   await page.locator("#quick-search").fill("zzqx-no-such-thing");
   await expect(page.locator("tr.empty-state-row")).toContainText("No rows match.");
-  const clearBtn = page.locator("tr.empty-state-row button", { hasText: "Clear search" });
+  const clearBtn = page.locator("tr.empty-state-row button", { hasText: "Clear Search" });
   await expect(clearBtn).toBeVisible();
   await clearBtn.click();
   await expect(page.locator("#quick-search")).toHaveValue("");
@@ -399,7 +412,7 @@ test("empty state: filters matching nothing offers Turn off filters (disables, d
     defaultTableColumns: 4,
   });
   await expect(page.locator("tr.empty-state-row")).toContainText("No rows match.");
-  const turnOffBtn = page.locator("tr.empty-state-row button", { hasText: "Turn off filters" });
+  const turnOffBtn = page.locator("tr.empty-state-row button", { hasText: "Turn Off Filters" });
   await expect(turnOffBtn).toBeVisible();
   await turnOffBtn.click();
   await expect(page.locator("#status-bar")).toHaveText("Showing 5 of 5 rows");
@@ -423,7 +436,7 @@ test("empty state: hiding every column shows a banner above the still-clickable 
   await page.keyboard.press("Escape");
 
   await expect(page.locator("tr.empty-state-row")).toContainText("All columns are in the row details.");
-  const chooseBtn = page.locator("tr.empty-state-row button", { hasText: "Choose columns" });
+  const chooseBtn = page.locator("tr.empty-state-row button", { hasText: "Choose Columns" });
   await expect(chooseBtn).toBeVisible();
   await chooseBtn.click();
   await expect(page.locator("#columns-popover")).toBeVisible();
@@ -447,7 +460,7 @@ test("a filter rule whose column no longer exists shows a disabled '<name> (miss
     defaultTableColumns: 4,
   });
   await page.locator("#filters-btn").click();
-  const select = page.locator(".rule-row").first().locator("select").nth(0);
+  const select = page.locator(".rule-row").first().locator('select[aria-label="Column"]');
   await expect(select).toHaveValue("legacy_owner");
   const missingOption = select.locator("option", { hasText: "legacy_owner (missing)" });
   await expect(missingOption).toHaveCount(1);
@@ -480,5 +493,5 @@ test("numbers in the status bar and pager are locale-formatted", async ({ page }
     defaultTableColumns: 4,
   });
   await expect(page.locator("#status-bar")).toHaveText("Showing 20,000 of 20,000 rows");
-  await expect(page.locator("#pager-row-range")).toHaveText("Rows 1–100 of 20,000");
+  await expect(page.locator("#pager-row-range")).toHaveText("1–100 of 20,000 rows");
 });

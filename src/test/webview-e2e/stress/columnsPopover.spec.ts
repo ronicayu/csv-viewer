@@ -54,17 +54,20 @@ test.describe("Hide all", () => {
     expect(consoleErrors).toEqual([]);
   });
 
-  test("with every column hidden, sorting via the Sort by… dropdown still works even though there's no header to click", async ({
+  test("with every column hidden, sorting via the Sort popover's 'Add sort column' still works even though there's no header to click", async ({
     page,
   }) => {
     await page.locator("#columns-btn").click();
     await page.locator("#columns-hide-all").click();
+    await page.keyboard.press("Escape");
 
-    await page.locator("#sort-by-select").selectOption("age");
-    // No visible <th> to read the sort indicator from, but the dropdown
-    // and direction button should reflect the active sort.
-    await expect(page.locator("#sort-by-select")).toHaveValue("age");
-    await expect(page.locator("#sort-dir-btn")).toBeVisible();
+    await page.locator("#sort-btn").click();
+    await page.locator("#sort-add-select").selectOption("age");
+    // No visible <th> to read the sort indicator from, but the popover
+    // itself and the button badge should reflect the active sort.
+    await expect(page.locator(".sort-key-row")).toHaveCount(1);
+    await expect(page.locator(".sort-key-row").first().locator(".sort-key-column")).toHaveText("age");
+    await expect(page.locator("#sort-btn")).toHaveText("Sort • 1");
   });
 });
 

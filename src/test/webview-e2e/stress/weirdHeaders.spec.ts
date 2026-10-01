@@ -92,8 +92,8 @@ test.describe("__proto__ as a header name", () => {
     await page.locator("#filters-btn").click();
     await page.locator("#add-rule-btn").click();
     const rule = page.locator(".rule-row").first();
-    await rule.locator("select").nth(0).selectOption("__proto__");
-    await rule.locator("select").nth(1).selectOption("equals");
+    await rule.locator('select[aria-label="Column"]').selectOption("__proto__");
+    await rule.locator('select[aria-label="Condition"]').selectOption("equals");
     await rule.locator('input[type="text"]').fill("apple");
     await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 3 rows");
   });
@@ -118,7 +118,8 @@ test("a header literally named 'constructor' behaves like any normal header (no 
   await expect(page.locator("th", { hasText: "constructor" })).toHaveCount(1);
 
   await page.locator("th", { hasText: "constructor" }).click();
-  await expect(page.locator("#sort-by-select")).toHaveValue("constructor");
+  await expect(page.locator("th", { hasText: "constructor" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(page.locator("#sort-btn")).toHaveText("Sort • 1");
 });
 
 test("an empty header cell is renamed to column_N and behaves normally", async ({ page }) => {
@@ -232,8 +233,8 @@ test("an emoji header renders, toggles, sorts, and filters normally", async ({ p
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption(emojiHeader);
-  await rule.locator("select").nth(1).selectOption("equals");
+  await rule.locator('select[aria-label="Column"]').selectOption(emojiHeader);
+  await rule.locator('select[aria-label="Condition"]').selectOption("equals");
   await rule.locator('input[type="text"]').fill("alpha");
   await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 2 rows");
 });

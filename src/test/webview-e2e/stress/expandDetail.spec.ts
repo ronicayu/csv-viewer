@@ -63,7 +63,7 @@ test("Expand page followed by a page-size change keeps the previously-expanded r
     defaultTableColumns: 4,
   });
 
-  await page.locator("#expand-all-btn").click(); // "Expand page" — rows 0-99 (ids 0-99)
+  await page.locator("#expand-collapse-btn").click(); // expand all on this page — rows 0-99 (ids 0-99)
   await expect(page.locator("tr.detail-row:visible")).toHaveCount(100);
 
   // Shrink the page size to 50: page 1 now covers ids 0-49 (still expanded,

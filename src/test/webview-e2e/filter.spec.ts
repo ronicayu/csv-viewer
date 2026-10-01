@@ -19,10 +19,10 @@ test("adding an exclude rule reduces the row count and updates the status bar", 
   await page.locator("#add-rule-btn").click();
 
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption("city"); // column
-  await rule.locator("select").nth(1).selectOption("equals"); // operator
+  await rule.locator('select[aria-label="Column"]').selectOption("city"); // column
+  await rule.locator('select[aria-label="Condition"]').selectOption("equals"); // operator
   await rule.locator('input[type="text"]').fill("LA");
-  await rule.locator(".mode-toggle").click(); // Include -> Exclude
+  await rule.locator(".mode-select").selectOption("exclude"); // Keep -> Hide
 
   await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 5 rows");
 });
@@ -32,7 +32,7 @@ test("an invalid regex rule is shown in an error state and has no effect", async
   await page.locator("#add-rule-btn").click();
 
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(1).selectOption("regex");
+  await rule.locator('select[aria-label="Condition"]').selectOption("regex");
   await rule.locator('input[type="text"]').fill("(unterminated");
 
   await expect(rule).toHaveClass(/rule-error/);
@@ -53,7 +53,7 @@ test("the invalid-regex message appears while typing and clears once the pattern
   await page.locator("#add-rule-btn").click();
 
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(1).selectOption("regex");
+  await rule.locator('select[aria-label="Condition"]').selectOption("regex");
   await rule.locator('input[type="text"]').fill("(bad");
   await expect(rule.locator(".rule-error-text")).toBeVisible();
 
@@ -88,4 +88,24 @@ test("a rule added after reloading persisted rules gets a distinct id", async ({
   await page.locator(".rule-row").nth(1).locator(".remove-rule-btn").click();
   await expect(page.locator(".rule-row")).toHaveCount(1);
   await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 5 rows");
+});
+
+test("the Filters button shows a count of enabled, active rules while closed — not merely how many rules exist", async ({ page }) => {
+  await expect(page.locator("#filters-btn")).toHaveText("Filters");
+
+  await page.locator("#filters-btn").click();
+  await page.locator("#add-rule-btn").click();
+  // A fresh rule has no column/value yet — inactive, so no dot/count.
+  await expect(page.locator("#filters-btn")).toHaveText("Filters");
+
+  const rule = page.locator(".rule-row").first();
+  await rule.locator('select[aria-label="Column"]').selectOption("city");
+  await rule.locator('select[aria-label="Condition"]').selectOption("equals");
+  await rule.locator('input[type="text"]').fill("LA");
+  await expect(page.locator("#filters-btn")).toHaveText("Filters • 1");
+
+  // Disabling it (checkbox, not removal) drops the count immediately,
+  // without waiting for the debounced requery.
+  await rule.locator('input[type="checkbox"]').first().uncheck();
+  await expect(page.locator("#filters-btn")).toHaveText("Filters");
 });
