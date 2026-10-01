@@ -1,106 +1,129 @@
 # CSV Viewer: Table + Row Details
 
 Read wide CSV and TSV files in VS Code, Cursor, and Windsurf without scrolling sideways.
-Keep the columns you scan in the table; expand any row to read everything else —
-long notes, descriptions, JSON — in full.
+The columns you scan stay in the table; expand any row to read everything else — long
+notes, descriptions, JSON — in full.
 
-![Picking table columns, then expanding a row to read its notes and JSON](media/hero.png)
+![A support-ticket export: short columns in the table, and one row expanded to show its description, formatted JSON payload and notes](media/hero.png)
 
 ## Open a file
 
-Right-click a `.csv` / `.tsv` / `.tab` file in the Explorer and choose **Open in CSV
-Viewer**, or click the table icon in the editor title bar, or use the **Open in CSV
-Viewer** command from the Command Palette.
+- Right-click a `.csv`, `.tsv` or `.tab` file and choose **Open in CSV Viewer**, or
+- click the table icon in the editor title bar while the file is open as text.
 
-The first time a CSV, TSV, or TAB file opens as plain text, CSV Viewer asks once:
-**View "filename.csv" as a table?**, with three choices — **Open as Table** (just this
-file), **Always for CSV Files** (makes the viewer the default editor for these
-extensions from then on), and **Don't Ask Again**. Any answer, including dismissing
-the prompt, means it won't ask again; turn it off up front with the
-`csvViewer.suggestOnOpen` setting.
+The first time you open one of these files as text, CSV Viewer asks once whether to
+view it as a table. Choose **Always for CSV Files** to make the viewer the default (you
+can also do this yourself through **Open With… → Configure default editor**). The
+viewer is read-only; **Open as Text** in its toolbar or the editor title bar takes you
+back to the text editor to make edits.
 
-You can also make the viewer the default editor yourself at any time, for one file or
-every file of a kind, through **Open With… → Configure default editor**. Either way,
-the plain text editor is still one click away: use **Open as Text** in the editor
-title bar to switch back for the same file — the viewer is read-only by design, so
-that's where you'd make edits.
+## What it does
 
-- **Table + row details.** Each column is either in the table or in a per-row detail
-  panel; choose which with **Columns**.
-- **Find rows fast.** Search all columns, or add include/exclude rules (contains,
-  equals, regex, numeric comparisons…). Right-click any value to filter by it.
+- **Table + row details.** Short columns go in the table; long text, multi-line and
+  JSON columns start in each row's details. Change the split any time with **Columns**.
+- **Reads long values properly.** Row details wrap prose, pretty-print JSON, clamp long
+  values with **More**, and have a copy button per field.
+- **Find rows fast.** Search all columns, or add filter rules ("Keep rows where status
+  equals open"). Right-click any value to filter by it or copy it.
 - **Sort** by clicking a header; Shift+click adds a second key.
-- **Handles messy exports.** Detects comma, semicolon, tab, or pipe; warns and offers a
-  one-click fix when quotes look malformed; picks up changes made on disk.
-- **Stays responsive at scale.** Parsing, filtering, and sorting run off the main
-  thread, so a huge file or a slow filter never freezes the view.
+- **Handles messy exports.** Detects comma, semicolon, tab or pipe; warns and offers a
+  one-click fix when quotes are malformed; reloads when the file changes on disk.
 - **Read-only and private.** Never modifies your file, no telemetry, no network, works
   in untrusted and virtual workspaces.
 
 ## Reading wide files
 
-Every column starts out either shown in the table or moved to a row's detail panel.
-Click a row (or its chevron) to expand it and see its detail-only fields as key/value
-pairs. Use the **Columns** button to choose which columns are in the table — it opens
-a popover with a search box and **Show all** / **Hide all** buttons. The split is
-remembered per file. By default, the first `csvViewer.defaultTableColumns` columns
-(8) start in the table and the rest start as detail-only.
+When a file is first opened, CSV Viewer looks at the first 200 rows and puts up to 8
+short columns in the table, in file order. Columns that hold long text, line breaks or
+JSON start in the row details instead. The toolbar shows the split (**Columns 8/12**),
+and the choice you make there is remembered per file.
+
+Click a row's arrow (or the row) to expand it. The details show the columns that
+aren't in the table, followed by any table column whose value was cut off. In the
+details:
+
+- JSON objects and arrays are formatted, with a **Raw** / **Formatted** switch.
+- Long values show six lines with **More** / **Less**; very large values (over 10,000
+  characters) add **Show all**.
+- Each field has a copy button, and empty fields show a dash.
+
+Right-click a cell or field for **Copy Value**, **Copy Row as CSV** and **Copy Row as
+JSON**.
 
 ## Filtering and sorting
 
-A quick search box filters across every column, including ones that aren't in the
-table. The **Filters** panel adds rules per column (or "any column") with operators —
-contains, equals, starts with, ends with, regex, is empty, and numeric `>`, `<`, `>=`,
-`<=` — each set to include or exclude, with case sensitivity and an enable checkbox.
-Right-click a cell to quick-add an include/exclude rule for that value. A rule that
-can't currently apply (its column was removed, or it needs a value it doesn't have
-yet) is skipped rather than hiding everything, with a hint explaining why.
+The search box matches across every column, including ones in the row details.
+**Filters** adds rules that read as sentences: *Keep* or *Hide* rows where a column (or
+any column) contains, equals, starts with, ends with or matches a regex, is empty, or
+compares as a number (`>`, `<`, `>=`, `<=`). Rows must match all rules. A rule that
+can't apply — its column is gone, or it has no value yet — is skipped with a note
+rather than hiding everything, and a regex that takes more than 2 seconds is skipped
+instead of freezing the view. The button shows how many rules are active
+(**Filters • 2**).
 
-Click a column header to cycle ascending → descending → none; Shift+click adds a
-second sort key. Use the **Sort by…** dropdown to sort by a column that's currently
-detail-only.
+Click a column header to sort ascending, then descending, then not at all; Shift+click
+adds another key. **Sort** lists every sort key, lets you flip or remove each one, and
+can sort by columns that are in the row details. Numbers sort as numbers, text sorts
+alphabetically, and empty cells always go last.
 
 ## File format
 
-A **Separator** dropdown controls the field delimiter: Auto (shows what was detected),
-Comma, Semicolon, Tab, Pipe, or Custom. **First row is header** controls whether the
-first line is treated as column names. **Quoted fields**, on by default, treats `"` as
-opening a quoted field; if a file's quoting is malformed enough that rows run
-together, a dismissible banner appears with a **Treat quotes as plain text** button
-that turns this off and re-parses with every `"` as literal text.
+The gear button opens **File format**:
+
+- **Separator**: Auto (shows what was detected), Comma, Semicolon, Tab, Pipe, or a
+  custom separator of up to 5 characters.
+- **First row is header**: turn off for files without a header row.
+- **Quoted fields**: on by default. If a stray `"` makes rows run together, a banner
+  offers **Read Quotes as Plain Text**, which turns this off.
+
+These choices are remembered per file. `.tsv` and `.tab` files default to Tab.
+
+## Keyboard
+
+- **Tab** moves through the toolbar, the column headers and into the table.
+- In the table: **↑ / ↓** move between rows, **→ / ←** (or **Enter**) expand and
+  collapse, **Home / End** jump to the first and last row, **Shift+F10** opens the row
+  menu.
+- **Cmd/Ctrl+F** focuses the search box. **Alt+← / Alt+→** change page. **Esc** closes
+  popovers and menus.
+
+Column headers, sort state, expanded rows and row counts are exposed to screen readers.
 
 ## Limits
 
-- The viewer is read-only. It never modifies the file on disk.
-- It shows whatever is actually saved on disk — an edit you haven't saved yet in
-  another editor won't appear until you save it.
-- Files over 50 MB show a "may be slow" warning but still open.
-- Files over 512 MB are rejected outright, so a huge file can't make the extension
-  unresponsive.
-- Values with decimal commas (e.g. `12,50`) sort and compare as text, not numbers.
+- Read-only: the viewer never modifies the file.
+- It shows what is saved on disk. An unsaved edit in a text editor appears after you
+  save.
+- Files over 50 MB show a "may be slow" warning; files over 512 MB are not opened.
+- Numbers written with a decimal comma (`12,50`) or a thousands separator (`1,000`)
+  are treated as text when sorting and filtering.
 
 ## Privacy
 
-CSV Viewer has no telemetry and makes no network requests. Reading a file only ever
-goes through VS Code's own filesystem API — no arbitrary code execution, no writes, no
-spawned processes — so it works in untrusted and virtual workspaces.
+No telemetry and no network requests. Files are read through the editor's own file
+API; nothing is written and no processes are started.
 
 ## Settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `csvViewer.defaultTableColumns` | `8` | Number of leading columns shown in the table by default when a file is first opened. |
-| `csvViewer.suggestOnOpen` | `true` | Ask whether to view a CSV/TSV/TAB file as a table the first time it's opened as plain text. |
+| `csvViewer.defaultTableColumns` | `8` | The most columns shown in the table when a file is first opened. Long-text and JSON columns start in the row details regardless. |
+| `csvViewer.suggestOnOpen` | `true` | Ask once whether to view a CSV/TSV/TAB file as a table when it is first opened as text. |
 
 ## Works well with
 
-- [Rainbow CSV](https://marketplace.visualstudio.com/items?itemName=mechatroner.rainbow-csv) colors a CSV's columns right in the text editor.
+- [Rainbow CSV](https://marketplace.visualstudio.com/items?itemName=mechatroner.rainbow-csv) colors the columns of a CSV in the text editor.
 - [Edit CSV](https://marketplace.visualstudio.com/items?itemName=janisdd.vscode-edit-csv) opens an editable grid.
 
-CSV Viewer is for reading: use it alongside either of those for coloring or editing.
+CSV Viewer is for reading; use it alongside either of those for editing.
 
-See [CHANGELOG.md](CHANGELOG.md) for release notes, and [open an issue](https://github.com/ronicayu/csv-viewer/issues) for bugs or requests.
+## Feedback
 
-## License
+See the [changelog](CHANGELOG.md) for release notes, and
+[open an issue](https://github.com/ronicayu/csv-viewer/issues) for bugs or requests.
+To build or test the extension yourself, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-MIT
+## Credits and license
+
+MIT licensed. Parsing by [Papa Parse](https://www.papaparse.com/) (MIT). Icons from
+[Codicons](https://github.com/microsoft/vscode-codicons) by Microsoft (CC BY 4.0).

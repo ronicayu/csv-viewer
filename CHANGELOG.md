@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.0
+
+**Added**
+- Table columns are now chosen by content when a file is first opened: up to 8 short
+  columns go in the table, and long-text, multi-line and JSON columns start in the row
+  details. A choice you already made for a file is kept.
+- Row details format JSON (with a Raw / Formatted switch), clamp long values to six
+  lines with More / Less, show a dash for empty fields, and have a copy button per
+  field.
+- **Copy Row as CSV** and **Copy Row as JSON** in the right-click menu.
+- Keyboard navigation in the table: arrow keys move between rows, → / ← or Enter
+  expand and collapse, Home / End jump, Shift+F10 opens the row menu.
+- **Sort** popover listing every sort key, with direction and remove controls; it can
+  sort by columns that are in the row details.
+- A banner when the open file is deleted on disk, and a one-time hint pointing at the
+  columns that are in the row details.
+
+**Changed**
+- One-row toolbar: search, **Columns 8/12**, **Filters • 2**, **Sort • 1**, then icon
+  buttons for expand/collapse all, File format and Open as Text.
+- Separator, "First row is header" and "Quoted fields" moved into a **File format**
+  popover (gear button).
+- Filter rules read as sentences ("Keep rows where status equals open"); Keep / Hide
+  replaces the Include / Exclude button.
+- The row count lives in the bottom bar ("1–100 of 193 rows (filtered from 240)"), with
+  a **Filtered** row offering Clear Search and Turn Off Filters while a search or
+  filter is active.
+- A thin progress bar replaces the "Working…" text.
+- Numeric columns are right-aligned.
+- The first sort of a large column with mostly unique text is about 40% faster.
+
 ## 0.4.0
 
 **Added**

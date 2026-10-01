@@ -2,7 +2,7 @@
   "name": "csv-viewer",
   "displayName": "CSV Viewer: Table + Row Details",
   "description": "Read wide CSV/TSV files without scrolling sideways: keep key columns in the table, expand any row to read long text and JSON. Filter, sort, live reload.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "ronica",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -123,7 +123,7 @@
           "type": "number",
           "default": 8,
           "minimum": 0,
-          "description": "Number of leading columns shown in the table by default when a file is first opened. Remaining columns start as detail-only."
+          "description": "The most columns shown in the table when a file is first opened. Short columns are chosen in file order; long-text, multi-line and JSON columns start in the row details regardless."
         },
         "csvViewer.suggestOnOpen": {
           "type": "boolean",
