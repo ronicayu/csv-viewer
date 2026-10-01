@@ -22,7 +22,17 @@ import { cycleSortForColumn } from "../core/sort";
 import { detailOnlyColumns, getVisibility, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
-import type { ColumnVisibilityMap, FilterOperator, FilterRule, HostToWebviewMessage, ViewState, WebviewToHostMessage, LoadMessage } from "../core/types";
+import type {
+  ColumnVisibilityMap,
+  FilterMode,
+  FilterOperator,
+  FilterRule,
+  HostToWebviewMessage,
+  ViewState,
+  WebviewToHostMessage,
+  LoadMessage,
+  FileDeletedMessage,
+} from "../core/types";
 import { REGEX_TIMEOUT_MS, WORKING_INDICATOR_DELAY_MS } from "./workerProtocol";
 import type { ParseOptionsMsg, WorkerRequest, WorkerResponse, WorkerRow } from "./workerProtocol";
 
@@ -41,10 +51,10 @@ const FILTER_RULE_DEBOUNCE_MS = 150;
 /** Presets for the "Separator" toolbar dropdown, in display order. Tab is
  * labeled with the word "Tab" rather than a literal tab character. */
 const PRESET_DELIMITERS: { value: string; label: string }[] = [
-  { value: ",", label: "Comma ," },
-  { value: ";", label: "Semicolon ;" },
+  { value: ",", label: "Comma (,)" },
+  { value: ";", label: "Semicolon (;)" },
   { value: "\t", label: "Tab" },
-  { value: "|", label: "Pipe |" },
+  { value: "|", label: "Pipe (|)" },
 ];
 const CUSTOM_SENTINEL = "custom";
 
@@ -95,6 +105,15 @@ interface AppState {
   /** TEST HOOK: mirrors `message.testHooks` from the last `load`. See the
    * "BEGIN TEST HOOK" block below. */
   testHooksEnabled: boolean;
+  /** Per-user hint ids already dismissed/seen (see HintSeenMessage) — the
+   * host's copy, echoed on every `load`, plus any id this session itself
+   * just dismissed (so it doesn't flash back on a reload before the host's
+   * next `load` catches up). */
+  hintsSeen: Set<string>;
+  /** Basename of the file currently reported deleted-on-disk via
+   * `FileDeletedMessage`, or null. Cleared on `fileRestored` or the next
+   * `load`. */
+  fileDeletedName: string | null;
 }
 
 let state: AppState | null = null;
@@ -106,34 +125,41 @@ const app = document.getElementById("app")!;
 app.innerHTML = `
   <div class="toolbar">
     <input id="quick-search" type="search" placeholder="Search all columns…" aria-label="Search all columns" />
-    <button id="columns-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="columns-popover">Columns</button>
-    <button id="filters-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="filter-panel">Filters</button>
-    <button id="expand-all-btn" type="button">Expand page</button>
-    <button id="collapse-all-btn" type="button">Collapse page</button>
-    <label class="sort-by-label">Sort by…
-      <select id="sort-by-select" aria-label="Sort by column"></select>
-    </label>
-    <button id="sort-dir-btn" type="button" aria-label="Toggle sort direction" hidden>▲</button>
-    <label class="header-toggle-label">
-      <input id="first-row-header" type="checkbox" checked />
-      First row is header
-    </label>
-    <label class="separator-label">Separator
-      <select id="separator-select" aria-label="Separator"></select>
-    </label>
-    <input id="separator-custom" type="text" maxlength="5" placeholder="e.g. ||" aria-label="Custom separator" hidden />
-    <span id="separator-custom-error" class="rule-error-text" hidden></span>
-    <label class="quotes-toggle-label">
-      <input id="quotes-checkbox" type="checkbox" checked />
-      Quoted fields
-    </label>
-    <button id="open-as-text-btn" type="button">Open as Text</button>
+    <button id="columns-btn" type="button" class="toolbar-text-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="columns-popover">Columns</button>
+    <button id="filters-btn" type="button" class="toolbar-text-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="filter-panel">Filters</button>
+    <button id="sort-btn" type="button" class="toolbar-text-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="sort-popover">Sort</button>
+    <button id="expand-collapse-btn" type="button" class="icon-btn" title="Expand all rows on this page" aria-label="Expand all rows on this page"><span class="codicon codicon-expand-all" aria-hidden="true"></span></button>
+    <button id="format-btn" type="button" class="icon-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="format-popover" title="File format" aria-label="File format"><span class="codicon codicon-settings-gear" aria-hidden="true"></span></button>
+    <button id="open-as-text-btn" type="button" class="icon-btn" title="Open as Text" aria-label="Open as Text"><span class="codicon codicon-go-to-file" aria-hidden="true"></span></button>
   </div>
+  <div id="working-indicator" class="working-indicator" hidden></div>
+  <div id="file-deleted-banner" class="banner banner-warning" role="alert" hidden>
+    <span class="codicon codicon-warning" aria-hidden="true"></span>
+    <span id="file-deleted-text" class="banner-text"></span>
+  </div>
+  <div id="quote-warning-banner" class="banner banner-warning" role="alert" hidden>
+    <span class="codicon codicon-warning" aria-hidden="true"></span>
+    <span id="quote-warning-text" class="banner-text"></span>
+    <button id="quote-warning-fix-btn" type="button" class="primary">Read Quotes as Plain Text</button>
+    <button id="quote-warning-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
+  </div>
+  <div id="hint-rowdetails-banner" class="banner banner-info" hidden>
+    <span class="codicon codicon-info" aria-hidden="true"></span>
+    <span id="hint-rowdetails-text" class="banner-text"></span>
+    <button id="hint-rowdetails-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
+  </div>
+  <div id="filtered-row" class="filtered-row" hidden>
+    <span id="filtered-row-text"></span>
+    <button id="filtered-clear-search-btn" type="button" hidden>Clear Search</button>
+    <button id="filtered-turn-off-filters-btn" type="button" hidden>Turn Off Filters</button>
+  </div>
+  <div id="status-bar" class="visually-hidden" role="status"></div>
   <div id="columns-popover" class="popover" role="dialog" aria-label="Columns" hidden>
+    <p class="popover-legend">Unchecked columns appear in row details.</p>
     <input id="columns-search" type="search" placeholder="Filter columns…" aria-label="Filter columns" />
     <div class="popover-actions">
-      <button id="columns-show-all" type="button">Show all</button>
-      <button id="columns-hide-all" type="button">Hide all</button>
+      <button id="columns-show-all" type="button">All in Table</button>
+      <button id="columns-hide-all" type="button">All in Details</button>
     </div>
     <div id="columns-list" class="columns-list"></div>
   </div>
@@ -141,17 +167,30 @@ app.innerHTML = `
     <p class="filter-panel-hint">Rows must match all rules.</p>
     <div id="filter-rules"></div>
     <p id="filter-panel-tip" class="filter-panel-hint" hidden>Tip: right-click any cell to filter by its value.</p>
-    <button id="add-rule-btn" type="button">Add rule</button>
+    <button id="add-rule-btn" type="button">Add Rule</button>
   </div>
-  <div class="status-row">
-    <div id="status-bar" class="status-bar" role="status"></div>
-    <span id="working-indicator" class="working-indicator" hidden>Working…</span>
+  <div id="sort-popover" class="popover" role="dialog" aria-label="Sort" hidden>
+    <div id="sort-keys-list" class="sort-keys-list"></div>
+    <div class="sort-add-row">
+      <select id="sort-add-select" aria-label="Add sort column"></select>
+    </div>
+    <button id="sort-clear-btn" type="button" hidden>Clear Sort</button>
   </div>
-  <div id="quote-warning-banner" class="quote-warning-banner" role="alert" hidden>
-    <span class="codicon codicon-warning" aria-hidden="true"></span>
-    <span id="quote-warning-text"></span>
-    <button id="quote-warning-fix-btn" type="button" class="primary">Treat quotes as plain text</button>
-    <button id="quote-warning-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
+  <div id="format-popover" class="popover" role="dialog" aria-label="File format" hidden>
+    <label class="separator-label">Separator
+      <select id="separator-select" aria-label="Separator"></select>
+    </label>
+    <input id="separator-custom" type="text" maxlength="5" placeholder="e.g. ||" aria-label="Custom separator" aria-describedby="separator-custom-error" hidden />
+    <span id="separator-custom-error" class="rule-error-text" hidden></span>
+    <label class="header-toggle-label">
+      <input id="first-row-header" type="checkbox" checked />
+      First row is header
+    </label>
+    <label class="quotes-toggle-label">
+      <input id="quotes-checkbox" type="checkbox" checked />
+      Quoted fields
+    </label>
+    <p class="quotes-explain">Treat "…" as quoting. Turn off if quotes in your data are literal text.</p>
   </div>
   <div id="table-scroll" class="table-scroll">
     <table id="table">
@@ -179,10 +218,10 @@ app.innerHTML = `
 const quickSearchInput = document.getElementById("quick-search") as HTMLInputElement;
 const columnsBtn = document.getElementById("columns-btn") as HTMLButtonElement;
 const filtersBtn = document.getElementById("filters-btn") as HTMLButtonElement;
-const expandAllBtn = document.getElementById("expand-all-btn") as HTMLButtonElement;
-const collapseAllBtn = document.getElementById("collapse-all-btn") as HTMLButtonElement;
-const sortBySelect = document.getElementById("sort-by-select") as HTMLSelectElement;
-const sortDirBtn = document.getElementById("sort-dir-btn") as HTMLButtonElement;
+const sortBtn = document.getElementById("sort-btn") as HTMLButtonElement;
+const expandCollapseBtn = document.getElementById("expand-collapse-btn") as HTMLButtonElement;
+const expandCollapseIcon = expandCollapseBtn.querySelector(".codicon") as HTMLSpanElement;
+const formatBtn = document.getElementById("format-btn") as HTMLButtonElement;
 const firstRowHeaderCheckbox = document.getElementById("first-row-header") as HTMLInputElement;
 const separatorSelect = document.getElementById("separator-select") as HTMLSelectElement;
 const separatorCustomInput = document.getElementById("separator-custom") as HTMLInputElement;
@@ -192,6 +231,15 @@ const quoteWarningBanner = document.getElementById("quote-warning-banner") as HT
 const quoteWarningText = document.getElementById("quote-warning-text") as HTMLSpanElement;
 const quoteWarningFixBtn = document.getElementById("quote-warning-fix-btn") as HTMLButtonElement;
 const quoteWarningDismissBtn = document.getElementById("quote-warning-dismiss-btn") as HTMLButtonElement;
+const fileDeletedBanner = document.getElementById("file-deleted-banner") as HTMLDivElement;
+const fileDeletedText = document.getElementById("file-deleted-text") as HTMLSpanElement;
+const hintBanner = document.getElementById("hint-rowdetails-banner") as HTMLDivElement;
+const hintText = document.getElementById("hint-rowdetails-text") as HTMLSpanElement;
+const hintDismissBtn = document.getElementById("hint-rowdetails-dismiss-btn") as HTMLButtonElement;
+const filteredRow = document.getElementById("filtered-row") as HTMLDivElement;
+const filteredRowText = document.getElementById("filtered-row-text") as HTMLSpanElement;
+const filteredClearSearchBtn = document.getElementById("filtered-clear-search-btn") as HTMLButtonElement;
+const filteredTurnOffFiltersBtn = document.getElementById("filtered-turn-off-filters-btn") as HTMLButtonElement;
 const openAsTextBtn = document.getElementById("open-as-text-btn") as HTMLButtonElement;
 const columnsPopover = document.getElementById("columns-popover") as HTMLDivElement;
 const columnsSearch = document.getElementById("columns-search") as HTMLInputElement;
@@ -202,9 +250,15 @@ const filterPanel = document.getElementById("filter-panel") as HTMLDivElement;
 const filterRulesEl = document.getElementById("filter-rules") as HTMLDivElement;
 const filterPanelTip = document.getElementById("filter-panel-tip") as HTMLParagraphElement;
 const addRuleBtn = document.getElementById("add-rule-btn") as HTMLButtonElement;
+const sortPopover = document.getElementById("sort-popover") as HTMLDivElement;
+const sortKeysList = document.getElementById("sort-keys-list") as HTMLDivElement;
+const sortAddSelect = document.getElementById("sort-add-select") as HTMLSelectElement;
+const sortClearBtn = document.getElementById("sort-clear-btn") as HTMLButtonElement;
+const formatPopover = document.getElementById("format-popover") as HTMLDivElement;
 const statusBar = document.getElementById("status-bar") as HTMLDivElement;
-const workingIndicator = document.getElementById("working-indicator") as HTMLSpanElement;
+const workingIndicator = document.getElementById("working-indicator") as HTMLDivElement;
 const tableScroll = document.getElementById("table-scroll") as HTMLDivElement;
+const tableEl = document.getElementById("table") as HTMLTableElement;
 const tableHead = document.getElementById("table-head") as HTMLTableSectionElement;
 const tableBody = document.getElementById("table-body") as HTMLTableSectionElement;
 const contextMenu = document.getElementById("context-menu") as HTMLDivElement;
@@ -391,13 +445,17 @@ function startOperation(): void {
   const token = operationToken;
   window.clearTimeout(workingTimerHandle);
   workingTimerHandle = window.setTimeout(() => {
-    if (operationToken === token) workingIndicator.hidden = false;
+    if (operationToken === token) {
+      workingIndicator.hidden = false;
+      tableEl.setAttribute("aria-busy", "true");
+    }
   }, WORKING_INDICATOR_DELAY_MS);
 }
 
 function endOperation(): void {
   window.clearTimeout(workingTimerHandle);
   workingIndicator.hidden = true;
+  tableEl.removeAttribute("aria-busy");
 }
 
 // ---- Messaging (extension host) -----------------------------------------
@@ -405,7 +463,30 @@ function endOperation(): void {
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => {
   const message = event.data;
   if (message.type === "load") void onLoad(message);
+  else if (message.type === "fileDeleted") onFileDeleted(message);
+  else if (message.type === "fileRestored") onFileRestored();
 });
+
+/** Shows the "deleted from disk" banner (see docs/reviews/ux-review.md
+ * P2-8) — cleared by `onFileRestored` or the next `load` (see onLoad). */
+function onFileDeleted(message: FileDeletedMessage): void {
+  if (!state) return;
+  state.fileDeletedName = message.name;
+  renderFileDeletedBanner();
+}
+
+function onFileRestored(): void {
+  if (!state) return;
+  state.fileDeletedName = null;
+  renderFileDeletedBanner();
+}
+
+function renderFileDeletedBanner(): void {
+  if (!state) return;
+  const name = state.fileDeletedName;
+  fileDeletedBanner.hidden = name === null;
+  if (name !== null) fileDeletedText.textContent = `"${name}" was deleted from disk. Showing the last loaded copy.`;
+}
 
 vscode.postMessage({ type: "ready" });
 
@@ -471,7 +552,10 @@ async function onLoad(message: LoadMessage): Promise<void> {
     quoteBannerDismissed: false,
     timedOutRuleIds: new Set<string>(),
     testHooksEnabled: message.testHooks === true,
+    hintsSeen: new Set<string>(message.hintsSeen ?? []),
+    fileDeletedName: null,
   };
+  renderFileDeletedBanner();
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
   quotesCheckbox.checked = state.view.quotes;
   quickSearchInput.value = state.view.quickSearch;
@@ -509,6 +593,130 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   resetRegexWatchdogState();
   postToWorker({ type: "init", requestId, text, options });
 }
+
+// ---- Columns/Filters/Sort toolbar badges, hint banner, filtered-summary
+// row ---------------------------------------------------------------------
+//
+// These reflect state while their popover is CLOSED (Columns N/total,
+// Filters • N, Sort • N — see docs/reviews/ux-review.md §2's regroup
+// sketch) and must never change the toolbar's height, so they're always
+// plain text/attribute updates on already-laid-out elements, never a
+// reflow-causing insertion.
+
+function renderColumnsButton(): void {
+  if (!state) return;
+  const visible = visibleColumns(state.headers, state.view.columnVisibility).length;
+  const total = state.headers.length;
+  columnsBtn.textContent = `Columns ${visible}/${total}`;
+  columnsBtn.title = `Columns in table: ${visible} of ${total}`;
+}
+
+/** Rules that are enabled AND currently active (per isRuleActive) AND not
+ * timed out — the same "will this rule actually do anything" definition
+ * buildQueryKey uses, so the badge never disagrees with what's filtered. */
+function activeFilterRuleCount(): number {
+  if (!state) return 0;
+  return state.view.filterRules.filter((r) => r.enabled && isRuleActive(r, state!.headers) && !state!.timedOutRuleIds.has(r.id)).length;
+}
+
+function renderFiltersButton(): void {
+  if (!state) return;
+  const n = activeFilterRuleCount();
+  filtersBtn.textContent = n > 0 ? `Filters • ${n}` : "Filters";
+}
+
+function renderSortButton(): void {
+  if (!state) return;
+  const n = state.view.sortKeys.length;
+  sortBtn.textContent = n > 0 ? `Sort • ${n}` : "Sort";
+}
+
+function separatorWord(effectiveDelimiter: string): string {
+  switch (effectiveDelimiter) {
+    case ",":
+      return "comma";
+    case ";":
+      return "semicolon";
+    case "\t":
+      return "tab";
+    case "|":
+      return "pipe";
+    case "":
+      return "comma";
+    default:
+      return `"${effectiveDelimiter}"`;
+  }
+}
+
+/** The File format icon button's tooltip states the current format in
+ * full (e.g. "File format: comma, first row is header, quoted fields
+ * on") since the button itself carries no text. */
+function renderFormatButton(): void {
+  if (!state) return;
+  const effective = resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter) ?? state.detectedDelimiter;
+  const sep = separatorWord(effective);
+  const headerPart = state.view.firstRowIsHeader ? "first row is header" : "no header row";
+  const quotesPart = state.view.quotes ? "quoted fields on" : "quoted fields off";
+  const label = `File format: ${sep}, ${headerPart}, ${quotesPart}`;
+  formatBtn.title = label;
+  formatBtn.setAttribute("aria-label", label);
+}
+
+/** Row-details hint: id "rowDetails" — shown once, while at least one
+ * column is detail-only and the id isn't in state.hintsSeen; dismissed
+ * (or the first row expansion) hides it for good via markHintSeen. */
+function renderHintBanner(): void {
+  if (!state) return;
+  const n = detailOnlyColumns(state.headers, state.view.columnVisibility).length;
+  const show = n > 0 && !state.hintsSeen.has("rowDetails");
+  hintBanner.hidden = !show;
+  if (!show) return;
+  hintText.textContent = `${n} more column${n === 1 ? "" : "s"} are in each row's details. Click a row's arrow to expand it, or change which with Columns.`;
+}
+
+/** Marks a per-user hint as seen: hides it, remembers it for the rest of
+ * this session, and (once per id) tells the host so it's included in
+ * every future `load`'s hintsSeen (see HintSeenMessage). */
+function markHintSeen(id: string): void {
+  if (!state || state.hintsSeen.has(id)) return;
+  state.hintsSeen.add(id);
+  vscode.postMessage({ type: "hintSeen", id });
+  if (id === "rowDetails") renderHintBanner();
+}
+
+/** The slim "Filtered: X of Y rows" row under the toolbar — shown whenever
+ * search or an active filter rule is in play, regardless of whether it
+ * actually reduced the row count (the pager's own "(filtered from N)"
+ * suffix is the one gated on an actual reduction — see renderPagerBar). */
+function renderFilteredRow(): void {
+  if (!state) return;
+  const searchActive = state.view.quickSearch !== "";
+  const filtersActive = activeFilterRuleCount() > 0;
+  const show = searchActive || filtersActive;
+  filteredRow.hidden = !show;
+  if (!show) return;
+  filteredRowText.textContent = `Filtered: ${state.filteredCount.toLocaleString()} of ${state.totalRows.toLocaleString()} rows`;
+  filteredClearSearchBtn.hidden = !searchActive;
+  filteredTurnOffFiltersBtn.hidden = !filtersActive;
+}
+
+filteredClearSearchBtn.addEventListener("click", () => {
+  if (!state) return;
+  quickSearchInput.value = "";
+  state.view.quickSearch = "";
+  requery();
+  saveState();
+});
+
+filteredTurnOffFiltersBtn.addEventListener("click", () => {
+  if (!state) return;
+  for (const r of state.view.filterRules) r.enabled = false;
+  renderFilterPanel();
+  requery();
+  saveState();
+});
+
+hintDismissBtn.addEventListener("click", () => markHintSeen("rowDetails"));
 
 function newRuleId(): string {
   return `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -588,9 +796,12 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   state.view.columnVisibility = reconciled;
 
   renderColumnsPopover();
+  renderColumnsButton();
   renderFilterPanel();
   renderSeparatorControl();
+  renderFormatButton();
   renderQuoteWarningBanner();
+  renderHintBanner();
 
   // Only write state back if reconciliation actually changed the stored
   // visibility map — a plain reopen of a file whose visibility is already
@@ -702,10 +913,13 @@ function onPageResult(msg: { type: "pageResult" } & WorkerResponse): void {
  * render has already settled too. */
 function finishRender(): void {
   renderTableHead();
-  renderSortBySelect();
+  renderSortButton();
+  renderSortPopover();
   renderTableBody();
+  renderExpandCollapseButton();
   renderStatusBar();
   renderPagerBar();
+  renderFilteredRow();
   endOperation();
   notifyRendered();
 }
@@ -897,7 +1111,7 @@ function buildEmptyStateRow(colSpan: number, kind: "zero-file" | "zero-matches" 
     if (state!.view.quickSearch !== "") {
       const clearBtn = document.createElement("button");
       clearBtn.type = "button";
-      clearBtn.textContent = "Clear search";
+      clearBtn.textContent = "Clear Search";
       clearBtn.addEventListener("click", () => {
         if (!state) return;
         quickSearchInput.value = "";
@@ -910,7 +1124,7 @@ function buildEmptyStateRow(colSpan: number, kind: "zero-file" | "zero-matches" 
     if (state!.view.filterRules.some((r) => r.enabled)) {
       const turnOffBtn = document.createElement("button");
       turnOffBtn.type = "button";
-      turnOffBtn.textContent = "Turn off filters";
+      turnOffBtn.textContent = "Turn Off Filters";
       turnOffBtn.addEventListener("click", () => {
         if (!state) return;
         for (const r of state.view.filterRules) r.enabled = false;
@@ -930,7 +1144,7 @@ function buildEmptyStateRow(colSpan: number, kind: "zero-file" | "zero-matches" 
     actions.className = "empty-state-actions";
     const chooseBtn = document.createElement("button");
     chooseBtn.type = "button";
-    chooseBtn.textContent = "Choose columns";
+    chooseBtn.textContent = "Choose Columns";
     chooseBtn.addEventListener("click", () => openColumnsPopover(chooseBtn));
     actions.appendChild(chooseBtn);
     td.appendChild(actions);
@@ -1122,6 +1336,11 @@ function toggleExpanded(rowId: number): void {
   const opening = !state.expanded.has(rowId);
   if (opening) state.expanded.add(rowId);
   else state.expanded.delete(rowId);
+  // Expanding any row is one of the two ways the one-time "N more columns
+  // are in each row's details" hint gets dismissed for good (see
+  // docs/reviews/pm-review.md §3's first-run hint recommendation).
+  if (opening) markHintSeen("rowDetails");
+  renderExpandCollapseButton();
 
   const rowTr = tableBody.querySelector<HTMLTableRowElement>(`tr.data-row[data-row-id="${rowId}"]`);
   const detailTr = document.getElementById(`detail-row-${rowId}`) as HTMLTableRowElement | null;
@@ -1167,7 +1386,15 @@ function renderPagerBar(): void {
   pagerPageInput.max = String(count);
   pagerPageCount.textContent = String(count);
   pagerPageSizeSelect.value = String(size);
-  pagerRowRange.textContent = total === 0 ? "No matching rows" : `Rows ${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}`;
+  // The pager's range text is now the single VISIBLE row count (the old
+  // separate status-line text stays only as a visually-hidden live region
+  // — see #status-bar/renderStatusBar). "(filtered from N)" only appears
+  // when search/filters actually reduced the set, not merely while one is
+  // active with no effect — see docs/reviews/ux-review.md §2/§4.
+  const filtered = total !== state.totalRows;
+  const suffix = filtered ? ` (filtered from ${state.totalRows.toLocaleString()})` : "";
+  pagerRowRange.textContent =
+    total === 0 ? `0 rows${suffix}` : `${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} rows${suffix}`;
 
   const noRows = total === 0;
   pagerFirstBtn.disabled = noRows || state.page <= 1;
@@ -1325,23 +1552,42 @@ function renderSeparatorControl(): void {
   // must round-trip back into the input as typed, not as "".
   if (!isPreset) separatorCustomInput.value = current;
   hideSeparatorCustomError();
+  renderFormatButton();
 }
 
 function hideSeparatorCustomError(): void {
   separatorCustomError.hidden = true;
   separatorCustomError.innerHTML = "";
   separatorCustomError.classList.remove("input-error-box");
+  separatorCustomInput.removeAttribute("aria-invalid");
 }
 
-function showSeparatorCustomError(message: string): void {
+/** `"` conflicts with Papa's quoteChar while "Quoted fields" is on (see
+ * the separatorCustomInput 'input' handler below) — shown with a "Turn
+ * off" link that both unchecks Quoted fields and applies `pendingValue`
+ * in one click, instead of making the user do it in two steps. */
+function showSeparatorQuoteConflictError(pendingValue: string): void {
   separatorCustomError.innerHTML = "";
   const icon = document.createElement("span");
   icon.className = "codicon codicon-error";
   icon.setAttribute("aria-hidden", "true");
   separatorCustomError.appendChild(icon);
-  separatorCustomError.appendChild(document.createTextNode(message));
+  separatorCustomError.appendChild(document.createTextNode('Can\'t use " while Quoted fields is on. '));
+  const turnOffBtn = document.createElement("button");
+  turnOffBtn.type = "button";
+  turnOffBtn.className = "link-btn";
+  turnOffBtn.textContent = "Turn Off";
+  turnOffBtn.addEventListener("click", () => {
+    if (!state) return;
+    quotesCheckbox.checked = false;
+    state.view.quotes = false;
+    hideSeparatorCustomError();
+    applySeparatorChange(pendingValue);
+  });
+  separatorCustomError.appendChild(turnOffBtn);
   separatorCustomError.classList.add("input-error-box");
   separatorCustomError.hidden = false;
+  separatorCustomInput.setAttribute("aria-invalid", "true");
 }
 
 function applySeparatorChange(delimiter: string): void {
@@ -1388,7 +1634,7 @@ separatorCustomInput.addEventListener("input", () => {
     // quoting off (state.view.quotes === false), there's no conflict, so
     // `"` is allowed as an ordinary delimiter.
     if (state.view.quotes && value.includes('"')) {
-      showSeparatorCustomError('" is the quote character — turn off Quoted fields to use it');
+      showSeparatorQuoteConflictError(value);
       return;
     }
     hideSeparatorCustomError();
@@ -1408,7 +1654,7 @@ function renderQuoteWarningBanner(): void {
   quoteWarningBanner.hidden = !shouldShow;
   if (!shouldShow) return;
   const firstRow = state.quoteProblems[0].row;
-  quoteWarningText.textContent = `Quotes look malformed near row ${firstRow} — rows after it may be merged.`;
+  quoteWarningText.textContent = `Quotes look malformed near row ${firstRow}. Rows after it may be merged into one.`;
 }
 
 quotesCheckbox.addEventListener("change", () => {
@@ -1438,74 +1684,151 @@ openAsTextBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "openAsText" });
 });
 
-// ---- Expand page / collapse page (current page only) ----------------------
+// ---- Expand/collapse all (current page only) -------------------------------
 //
 // Purely local: the current page's rows (with full cell values) are
 // already cached in state.currentPageRows, so this never needs the worker.
+// One toggle button, not two — it shows "collapse" once every row on the
+// page is expanded, "expand" otherwise (see docs/reviews/ux-review.md §2's
+// regroup sketch / copy table).
 
-expandAllBtn.addEventListener("click", () => {
+function pageFullyExpanded(): boolean {
+  if (!state || state.currentPageRows.length === 0) return false;
+  return state.currentPageRows.every((row) => state!.expanded.has(row.id));
+}
+
+function renderExpandCollapseButton(): void {
+  const collapse = pageFullyExpanded();
+  expandCollapseIcon.className = `codicon ${collapse ? "codicon-collapse-all" : "codicon-expand-all"}`;
+  const label = collapse ? "Collapse all rows on this page" : "Expand all rows on this page";
+  expandCollapseBtn.title = label;
+  expandCollapseBtn.setAttribute("aria-label", label);
+}
+
+expandCollapseBtn.addEventListener("click", () => {
   if (!state) return;
-  for (const row of state.currentPageRows) state.expanded.add(row.id);
+  if (pageFullyExpanded()) {
+    for (const row of state.currentPageRows) state.expanded.delete(row.id);
+  } else {
+    for (const row of state.currentPageRows) state.expanded.add(row.id);
+  }
   renderTableBody();
+  renderExpandCollapseButton();
   notifyRendered();
 });
 
-collapseAllBtn.addEventListener("click", () => {
+// ---- Sort popover (replaces the old "Sort by…" select + direction button) --
+//
+// Lists every current sort key in priority order (direction toggle +
+// remove), an "Add sort column" select listing every column not already a
+// key — INCLUDING detail-only ones, which have no header to click — and a
+// "Clear sort" button once there's at least one key. Header click/
+// Shift+click (onHeaderClick, above) mutate the exact same
+// state.view.sortKeys and always requery(), so this stays in sync with the
+// header UI automatically via finishRender's renderSortPopover() call.
+
+function renderSortPopover(): void {
   if (!state) return;
-  for (const row of state.currentPageRows) state.expanded.delete(row.id);
-  renderTableBody();
-  notifyRendered();
-});
+  sortKeysList.innerHTML = "";
 
-// ---- Sort by… dropdown (for detail-only columns, which have no header) ------
+  state.view.sortKeys.forEach((key, i) => {
+    const row = document.createElement("div");
+    row.className = "sort-key-row";
 
-function renderSortBySelect(): void {
-  if (!state) return;
-  sortBySelect.innerHTML = "";
-  const noneOption = document.createElement("option");
-  noneOption.value = "";
-  noneOption.textContent = "(none)";
-  sortBySelect.appendChild(noneOption);
+    const priority = document.createElement("span");
+    priority.className = "sort-key-priority";
+    priority.textContent = String(i + 1);
+    row.appendChild(priority);
 
+    const columnLabel = document.createElement("span");
+    columnLabel.className = "sort-key-column";
+    columnLabel.textContent = key.column;
+    row.appendChild(columnLabel);
+
+    const dirBtn = document.createElement("button");
+    dirBtn.type = "button";
+    dirBtn.className = "icon-btn sort-key-dir-btn";
+    const dirIcon = document.createElement("span");
+    dirIcon.className = `codicon ${key.direction === "asc" ? "codicon-arrow-up" : "codicon-arrow-down"}`;
+    dirIcon.setAttribute("aria-hidden", "true");
+    dirBtn.appendChild(dirIcon);
+    const dirLabel = key.direction === "asc" ? "Sort ascending" : "Sort descending";
+    dirBtn.title = dirLabel;
+    dirBtn.setAttribute("aria-label", dirLabel);
+    dirBtn.addEventListener("click", () => {
+      if (!state) return;
+      const keys = state.view.sortKeys.slice();
+      keys[i] = { ...keys[i], direction: keys[i].direction === "asc" ? "desc" : "asc" };
+      state.view.sortKeys = keys;
+      requery();
+      saveState();
+    });
+    row.appendChild(dirBtn);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "icon-btn sort-key-remove-btn";
+    removeBtn.innerHTML = '<span class="codicon codicon-close" aria-hidden="true"></span>';
+    removeBtn.setAttribute("aria-label", `Remove ${key.column} from sort`);
+    removeBtn.addEventListener("click", () => {
+      if (!state) return;
+      state.view.sortKeys = state.view.sortKeys.filter((_, idx) => idx !== i);
+      requery();
+      saveState();
+    });
+    row.appendChild(removeBtn);
+
+    sortKeysList.appendChild(row);
+  });
+
+  const usedColumns = new Set(state.view.sortKeys.map((k) => k.column));
+  sortAddSelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Add sort column…";
+  sortAddSelect.appendChild(placeholder);
   for (const header of state.headers) {
+    if (usedColumns.has(header)) continue;
     const option = document.createElement("option");
     option.value = header;
     option.textContent = header;
-    sortBySelect.appendChild(option);
+    sortAddSelect.appendChild(option);
   }
+  sortAddSelect.value = "";
 
-  const primary = state.view.sortKeys[0];
-  sortBySelect.value = primary ? primary.column : "";
-  sortDirBtn.hidden = !primary;
-  sortDirBtn.textContent = primary?.direction === "desc" ? "▼" : "▲";
-  sortDirBtn.title = primary?.direction === "desc" ? "Descending" : "Ascending";
+  sortClearBtn.hidden = state.view.sortKeys.length === 0;
 }
 
-sortBySelect.addEventListener("change", () => {
+sortAddSelect.addEventListener("change", () => {
   if (!state) return;
-  const column = sortBySelect.value;
-  state.view.sortKeys = column === "" ? [] : [{ column, direction: "asc" }];
+  const column = sortAddSelect.value;
+  if (column === "") return;
+  state.view.sortKeys = [...state.view.sortKeys, { column, direction: "asc" as const }];
   requery();
   saveState();
 });
 
-sortDirBtn.addEventListener("click", () => {
-  if (!state || state.view.sortKeys.length === 0) return;
-  const [primary, ...rest] = state.view.sortKeys;
-  state.view.sortKeys = [{ ...primary, direction: primary.direction === "asc" ? "desc" : "asc" }, ...rest];
+sortClearBtn.addEventListener("click", () => {
+  if (!state) return;
+  state.view.sortKeys = [];
   requery();
   saveState();
 });
 
 // ---- Popover positioning & focus management --------------------------------
 //
-// Both the Columns popover and the Filters panel share this: anchored
-// under their trigger button (not a fixed top/right offset), clamped
-// inside the viewport, re-clamped on resize; opening one closes the
-// other; opening moves focus to the popover's first field; outside-click
-// and Escape close it — Escape also returns focus to the trigger, an
-// outside click does not (the user clicked somewhere else on purpose).
+// The Columns, Filters, Sort and File format popovers all share this:
+// anchored under their trigger button (not a fixed top/right offset),
+// clamped inside the viewport, re-clamped on resize; opening one closes
+// every other one; opening moves focus to the popover's first field;
+// outside-click and Escape close it — Escape also returns focus to the
+// trigger, an outside click does not (the user clicked somewhere else on
+// purpose).
 
+const ALL_POPOVERS: HTMLElement[] = [columnsPopover, filterPanel, sortPopover, formatPopover];
+const POPOVER_TRIGGERS: HTMLButtonElement[] = [columnsBtn, filtersBtn, sortBtn, formatBtn];
+
+let activePopoverEl: HTMLElement | null = null;
 let activePopoverTrigger: HTMLButtonElement | null = null;
 
 /** Anchors `el` (already un-hidden, so it has real dimensions) under
@@ -1531,8 +1854,7 @@ function positionPopoverNear(el: HTMLElement, trigger: HTMLElement): void {
 }
 
 function repositionOpenPopover(): void {
-  if (!columnsPopover.hidden && activePopoverTrigger) positionPopoverNear(columnsPopover, activePopoverTrigger);
-  if (!filterPanel.hidden && activePopoverTrigger) positionPopoverNear(filterPanel, activePopoverTrigger);
+  if (activePopoverEl && !activePopoverEl.hidden && activePopoverTrigger) positionPopoverNear(activePopoverEl, activePopoverTrigger);
 }
 
 window.addEventListener("resize", repositionOpenPopover);
@@ -1542,31 +1864,40 @@ window.addEventListener("resize", repositionOpenPopover);
  * elsewhere, so it shouldn't be yanked back. */
 function closeAllPopovers(returnFocusToTrigger = false): void {
   const trigger = activePopoverTrigger;
-  columnsPopover.hidden = true;
-  filterPanel.hidden = true;
-  columnsBtn.setAttribute("aria-expanded", "false");
-  filtersBtn.setAttribute("aria-expanded", "false");
+  for (const el of ALL_POPOVERS) el.hidden = true;
+  for (const btn of POPOVER_TRIGGERS) btn.setAttribute("aria-expanded", "false");
+  activePopoverEl = null;
   activePopoverTrigger = null;
   if (returnFocusToTrigger) trigger?.focus();
 }
 
-function openColumnsPopover(trigger: HTMLButtonElement = columnsBtn): void {
+/** Opens `el`, anchored under `trigger`; focuses `el`'s first field unless
+ * `focusSelector` names a more specific one (Columns wants its search box
+ * focused first, not the legend paragraph). */
+function openPopover(el: HTMLElement, trigger: HTMLButtonElement, focusSelector = "input, select, button"): void {
   closeAllPopovers();
-  columnsPopover.hidden = false;
-  columnsBtn.setAttribute("aria-expanded", "true");
+  el.hidden = false;
+  trigger.setAttribute("aria-expanded", "true");
+  activePopoverEl = el;
   activePopoverTrigger = trigger;
-  positionPopoverNear(columnsPopover, trigger);
-  columnsSearch.focus();
+  positionPopoverNear(el, trigger);
+  el.querySelector<HTMLElement>(focusSelector)?.focus();
+}
+
+function openColumnsPopover(trigger: HTMLButtonElement = columnsBtn): void {
+  openPopover(columnsPopover, trigger, "#columns-search");
 }
 
 function openFilterPanel(trigger: HTMLButtonElement = filtersBtn): void {
-  closeAllPopovers();
-  filterPanel.hidden = false;
-  filtersBtn.setAttribute("aria-expanded", "true");
-  activePopoverTrigger = trigger;
-  positionPopoverNear(filterPanel, trigger);
-  const firstField = filterPanel.querySelector<HTMLElement>("#filter-rules input, #filter-rules select, #add-rule-btn");
-  firstField?.focus();
+  openPopover(filterPanel, trigger, "#filter-rules input, #filter-rules select, #add-rule-btn");
+}
+
+function openSortPopover(trigger: HTMLButtonElement = sortBtn): void {
+  openPopover(sortPopover, trigger, ".sort-key-dir-btn, #sort-add-select");
+}
+
+function openFormatPopover(trigger: HTMLButtonElement = formatBtn): void {
+  openPopover(formatPopover, trigger, "#separator-select");
 }
 
 // Outside clicks are intercepted in the CAPTURE phase (before the click
@@ -1578,16 +1909,16 @@ function openFilterPanel(trigger: HTMLButtonElement = filtersBtn): void {
 document.addEventListener(
   "click",
   (ev) => {
-    const openEl = !columnsPopover.hidden ? columnsPopover : !filterPanel.hidden ? filterPanel : null;
+    const openEl = activePopoverEl && !activePopoverEl.hidden ? activePopoverEl : null;
     if (!openEl) return;
     const target = ev.target as Node;
     if (openEl.contains(target)) return; // inside the open popover itself
     if (contextMenu.contains(target)) return; // the cell context menu has its own click handling
-    // Let either trigger button's own click handler run normally — it
+    // Let any trigger button's own click handler run normally — it
     // already calls closeAllPopovers() before opening (or closes if it's
     // the same trigger toggling itself shut), so this correctly switches
-    // straight from one popover to the other.
-    if (target instanceof Element && (columnsBtn.contains(target) || filtersBtn.contains(target))) return;
+    // straight from one popover to another.
+    if (target instanceof Element && POPOVER_TRIGGERS.some((btn) => btn.contains(target))) return;
     // Only a row click needs its OWN action suppressed (the documented
     // "no row toggling through an open popover" trap) — every other
     // control (pager, headers, toolbar) should still do its own thing;
@@ -1608,11 +1939,27 @@ document.addEventListener(
 // cached state.currentPageRows, no worker round-trip.
 
 columnsBtn.addEventListener("click", () => {
-  if (!columnsPopover.hidden) {
+  if (activePopoverEl === columnsPopover) {
     closeAllPopovers();
     return;
   }
   openColumnsPopover(columnsBtn);
+});
+
+sortBtn.addEventListener("click", () => {
+  if (activePopoverEl === sortPopover) {
+    closeAllPopovers();
+    return;
+  }
+  openSortPopover(sortBtn);
+});
+
+formatBtn.addEventListener("click", () => {
+  if (activePopoverEl === formatPopover) {
+    closeAllPopovers();
+    return;
+  }
+  openFormatPopover(formatBtn);
 });
 
 function renderColumnsPopover(): void {
@@ -1647,6 +1994,9 @@ function renderColumnsPopover(): void {
 function renderLocalOnly(): void {
   renderTableHead();
   renderTableBody();
+  renderExpandCollapseButton();
+  renderColumnsButton();
+  renderHintBanner();
   notifyRendered();
 }
 
@@ -1677,10 +2027,10 @@ const OPERATORS: { value: FilterOperator; label: string; needsValue: boolean }[]
   { value: "endsWith", label: "ends with", needsValue: true },
   { value: "regex", label: "regex", needsValue: true },
   { value: "isEmpty", label: "is empty", needsValue: false },
-  { value: "gt", label: ">", needsValue: true },
-  { value: "lt", label: "<", needsValue: true },
-  { value: "gte", label: ">=", needsValue: true },
-  { value: "lte", label: "<=", needsValue: true },
+  { value: "gt", label: "> (number)", needsValue: true },
+  { value: "lt", label: "< (number)", needsValue: true },
+  { value: "gte", label: ">= (number)", needsValue: true },
+  { value: "lte", label: "<= (number)", needsValue: true },
 ];
 
 /** Sends the next filter/sort/search query, always resetting to page 1 —
@@ -1717,7 +2067,7 @@ function debouncedRequery(): void {
 }
 
 filtersBtn.addEventListener("click", () => {
-  if (!filterPanel.hidden) {
+  if (activePopoverEl === filterPanel) {
     closeAllPopovers();
     return;
   }
@@ -1745,8 +2095,14 @@ function renderFilterPanel(): void {
   filterRulesEl.innerHTML = "";
   for (const rule of state.view.filterRules) filterRulesEl.appendChild(buildRuleRow(rule));
   filterPanelTip.hidden = state.view.filterRules.length > 0;
+  renderFiltersButton();
 }
 
+/** Sentence-ordered rule row: `[enabled] [Keep|Hide] rows where [column]
+ * [condition] [value] [Aa] [✕]` (see docs/reviews/ux-review.md §2/§4 and
+ * the owner's §5 layout). `mode` is a select ("Keep"/"Hide") now, not a
+ * toggle button — the stored rule field is still `mode: "include" |
+ * "exclude"`. */
 function buildRuleRow(rule: FilterRule): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "rule-row";
@@ -1763,11 +2119,34 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   });
   row.appendChild(enabledCheckbox);
 
+  const modeSelect = document.createElement("select");
+  modeSelect.className = "mode-select";
+  modeSelect.setAttribute("aria-label", "Keep or hide");
+  const keepOption = document.createElement("option");
+  keepOption.value = "include";
+  keepOption.textContent = "Keep";
+  modeSelect.appendChild(keepOption);
+  const hideOption = document.createElement("option");
+  hideOption.value = "exclude";
+  hideOption.textContent = "Hide";
+  modeSelect.appendChild(hideOption);
+  modeSelect.value = rule.mode;
+  modeSelect.addEventListener("change", () => {
+    rule.mode = modeSelect.value as FilterMode;
+    debouncedRequery();
+  });
+  row.appendChild(modeSelect);
+
+  const rowsWhere = document.createElement("span");
+  rowsWhere.className = "rule-row-text";
+  rowsWhere.textContent = "rows where";
+  row.appendChild(rowsWhere);
+
   const columnSelect = document.createElement("select");
   columnSelect.setAttribute("aria-label", "Column");
   const anyOption = document.createElement("option");
   anyOption.value = "";
-  anyOption.textContent = "(any column)";
+  anyOption.textContent = "Any column";
   columnSelect.appendChild(anyOption);
   for (const header of state!.headers) {
     const option = document.createElement("option");
@@ -1816,7 +2195,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   valueInput.type = "text";
   valueInput.value = rule.value;
   valueInput.hidden = rule.operator === "isEmpty";
-  valueInput.placeholder = "value";
+  valueInput.placeholder = "Value";
   valueInput.addEventListener("input", () => {
     rule.value = valueInput.value;
     // Editing the value clears a "too slow" mark immediately — the rule
@@ -1841,21 +2220,6 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   caseLabel.appendChild(caseCheckbox);
   caseLabel.appendChild(document.createTextNode("Aa"));
   row.appendChild(caseLabel);
-
-  const modeToggle = document.createElement("button");
-  modeToggle.type = "button";
-  modeToggle.className = "mode-toggle";
-  modeToggle.textContent = rule.mode === "include" ? "Include" : "Exclude";
-  modeToggle.setAttribute("aria-pressed", String(rule.mode === "exclude"));
-  modeToggle.setAttribute("aria-label", `Filter mode: ${rule.mode === "include" ? "Include" : "Exclude"}`);
-  modeToggle.addEventListener("click", () => {
-    rule.mode = rule.mode === "include" ? "exclude" : "include";
-    modeToggle.textContent = rule.mode === "include" ? "Include" : "Exclude";
-    modeToggle.setAttribute("aria-pressed", String(rule.mode === "exclude"));
-    modeToggle.setAttribute("aria-label", `Filter mode: ${rule.mode === "include" ? "Include" : "Exclude"}`);
-    debouncedRequery();
-  });
-  row.appendChild(modeToggle);
 
   const removeBtn = document.createElement("button");
   removeBtn.type = "button";
@@ -1914,6 +2278,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
       error.appendChild(document.createTextNode(message));
     }
     error.hidden = !inactive;
+    renderFiltersButton();
   }
   syncRuleError();
 
@@ -2048,7 +2413,7 @@ document.addEventListener("keydown", (ev) => {
 
   if (ev.key === "Escape") {
     contextMenu.hidden = true;
-    if (!columnsPopover.hidden || !filterPanel.hidden) closeAllPopovers(true);
+    if (activePopoverEl) closeAllPopovers(true);
     return;
   }
 

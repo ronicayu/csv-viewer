@@ -138,6 +138,14 @@ th:focus-visible,
   outline-offset: 1px;
 }
 
+/* ============================================================
+ * CHROME REDESIGN (toolbar, popovers, status/pager counts,
+ * progress bar, banners/hints). Kept in its own delimited
+ * section so it merges cleanly against the table-body owner's
+ * changes elsewhere in this file. See docs/reviews/ux-review.md
+ * §2/§4/§7 and docs/reviews/pm-review.md §4/§7.
+ * ============================================================ */
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -148,12 +156,29 @@ th:focus-visible,
 }
 
 #quick-search {
-  min-width: 220px;
+  flex: 1 1 200px;
+  min-width: 140px;
 }
 
-.sort-by-label,
+.toolbar-text-btn,
+.toolbar button.icon-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Uniform 24px-tall controls so the search box, text buttons and icon
+ * buttons all sit on one visual baseline instead of a ragged row (see
+ * docs/reviews/ux-review.md §5, "make every toolbar control 24px tall" —
+ * matches button.icon-btn's existing 24px). */
+.toolbar > input,
+.toolbar > .toolbar-text-btn {
+  height: 24px;
+  box-sizing: border-box;
+}
+
 .header-toggle-label,
-.separator-label {
+.separator-label,
+.quotes-toggle-label {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -162,6 +187,151 @@ th:focus-visible,
 
 #separator-custom {
   width: 60px;
+}
+
+.quotes-explain {
+  margin: 2px 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+#format-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 2px indeterminate progress bar directly under the toolbar — VS Code's
+ * own idiom for background work, replacing the old "Working…" text (see
+ * docs/reviews/ux-review.md §4). Static (no animation) under
+ * body.vscode-reduce-motion. */
+.working-indicator {
+  height: 2px;
+  background: transparent;
+  overflow: hidden;
+  position: relative;
+}
+
+.working-indicator::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -30%;
+  width: 30%;
+  background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+  animation: csvviewer-progress-slide 1.3s ease-in-out infinite;
+}
+
+@keyframes csvviewer-progress-slide {
+  0% {
+    left: -30%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+body.vscode-reduce-motion .working-indicator::before {
+  animation: none;
+  left: 0;
+  width: 100%;
+}
+
+/* Banners (quote warning, deleted-file, row-details hint) — same visual
+ * shape, two color treatments. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  font-size: 0.9em;
+}
+
+.banner-text {
+  flex: 1;
+}
+
+.banner-warning {
+  background: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWarning-background));
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-border));
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-editor-foreground));
+}
+
+.banner-warning .codicon-warning {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-inputValidation-warningBorder));
+}
+
+.banner-info {
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-foreground);
+}
+
+.banner-info .codicon-info {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The slim "Filtered: X of Y rows" row — only shown while search/filters
+ * are active (see renderFilteredRow in main.ts). */
+.filtered-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+/* Sort popover */
+.sort-keys-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.sort-key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sort-key-priority {
+  min-width: 1.4em;
+  text-align: right;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.sort-key-column {
+  flex: 1;
+}
+
+.sort-add-row {
+  margin-bottom: 8px;
+}
+
+.popover-legend {
+  margin: 0 0 6px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+/* Filters rule row, sentence order: [enabled] [Keep/Hide] rows where
+ * [column] [condition] [value] [Aa] [✕]. */
+.mode-select {
+  min-width: 56px;
+}
+
+.rule-row-text {
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+.rule-row input[type="text"] {
+  width: 140px;
 }
 
 .popover,
@@ -180,10 +350,13 @@ th:focus-visible,
 }
 
 /* The Filters panel holds sentence-shaped rule rows — capping its width
- * forces every rule to wrap to two lines. Let it size to its anchor. */
+ * too tightly forces every rule to wrap to two lines. Wide enough that
+ * the sentence layout (checkbox, Keep/Hide select, "rows where", column,
+ * condition, value, Aa, ✕) fits on one line down to a 700px editor
+ * width — see docs/reviews/ux-review.md §2/§4 and the owner's §5. */
 .panel {
   max-width: none;
-  width: min(640px, calc(100vw - 16px));
+  width: min(760px, calc(100vw - 16px));
 }
 
 .popover-actions {
@@ -281,57 +454,10 @@ th:focus-visible,
   color: var(--vscode-descriptionForeground);
 }
 
-.quotes-toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.quote-warning-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
-  background: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWarning-background));
-  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-border));
-  color: var(--vscode-inputValidation-warningForeground, var(--vscode-editor-foreground));
-  font-size: 0.9em;
-}
-
-.quote-warning-banner .codicon-warning {
-  color: var(--vscode-editorWarning-foreground, var(--vscode-inputValidation-warningBorder));
-}
-
-.quote-warning-banner span#quote-warning-text {
-  flex: 1;
-}
-
 .inline-checkbox-label {
   display: flex;
   align-items: center;
   gap: 2px;
-}
-
-.status-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-.status-bar {
-  flex: 1;
-  padding: 8px;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.9em;
-}
-
-.working-indicator {
-  padding: 8px;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.9em;
-  font-style: italic;
 }
 
 .table-scroll {
