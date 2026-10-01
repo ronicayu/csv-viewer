@@ -17,6 +17,7 @@
 import { describe, expect, it, test } from "vitest";
 import { parseCsv } from "../../core/csvParse";
 import { defaultVisibility, detailFieldsFor, reconcileVisibility, visibleColumns } from "../../core/columns";
+import { perfBoundMs } from "./perfEnv";
 
 describe("empty / degenerate input", () => {
   it("empty file", () => {
@@ -511,7 +512,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = lines.join("\n");
       const t0 = Date.now();
       const r = timed("500k rows x 10 cols", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(15000); // observed ~0.7s
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(15000, 60000)); // observed ~0.7s
       expect(r.rows.length).toBe(500000);
       expect(r.headers.length).toBe(10);
     },
@@ -529,7 +530,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = lines.join("\n");
       const t0 = Date.now();
       const r = timed("1k cols x 1k rows", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(10000); // observed ~40ms
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(10000, 40000)); // observed ~40ms
       expect(r.rows.length).toBe(1000);
       expect(r.headers.length).toBe(1000);
     },
@@ -543,7 +544,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = `a,b\n1,"${bigCell}"`;
       const t0 = Date.now();
       const r = timed("single 5MB cell", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(5000); // observed ~5ms
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(5000, 20000)); // observed ~5ms
       expect(r.rows[0][1].length).toBe(5 * 1024 * 1024);
     },
     15000,
@@ -559,7 +560,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = lines.join("\n");
       const t0 = Date.now();
       const r = timed("50k rows, all quoted w/ embedded newlines", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(10000); // observed ~50ms
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(10000, 40000)); // observed ~50ms
       expect(r.rows.length).toBe(50000);
       expect(r.rows[0]).toEqual(["line0\nmore0", "val0\nx", "z0"]);
     },

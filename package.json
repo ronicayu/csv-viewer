@@ -1,10 +1,17 @@
 {
   "name": "csv-viewer",
-  "displayName": "CSV Viewer",
-  "description": "Read-only table viewer for CSV/TSV files, with column visibility, filtering, sorting, and pagination.",
-  "version": "0.3.0",
+  "displayName": "CSV Viewer: Table + Row Details",
+  "description": "Read wide CSV/TSV files without scrolling sideways: keep key columns in the table, expand any row to read long text and JSON. Filter, sort, live reload.",
+  "version": "0.4.0",
   "publisher": "ronica",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "pricing": "Free",
+  "qna": false,
+  "galleryBanner": {
+    "color": "#1f1f1f",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/ronicayu/csv-viewer.git"
@@ -24,27 +31,40 @@
   },
   "categories": [
     "Visualization",
-    "Other"
+    "Data Science"
   ],
   "keywords": [
     "csv",
     "tsv",
+    "tab",
     "table",
     "viewer",
+    "preview",
+    "grid",
+    "columns",
+    "filter",
+    "sort",
+    "json",
+    "wide",
     "data"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "csvViewer.open",
+        "category": "CSV Viewer",
         "title": "Open in CSV Viewer",
         "icon": "$(table)"
       },
       {
         "command": "csvViewer.openAsText",
-        "title": "CSV Viewer: Open as Text"
+        "category": "CSV Viewer",
+        "title": "Open as Text",
+        "icon": "$(go-to-file)"
       }
     ],
     "customEditors": [
@@ -76,7 +96,12 @@
       "editor/title": [
         {
           "command": "csvViewer.open",
-          "when": "resourceExtname =~ /^\\.(csv|tsv|tab)$/i",
+          "when": "resourceExtname =~ /^\\.(csv|tsv|tab)$/i && activeCustomEditorId != csvViewer.table",
+          "group": "navigation"
+        },
+        {
+          "command": "csvViewer.openAsText",
+          "when": "activeCustomEditorId == csvViewer.table",
           "group": "navigation"
         }
       ],
@@ -87,7 +112,7 @@
         },
         {
           "command": "csvViewer.openAsText",
-          "when": "false"
+          "when": "activeCustomEditorId == csvViewer.table"
         }
       ]
     },
@@ -99,6 +124,11 @@
           "default": 8,
           "minimum": 0,
           "description": "Number of leading columns shown in the table by default when a file is first opened. Remaining columns start as detail-only."
+        },
+        "csvViewer.suggestOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a CSV, TSV, or TAB file is opened as plain text for the first time, ask whether to view it as a table instead. Turn this off to stop being asked."
         }
       }
     }

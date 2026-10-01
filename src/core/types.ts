@@ -107,12 +107,40 @@ export interface LoadMessage {
    * .tsv/.tab files, otherwise `""` (meaning fall through to real
    * auto-detection in parseCsv). */
   defaultDelimiter: string;
+  /**
+   * Ids of per-user hints the webview should treat as already-dismissed
+   * (e.g. a one-time "N more columns are in each row's details" callout),
+   * sourced from the host's globalState key `csvViewer.hintsSeen` — so a
+   * hint dismissed once never comes back, in any file, even after
+   * restarting the editor. The webview is the one deciding which hint ids
+   * exist and when to show them; the host only persists the set it's told
+   * about via HintSeenMessage.
+   */
+  hintsSeen: string[];
   /** TEST HOOK (see extension.ts / main.ts "BEGIN TEST HOOK" blocks): only
    * ever `true` when the extension host activated with
    * `CSV_VIEWER_TEST_HOOKS=1`. Tells the webview to also emit
    * `RenderedMessage`s so the integration suite can observe render
    * completion. Omitted (falsy) in every normal run. */
   testHooks?: boolean;
+}
+
+/**
+ * Posted when the watched file is deleted on disk (after the usual
+ * atomic-save grace period confirms it's actually gone, not just a
+ * delete+recreate). The webview ignores unknown message types today, so
+ * adding this is safe for a webview build that predates it. `name` is the
+ * file's basename, matching the host's toast wording.
+ */
+export interface FileDeletedMessage {
+  type: "fileDeleted";
+  name: string;
+}
+
+/** Posted when a file previously reported via FileDeletedMessage reappears
+ * on disk and has just been reloaded. */
+export interface FileRestoredMessage {
+  type: "fileRestored";
 }
 
 export interface ReadyMessage {
@@ -128,6 +156,15 @@ export interface OpenAsTextMessage {
   type: "openAsText";
 }
 
+/** Sent by the webview the first time a per-user hint (identified by a
+ * stable id the webview chooses) is seen/dismissed, so the host can
+ * remember it in globalState (`csvViewer.hintsSeen`) and include it in
+ * every future `load` message's `hintsSeen` list. */
+export interface HintSeenMessage {
+  type: "hintSeen";
+  id: string;
+}
+
 /** TEST HOOK: posted by the webview after each render, only when `load` was
  * flagged with `testHooks: true`. Never sent otherwise. */
 export interface RenderedMessage {
@@ -136,5 +173,5 @@ export interface RenderedMessage {
   headers: string[];
 }
 
-export type HostToWebviewMessage = LoadMessage;
-export type WebviewToHostMessage = ReadyMessage | SaveStateMessage | OpenAsTextMessage | RenderedMessage;
+export type HostToWebviewMessage = LoadMessage | FileDeletedMessage | FileRestoredMessage;
+export type WebviewToHostMessage = ReadyMessage | SaveStateMessage | OpenAsTextMessage | HintSeenMessage | RenderedMessage;

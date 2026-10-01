@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Flat tile background. Self-contained (no transparency expected
+       outside the rounded corners), so it reads the same on light and
+       dark Marketplace/Open VSX backgrounds. -->
+  <rect width="128" height="128" rx="28" fill="#2563EB" />
+
+  <!-- Table row 1: a plain ("collapsed") table row, 3 cells. -->
+  <rect x="18" y="18" width="26" height="16" rx="4" fill="#FFFFFF" />
+  <rect x="51" y="18" width="26" height="16" rx="4" fill="#FFFFFF" />
+  <rect x="84" y="18" width="26" height="16" rx="4" fill="#FFFFFF" />
+
+  <!-- Table row 2: the row that's expanded below, picked out in the
+       accent color so it visually connects to the detail block. -->
+  <rect x="18" y="40" width="26" height="16" rx="4" fill="#FBBF24" />
+  <rect x="51" y="40" width="26" height="16" rx="4" fill="#FBBF24" />
+  <rect x="84" y="40" width="26" height="16" rx="4" fill="#FBBF24" />
+
+  <!-- Detail panel: row 2 expanded into key/value lines. -->
+  <rect x="18" y="66" width="92" height="44" rx="8" fill="#FFFFFF" />
+  <rect x="28" y="76" width="50" height="5" rx="2.5" fill="#2563EB" />
+  <rect x="28" y="88" width="34" height="5" rx="2.5" fill="#2563EB" />
+  <rect x="28" y="100" width="58" height="5" rx="2.5" fill="#FBBF24" />
+</svg>
