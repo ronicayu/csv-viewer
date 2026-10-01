@@ -15,6 +15,25 @@ body {
   font-size: var(--vscode-font-size);
 }
 
+/* VS Code injects `body { padding: 0 20px }` on every webview (see
+ * pre/index.html's `@layer vscode-default`). That 40px gutter isn't
+ * ours to keep: reclaim it, and add back a smaller, deliberate 8px inner
+ * padding only on the toolbar/status/pager bars (see .toolbar,
+ * .status-row, .pager-bar below). The harness's base page mirrors the
+ * injected rule (see harness.ts) so tests see the same layout. */
+body {
+  padding: 0;
+}
+
+/* Native form controls (checkboxes, the search field's clear button)
+ * otherwise render in the light color scheme even in a dark theme,
+ * because neither VS Code nor this stylesheet sets `color-scheme` by
+ * default. */
+body.vscode-dark,
+body.vscode-high-contrast:not(.vscode-high-contrast-light) {
+  color-scheme: dark;
+}
+
 #app {
   display: flex;
   flex-direction: column;
@@ -23,8 +42,8 @@ body {
 }
 
 button {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+  background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
   border: 1px solid var(--vscode-button-border, transparent);
   border-radius: 2px;
   padding: 4px 10px;
@@ -34,7 +53,7 @@ button {
 }
 
 button:hover {
-  background: var(--vscode-button-hoverBackground);
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
 }
 
 button:disabled {
@@ -43,24 +62,78 @@ button:disabled {
 }
 
 button:disabled:hover {
+  background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+}
+
+/* The only button that should still look primary — a strong action the
+ * user is nudged toward taking right now. */
+button.primary {
+  color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
+}
+
+button.primary:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+/* Toolbar/pager/context-menu/popover actions: transparent icon buttons,
+ * sized and colored the way VS Code's own action bar icons are. */
+button.icon-btn {
+  background: transparent;
+  border-color: transparent;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  padding: 3px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+button.icon-btn:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+button.icon-btn:disabled {
+  opacity: 0.4;
+}
+
+/* "Show all (N characters)" reads as prose, not an action — a text link. */
+button.link-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-textLink-foreground);
+  padding: 0;
+  text-decoration: underline;
+}
+
+button.link-btn:hover {
+  background: transparent;
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
 }
 
 input,
 select {
   color: var(--vscode-input-foreground);
   background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border: 1px solid var(--vscode-input-border, var(--vscode-settings-textInputBorder, var(--vscode-dropdown-border)));
   border-radius: 2px;
   padding: 3px 6px;
   font-family: inherit;
   font-size: inherit;
 }
 
-input:focus,
-select:focus,
-button:focus,
-th:focus {
+input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+/* :focus-visible (not :focus) so a mouse click never leaves a lingering
+ * ring — only keyboard focus does. */
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+th:focus-visible,
+.twisty:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
 }
@@ -69,7 +142,7 @@ th:focus {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 8px;
   border-bottom: 1px solid var(--vscode-panel-border);
   flex-wrap: wrap;
 }
@@ -93,10 +166,8 @@ th:focus {
 
 .popover,
 .panel {
-  position: absolute;
+  position: fixed;
   z-index: 20;
-  top: 42px;
-  right: 8px;
   min-width: 260px;
   max-width: 420px;
   max-height: 60vh;
@@ -108,9 +179,11 @@ th:focus {
   border-radius: 3px;
 }
 
+/* The Filters panel holds sentence-shaped rule rows — capping its width
+ * forces every rule to wrap to two lines. Let it size to its anchor. */
 .panel {
-  left: 8px;
-  right: 8px;
+  max-width: none;
+  width: min(640px, calc(100vw - 16px));
 }
 
 .popover-actions {
@@ -137,6 +210,33 @@ th:focus {
   background: var(--vscode-list-hoverBackground);
 }
 
+/* VS Code's inputValidation pattern, shared by the separator error and
+ * the filter rule error (see .rule-row.rule-error above): normal-weight
+ * foreground text in a tinted box, with an icon that only needs 3:1 as a
+ * non-text element — not a thin under-contrast line of error-colored
+ * text. */
+.input-error-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  background: var(--vscode-inputValidation-errorBackground);
+  border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  color: var(--vscode-foreground);
+  font-size: 0.9em;
+}
+
+.input-error-box .codicon {
+  color: var(--vscode-errorForeground);
+}
+
+.filter-panel-hint {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  margin: 0 0 8px;
+}
+
 #filter-rules {
   display: flex;
   flex-direction: column;
@@ -153,8 +253,12 @@ th:focus {
   border-radius: 2px;
 }
 
+/* VS Code's inputValidation pattern: normal-weight foreground text inside
+ * a tinted box, plus an icon (which only needs 3:1 as a non-text
+ * element) — not a thin, under-contrast error-colored line. */
 .rule-row.rule-error {
-  outline: 1px solid var(--vscode-errorForeground);
+  background: var(--vscode-inputValidation-errorBackground);
+  outline: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
 }
 
 .rule-row.rule-hint {
@@ -162,8 +266,15 @@ th:focus {
 }
 
 .rule-error-text {
-  color: var(--vscode-errorForeground);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vscode-foreground);
   font-size: 0.9em;
+}
+
+.rule-row.rule-error .rule-error-text .codicon {
+  color: var(--vscode-errorForeground);
 }
 
 .rule-row.rule-hint .rule-error-text {
@@ -188,6 +299,10 @@ th:focus {
   font-size: 0.9em;
 }
 
+.quote-warning-banner .codicon-warning {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-inputValidation-warningBorder));
+}
+
 .quote-warning-banner span#quote-warning-text {
   flex: 1;
 }
@@ -207,13 +322,13 @@ th:focus {
 
 .status-bar {
   flex: 1;
-  padding: 4px 8px;
+  padding: 8px;
   color: var(--vscode-descriptionForeground);
   font-size: 0.9em;
 }
 
 .working-indicator {
-  padding: 4px 8px;
+  padding: 8px;
   color: var(--vscode-descriptionForeground);
   font-size: 0.9em;
   font-style: italic;
@@ -250,8 +365,15 @@ td {
   max-width: 320px;
 }
 
+/* border-collapse makes a <th>'s own border-bottom disappear once content
+ * scrolls under the sticky header — an inset box-shadow doesn't collapse,
+ * so the divider survives. */
+th {
+  box-shadow: inset 0 -1px 0 var(--vscode-panel-border);
+}
+
 th.sortable {
-  cursor: pointer;
+  cursor: default;
   user-select: none;
   white-space: nowrap;
 }
@@ -260,21 +382,75 @@ th.sortable:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
+/* Fills the whole <th> (table-layout: auto stretches columns to the
+ * table's 100% width, so the th is usually much wider than this button's
+ * own content) so a click anywhere in the header cell's padded area
+ * reaches the button, not just its text. */
+.col-header-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+  gap: 4px;
+}
+
+.col-header-btn:hover {
+  background: transparent;
+}
+
 .sort-indicator {
   margin-left: 4px;
   color: var(--vscode-descriptionForeground);
 }
 
+.sort-indicator .codicon {
+  font-size: 0.9em;
+}
+
+.sort-priority {
+  margin-left: 2px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 .chevron-col {
-  width: 20px;
-  min-width: 20px;
+  width: 24px;
+  min-width: 24px;
   text-align: center;
 }
 
-.chevron {
+.twisty {
+  background: transparent;
+  border: none;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
   cursor: pointer;
-  display: inline-block;
-  width: 1em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 2px;
+}
+
+.twisty:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 
 tr.data-row {
@@ -285,10 +461,53 @@ tr.data-row:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
+tr.data-row:hover {
+  outline: 1px dashed var(--vscode-contrastActiveBorder);
+  outline-offset: -1px;
+}
+
+td.clipped-cell {
+  cursor: default;
+}
+
 tr.detail-row td {
   white-space: normal;
-  background: var(--vscode-editor-background);
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   border-bottom: 2px solid var(--vscode-panel-border);
+  border-left: 2px solid var(--vscode-focusBorder);
+  /* Undo the generic `td` rule's `overflow: hidden; max-width: 320px` —
+   * besides being wrong for a colSpan cell holding prose, an `overflow:
+   * hidden` ancestor between .detail-wrap and #table-scroll breaks
+   * `position: sticky` (its containing block becomes this td's own,
+   * never-scrolling padding box instead of the real scroll container),
+   * which is exactly what pins .detail-wrap to the visible viewport. */
+  overflow: visible;
+  max-width: none;
+}
+
+/* Pinned to the visible scroll viewport (not the table's scroll width) so
+ * prose wraps inside what's actually on screen in a narrow pane, instead
+ * of running off to the right with the table. --detail-viewport-w is kept
+ * in sync with #table-scroll's clientWidth by a ResizeObserver. */
+.detail-wrap {
+  position: sticky;
+  left: 0;
+  width: var(--detail-viewport-w, 100%);
+  max-width: 100vw;
+  box-sizing: border-box;
+  padding: 4px 8px;
+}
+
+.detail-group-heading {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 10px 0 4px;
+}
+
+.detail-group-heading:first-child {
+  margin-top: 0;
 }
 
 .detail-fields {
@@ -309,6 +528,11 @@ tr.detail-row td {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+  max-width: 100%;
+}
+
+.detail-empty-value {
+  color: var(--vscode-descriptionForeground);
 }
 
 .show-all-btn {
@@ -320,8 +544,8 @@ tr.detail-row td {
 .pager-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
+  gap: 6px;
+  padding: 8px;
   border-top: 1px solid var(--vscode-panel-border);
   color: var(--vscode-descriptionForeground);
   flex-wrap: wrap;
@@ -350,7 +574,7 @@ tr.detail-row td {
 }
 
 .context-menu {
-  position: absolute;
+  position: fixed;
   z-index: 30;
   display: flex;
   flex-direction: column;
@@ -367,10 +591,35 @@ tr.detail-row td {
   text-align: left;
   padding: 4px 10px;
   color: var(--vscode-editor-foreground);
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .context-menu button:hover {
   background: var(--vscode-list-hoverBackground);
+}
+
+.context-menu hr {
+  border: none;
+  border-top: 1px solid var(--vscode-panel-border);
+  margin: 2px 0;
+  width: 100%;
+}
+
+/* Empty states rendered as a single full-width row inside the table body. */
+.empty-state-row td {
+  text-align: center;
+  padding: 24px 12px;
+  color: var(--vscode-descriptionForeground);
+  white-space: normal;
+}
+
+.empty-state-row .empty-state-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
 }
 
 [hidden] {

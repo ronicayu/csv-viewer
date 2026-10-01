@@ -29,6 +29,12 @@ test.describe("Hide all", () => {
     // Rows still render (as chevron-only rows) and are still clickable.
     await expect(page.locator("tr.data-row")).toHaveCount(smallFixture.rows.length);
 
+    // Close the popover before interacting with a row — a click while a
+    // popover is open closes the popover instead of also toggling the
+    // row underneath it (see docs/reviews/ux-review.md §3, "click-through").
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#columns-popover")).toBeHidden();
+
     const firstRow = page.locator("tr.data-row").first();
     await firstRow.click();
     const detail = page.locator("tr.detail-row").first();
@@ -40,9 +46,8 @@ test.describe("Hide all", () => {
       await expect(detail.locator("dt", { hasText: h })).toHaveCount(1);
     }
 
-    // Recovery: Show all brings the table back. The popover is already
-    // open from earlier in this test (clicking #columns-btn again would
-    // toggle it *closed*), so just use the still-open popover's button.
+    // Recovery: Show all brings the table back.
+    await page.locator("#columns-btn").click();
     await expect(page.locator("#columns-popover")).toBeVisible();
     await page.locator("#columns-show-all").click();
     await expect(page.locator("th.sortable")).toHaveCount(smallFixture.headers.length);

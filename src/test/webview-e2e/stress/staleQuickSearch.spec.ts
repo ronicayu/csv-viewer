@@ -59,7 +59,7 @@ test("a slow-to-answer quick search never overwrites a newer one's result, even 
   await loadWideFixtureInBrowser(page, defaultViewState());
 
   // Baseline: no search yet, every row matches.
-  await expect(page.locator("#status-bar")).toHaveText(`Showing ${ROWS} of ${ROWS} rows`);
+  await expect(page.locator("#status-bar")).toHaveText(`Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`);
 
   // Record every distinct value #status-bar's text ever takes on, from
   // just before the first search term is typed onward, so we can inspect
@@ -73,9 +73,9 @@ test("a slow-to-answer quick search never overwrites a newer one's result, even 
   });
 
   const searchA = "v0_1"; // unique to exactly one row (row 0's col_2) — a distinctly different count from B
-  const searchAText = `Showing 1 of ${ROWS} rows`;
+  const searchAText = `Showing 1 of ${ROWS.toLocaleString()} rows`;
   const searchB = ""; // cleared — matches every row again
-  const searchBText = `Showing ${ROWS} of ${ROWS} rows`;
+  const searchBText = `Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`;
 
   await page.locator("#quick-search").fill(searchA);
   // Long enough for A's debounce (150ms) to fire and its query to reach

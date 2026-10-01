@@ -60,11 +60,11 @@ test("once a sort is active, sort-dir-btn joins the tab order", async ({ page })
   expect(ids).toContain("sort-dir-btn");
 });
 
-test("table headers are keyboard-activatable via Enter/Space (role=button, tabindex=0)", async ({ page }) => {
-  const ageHeader = page.locator("th", { hasText: "age" });
-  await ageHeader.focus();
+test("table headers are keyboard-activatable via Enter/Space (a real <button> inside the <th>)", async ({ page }) => {
+  const ageHeaderBtn = page.locator("th", { hasText: "age" }).locator(".col-header-btn");
+  await ageHeaderBtn.focus();
   await page.keyboard.press("Enter");
-  await expect(ageHeader.locator(".sort-indicator")).toHaveText("▲");
+  await expect(page.locator("th", { hasText: "age" })).toHaveAttribute("aria-sort", "ascending");
 });
 
 test("FIXED: activating a header via keyboard keeps focus on it (or the new <th> that replaced it), so repeated Space/Enter keeps cycling the sort direction", async ({
@@ -75,21 +75,21 @@ test("FIXED: activating a header via keyboard keeps focus on it (or the new <th>
   // after an async worker round-trip too), which used to destroy the
   // focused element outright. It now remembers which column's header had
   // focus (matched by label text, not DOM position, since a render can
-  // also reorder/remove columns) and restores focus to the new <th> for
-  // that same column once the tree is rebuilt.
-  const ageHeader = page.locator("th", { hasText: "age" });
-  await ageHeader.focus();
+  // also reorder/remove columns) and restores focus to the new <th>'s
+  // button for that same column once the tree is rebuilt.
+  const ageHeaderBtn = () => page.locator("th", { hasText: "age" }).locator(".col-header-btn");
+  await ageHeaderBtn().focus();
   await page.keyboard.press("Enter"); // none -> asc
-  await expect(ageHeader.locator(".sort-indicator")).toHaveText("▲");
-  await expect(page.locator("th", { hasText: "age" })).toBeFocused();
+  await expect(page.locator("th", { hasText: "age" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(ageHeaderBtn()).toBeFocused();
 
   await page.keyboard.press(" "); // asc -> desc
-  await expect(page.locator("th", { hasText: "age" }).locator(".sort-indicator")).toHaveText("▼");
-  await expect(page.locator("th", { hasText: "age" })).toBeFocused();
+  await expect(page.locator("th", { hasText: "age" })).toHaveAttribute("aria-sort", "descending");
+  await expect(ageHeaderBtn()).toBeFocused();
 
   await page.keyboard.press("Enter"); // desc -> none
-  await expect(page.locator("th", { hasText: "age" }).locator(".sort-indicator")).toHaveCount(0);
-  await expect(page.locator("th", { hasText: "age" })).toBeFocused();
+  await expect(page.locator("th", { hasText: "age" })).toHaveAttribute("aria-sort", "none");
+  await expect(ageHeaderBtn()).toBeFocused();
 });
 
 test("Escape closes the columns popover", async ({ page }) => {

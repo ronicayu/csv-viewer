@@ -3,6 +3,7 @@
 // `acquireVsCodeApi` stubbed, push a `load` message the same way the
 // extension host would, and then drive the rendered UI.
 
+import * as fs from "fs";
 import * as path from "path";
 import Papa from "papaparse";
 import { expect, type Page } from "@playwright/test";
@@ -32,6 +33,24 @@ window.acquireVsCodeApi = function () {
  * `page.setContent` (no meaningful base URL to resolve a relative one
  * against). */
 const WORKER_SRC_URL = "https://csv-viewer.invalid/out/webview/worker.js";
+
+/** @vscode/codicons' CSS, with its relative `url("./codicon.ttf?…")`
+ * font reference inlined as a data: URI — the harness has no server to
+ * resolve that relative path against (page.setContent/addStyleTag inject
+ * raw content, not a `<link>` the browser could resolve relatively), and
+ * without the real font the icon glyphs (chevrons, arrows, close, error…)
+ * would render as empty boxes, which would make every spec that asserts
+ * on them (and the UX review screenshots) misleading. Computed once and
+ * cached — the font file never changes mid-run. */
+let codiconCssCache: string | null = null;
+function codiconCss(): string {
+  if (codiconCssCache !== null) return codiconCssCache;
+  const dist = path.join(REPO_ROOT, "node_modules", "@vscode", "codicons", "dist");
+  const css = fs.readFileSync(path.join(dist, "codicon.css"), "utf8");
+  const fontBase64 = fs.readFileSync(path.join(dist, "codicon.ttf")).toString("base64");
+  codiconCssCache = css.replace(/url\("\.\/codicon\.ttf\?[^"]*"\)/, `url("data:font/ttf;base64,${fontBase64}")`);
+  return codiconCssCache;
+}
 
 /** Every message the client has posted to the host, oldest first. */
 export async function posted(page: Page): Promise<Array<Record<string, unknown>>> {
@@ -75,6 +94,15 @@ export async function bootShell(page: Page): Promise<void> {
   await page.setContent(
     `<!doctype html><html><head><meta charset="utf-8"></head><body><div id="app" data-worker-src="${WORKER_SRC_URL}"></div></body></html>`,
   );
+  // Mirrors VS Code's own webview default stylesheet (pre/index.html's
+  // `@layer vscode-default`), which sets `body { padding: 0 20px }` on
+  // every webview — see docs/reviews/ux-review.md's "How this was
+  // rendered" note. Laid in an actual `@layer` (lower cascade priority
+  // than any unlayered rule) so main.css's own unlayered `body { padding:
+  // 0 }` still wins, exactly as it does against the real injected
+  // stylesheet in production.
+  await page.addStyleTag({ content: "@layer vscode-default { body { padding: 0 20px; } }" });
+  await page.addStyleTag({ content: codiconCss() });
   await page.addStyleTag({ path: outFile("webview", "main.css") });
   await page.addScriptTag({ content: VSCODE_API_STUB });
   await page.addScriptTag({ path: outFile("webview", "main.js") });

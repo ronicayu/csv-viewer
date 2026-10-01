@@ -102,7 +102,12 @@ test("right-clicking the evil cell opens the quick-add context menu without exec
   const td = page.locator("tr.data-row").first().locator("td").nth(2);
   await td.click({ button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
-  await expect(page.locator("#context-menu button")).toHaveText(["Filter: include this value", "Filter: exclude this value"]);
+  const escapedHeader = EVIL_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  await expect(page.locator("#context-menu button")).toHaveText([
+    "Copy value",
+    new RegExp(`^Show only rows where ${escapedHeader} = "`),
+    new RegExp(`^Hide rows where ${escapedHeader} = "`),
+  ]);
 
   const fired = await page.evaluate(() => (window as unknown as { __xssFired?: number }).__xssFired);
   expect(fired).toBeUndefined();
@@ -112,7 +117,7 @@ test("quick-adding a filter on the evil cell value still matches literally (equa
   await loadEvilFixture(page, 3);
   const td = page.locator("tr.data-row").first().locator("td").nth(2);
   await td.click({ button: "right" });
-  await page.locator("#context-menu button", { hasText: "include this value" }).click();
+  await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
 
   await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 2 rows");
   const rule = page.locator(".rule-row").first();

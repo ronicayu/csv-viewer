@@ -376,6 +376,12 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "out", "webview", "main.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "out", "webview", "main.css"));
+    // @vscode/codicons (copied into out/webview/ during compile — see
+    // package.json's copy:codicons script) gives the toolbar/pager/chevron/
+    // sort icons a native look instead of text glyphs that vary by platform
+    // font (see docs/reviews/ux-review.md §5 "Icons"). The CSP's existing
+    // `font-src`/`style-src ${webview.cspSource}` already cover it.
+    const codiconUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "out", "webview", "codicon.css"));
     // Parsing/filtering/sorting run in a Web Worker (out/webview/worker.js)
     // so a catastrophic regex or a large filter/sort never blocks the UI
     // thread — see docs/spec.md. A webview can't load a vscode-resource:
@@ -399,6 +405,7 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="${codiconUri}" />
 <link rel="stylesheet" href="${styleUri}" />
 <title>CSV Viewer</title>
 </head>

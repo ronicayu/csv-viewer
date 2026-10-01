@@ -24,6 +24,7 @@ test("rapid repeated clicks on the same header cycle asc/desc/none without desyn
   // click as fast as the element is attached, without waiting for renders.
   for (let i = 0; i < 9; i++) await header.click({ delay: 0 });
 
+  await expect(header).toHaveAttribute("aria-sort", "none");
   await expect(header.locator(".sort-indicator")).toHaveCount(0);
   await expect(page.locator("#sort-by-select")).toHaveValue("");
   expect(consoleErrors).toEqual([]);
@@ -46,8 +47,9 @@ test("shift-clicking 5 different headers builds a 5-key multi-sort with priority
   }
 
   for (let i = 0; i < columns.length; i++) {
-    const indicator = page.locator("th", { hasText: columns[i] }).locator(".sort-indicator");
-    await expect(indicator).toHaveText(`▲${i + 1}`);
+    const header = page.locator("th", { hasText: columns[i] });
+    await expect(header).toHaveAttribute("aria-sort", "ascending");
+    await expect(header.locator(".sort-priority")).toHaveText(String(i + 1));
   }
 });
 
@@ -65,18 +67,21 @@ test("the Sort by… dropdown replaces an existing header-driven multi-sort with
 
   await page.locator("th", { hasText: "col_1" }).click();
   await page.locator("th", { hasText: "col_2" }).click({ modifiers: ["Shift"] });
-  await expect(page.locator("th", { hasText: "col_1" }).locator(".sort-indicator")).toHaveText("▲1");
-  await expect(page.locator("th", { hasText: "col_2" }).locator(".sort-indicator")).toHaveText("▲2");
+  await expect(page.locator("th", { hasText: "col_1" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(page.locator("th", { hasText: "col_1" }).locator(".sort-priority")).toHaveText("1");
+  await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(page.locator("th", { hasText: "col_2" }).locator(".sort-priority")).toHaveText("2");
 
   await page.locator("#sort-by-select").selectOption("col_3");
   // Replaces the whole multi-sort with a single key on col_3 — the
   // priority indicators on col_1/col_2 disappear entirely.
-  await expect(page.locator("th", { hasText: "col_1" }).locator(".sort-indicator")).toHaveCount(0);
-  await expect(page.locator("th", { hasText: "col_2" }).locator(".sort-indicator")).toHaveCount(0);
-  await expect(page.locator("th", { hasText: "col_3" }).locator(".sort-indicator")).toHaveText("▲");
+  await expect(page.locator("th", { hasText: "col_1" })).toHaveAttribute("aria-sort", "none");
+  await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "none");
+  await expect(page.locator("th", { hasText: "col_3" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(page.locator("th", { hasText: "col_3" }).locator(".sort-priority")).toHaveCount(0);
 
   await page.locator("#sort-dir-btn").click();
-  await expect(page.locator("th", { hasText: "col_3" }).locator(".sort-indicator")).toHaveText("▼");
+  await expect(page.locator("th", { hasText: "col_3" })).toHaveAttribute("aria-sort", "descending");
   await expect(page.locator("#sort-by-select")).toHaveValue("col_3");
 });
 
@@ -94,7 +99,7 @@ test("a sort key pointing at a column removed by a separator change is inert (do
   });
 
   await page.locator("th", { hasText: "age" }).click();
-  await expect(page.locator("th", { hasText: "age" }).locator(".sort-indicator")).toHaveText("▲");
+  await expect(page.locator("th", { hasText: "age" })).toHaveAttribute("aria-sort", "ascending");
 
   // Force the separator to "|" — nothing in the text contains "|", so the
   // whole line becomes a single column, collapsing "id,age,city" into one

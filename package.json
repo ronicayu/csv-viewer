@@ -104,11 +104,12 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p . && npm run bundle:extension && npm run bundle:webview && npm run bundle:worker",
+    "compile": "tsc -p . && npm run bundle:extension && npm run bundle:webview && npm run bundle:worker && npm run copy:codicons",
     "watch": "tsc -w -p .",
     "bundle:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=out/extension.js --sourcemap",
     "bundle:webview": "esbuild src/webview/main.ts --bundle --platform=browser --format=iife --target=es2020 --outfile=out/webview/main.js --sourcemap && node -e \"require('fs').copyFileSync('src/webview/main.css','out/webview/main.css')\"",
     "bundle:worker": "esbuild src/webview/worker.ts --bundle --platform=browser --format=iife --target=es2020 --outfile=out/webview/worker.js --sourcemap",
+    "copy:codicons": "node -e \"require('fs').copyFileSync('node_modules/@vscode/codicons/dist/codicon.css','out/webview/codicon.css'); require('fs').copyFileSync('node_modules/@vscode/codicons/dist/codicon.ttf','out/webview/codicon.ttf')\"",
     "typecheck:webview": "tsc -p tsconfig.webview.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -124,6 +125,7 @@
     "@types/node": "^20.11.0",
     "@types/papaparse": "^5.5.2",
     "@types/vscode": "^1.80.0",
+    "@vscode/codicons": "^0.0.46-24",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.0",

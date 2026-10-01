@@ -101,7 +101,7 @@ test("200k rows x 30 columns: timing table for first render and each interaction
 
   await timeStep("sort by col_2 (header click, asc)", SORT_BOUND_MS, async () => {
     await page.locator("th", { hasText: "col_2" }).click();
-    await expect(page.locator("th", { hasText: "col_2" }).locator(".sort-indicator")).toHaveText("▲");
+    await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "ascending");
   });
 
   await timeStep("filter: add rule, col_3 contains 'v1'", FILTER_BOUND_MS, async () => {
@@ -111,7 +111,7 @@ test("200k rows x 30 columns: timing table for first render and each interaction
     await rule.locator("select").nth(0).selectOption("col_3");
     await rule.locator("select").nth(1).selectOption("contains");
     await rule.locator('input[type="text"]').fill("v1");
-    await expect(page.locator("#status-bar")).not.toHaveText(`Showing ${ROWS} of ${ROWS} rows`);
+    await expect(page.locator("#status-bar")).not.toHaveText(`Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`);
   });
 
   await timeStep("pagination: Next page", GENEROUS_BOUND_MS, async () => {

@@ -24,6 +24,13 @@ test("unchecking a column in the Columns popover moves it from the table to the 
 
   await expect(page.locator("#table-head th", { hasText: "age" })).toHaveCount(0);
 
+  // Close the popover first — a click on a row while a popover is open
+  // closes the popover instead of also toggling the row underneath it
+  // (see docs/reviews/ux-review.md §3, "click-through" behind an open
+  // popover).
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#columns-popover")).toBeHidden();
+
   // Expanding a row now shows "age" in its detail panel.
   await page.locator("tr.data-row").first().click();
   const detail = page.locator("tr.detail-row").first();

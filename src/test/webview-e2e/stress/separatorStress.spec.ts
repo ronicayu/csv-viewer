@@ -37,7 +37,7 @@ test("cycling through Auto/Comma/Semicolon/Tab/Pipe on a 20k-row comma file re-p
   // Back to Auto -> re-detects comma, 5 columns again.
   await page.locator("#separator-select").selectOption("");
   await expect(page.locator("th.sortable")).toHaveCount(5);
-  await expect(page.locator("#status-bar")).toHaveText("Showing 20000 of 20000 rows");
+  await expect(page.locator("#status-bar")).toHaveText("Showing 20,000 of 20,000 rows");
   expect(consoleErrors).toEqual([]);
 });
 
@@ -141,7 +141,7 @@ test("switching the separator so a filter rule's column disappears leaves that r
   // The filter panel shows a "column not found" hint on that rule.
   await page.locator("#filters-btn").click();
   await expect(page.locator(".rule-row.rule-error")).toHaveCount(1);
-  await expect(page.locator(".rule-row.rule-error .rule-error-text")).toContainText("Column not found");
+  await expect(page.locator(".rule-row.rule-error .rule-error-text")).toContainText("isn't in this file");
 });
 
 test("a reload landing while Custom… is being edited keeps the custom input open and its typed text", async ({ page }) => {

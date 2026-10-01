@@ -25,7 +25,7 @@ test("an expanded row stays expanded (and its chevron stays ▼) after sorting, 
   // more robust selector than matching rendered text.
   const targetRow = page.locator('tr.data-row[data-row-id="0"]');
   await targetRow.click();
-  await expect(targetRow.locator(".chevron")).toHaveText("▼");
+  await expect(targetRow.locator(".twisty")).toHaveAttribute("aria-expanded", "true");
   await expect(targetRow.locator("+ tr.detail-row")).toBeVisible();
 
   // Sort descending by col_1 (a header click cycles asc then desc) — the
@@ -36,7 +36,7 @@ test("an expanded row stays expanded (and its chevron stays ▼) after sorting, 
 
   const rowAfterSort = page.locator("tr.data-row").last();
   await expect(rowAfterSort).toHaveAttribute("data-row-id", "0"); // the id=0 row, now last
-  await expect(rowAfterSort.locator(".chevron")).toHaveText("▼");
+  await expect(rowAfterSort.locator(".twisty")).toHaveAttribute("aria-expanded", "true");
   await expect(rowAfterSort.locator("+ tr.detail-row")).toBeVisible();
 
   // Filter down to just that row, then back out to everything — still
@@ -44,7 +44,7 @@ test("an expanded row stays expanded (and its chevron stays ▼) after sorting, 
   await page.locator("#quick-search").fill("v0_3"); // col_4 value unique to row 0
   await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 250 rows");
   const onlyRow = page.locator("tr.data-row").first();
-  await expect(onlyRow.locator(".chevron")).toHaveText("▼");
+  await expect(onlyRow.locator(".twisty")).toHaveAttribute("aria-expanded", "true");
 
   await page.locator("#quick-search").fill("");
   await expect(page.locator("#status-bar")).toHaveText("Showing 250 of 250 rows");
@@ -108,7 +108,7 @@ test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a
   expect(initialLength).toBe(10_001); // 10,000 chars + the "…" marker
 
   const showAllBtn = dd.locator(".show-all-btn");
-  await expect(showAllBtn).toHaveText("Show all (100000 characters)");
+  await expect(showAllBtn).toHaveText("Show all (100,000 characters)");
 
   await showAllBtn.click();
   const fullLength = await dd.evaluate((el) => el.textContent?.length ?? 0);
@@ -163,7 +163,7 @@ test("a huge table cell renders truncated to 500 characters, but right-click qui
   expect(cellText.length).toBe(501);
 
   await cell.click({ button: "right" });
-  await page.locator("#context-menu button", { hasText: "include this value" }).click();
+  await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
   const rule = page.locator(".rule-row").first();
   await expect(rule.locator('input[type="text"]')).toHaveValue(bigValue); // full value, not the truncated display text
   await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 1 rows");

@@ -29,15 +29,21 @@ async function expectColumnValues(page: import("@playwright/test").Page, column:
 test("clicking a header cycles asc -> desc -> none", async ({ page }) => {
   const ageHeader = page.locator("th", { hasText: "age" });
 
+  // The ▲/▼ glyph is now a codicon (aria-hidden) inside the header
+  // button, and the <th> itself carries the authoritative aria-sort —
+  // see docs/reviews/ux-review.md §6 ("header semantics destroyed").
   await ageHeader.click();
-  await expect(ageHeader.locator(".sort-indicator")).toHaveText("▲");
+  await expect(ageHeader).toHaveAttribute("aria-sort", "ascending");
+  await expect(ageHeader.locator(".codicon-arrow-up")).toHaveCount(1);
   await expectColumnValues(page, "age", ["25", "28", "30", "35", "40"]);
 
   await ageHeader.click();
-  await expect(ageHeader.locator(".sort-indicator")).toHaveText("▼");
+  await expect(ageHeader).toHaveAttribute("aria-sort", "descending");
+  await expect(ageHeader.locator(".codicon-arrow-down")).toHaveCount(1);
   await expectColumnValues(page, "age", ["40", "35", "30", "28", "25"]);
 
   await ageHeader.click();
+  await expect(ageHeader).toHaveAttribute("aria-sort", "none");
   await expect(ageHeader.locator(".sort-indicator")).toHaveCount(0);
   await expectColumnValues(page, "id", ["1", "2", "3", "4", "5"]);
 });
@@ -49,8 +55,12 @@ test("shift+click adds a secondary sort key with a priority indicator", async ({
   await cityHeader.click(); // primary key
   await ageHeader.click({ modifiers: ["Shift"] }); // secondary key
 
-  await expect(cityHeader.locator(".sort-indicator")).toHaveText("▲1");
-  await expect(ageHeader.locator(".sort-indicator")).toHaveText("▲2");
+  await expect(cityHeader).toHaveAttribute("aria-sort", "ascending");
+  await expect(ageHeader).toHaveAttribute("aria-sort", "ascending");
+  await expect(cityHeader.locator(".sort-priority")).toHaveText("1");
+  await expect(ageHeader.locator(".sort-priority")).toHaveText("2");
+  await expect(cityHeader.locator(".visually-hidden")).toHaveText("sorted ascending, priority 1");
+  await expect(ageHeader.locator(".visually-hidden")).toHaveText("sorted ascending, priority 2");
 
   // city asc, age asc as tiebreak: LA(25,35) < NYC(30,40) < SF(28)
   await expectColumnValues(page, "name", ["Bob", "Charlie", "Alice", "Eve", "Dana"]);

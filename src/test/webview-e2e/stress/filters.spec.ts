@@ -150,7 +150,7 @@ test("right-click quick-add works on an empty cell value, a value containing quo
   // not a 1-row result.
   await page.locator('tr.data-row[data-row-id="0"]').locator("td").nth(2).click({ button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
-  await page.locator("#context-menu button", { hasText: "include this value" }).click();
+  await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
   await expect(page.locator(".rule-row")).toHaveCount(1);
   await expect(page.locator(".rule-row").last().locator('input[type="text"]')).toHaveValue("");
   await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 3 rows");
@@ -161,7 +161,7 @@ test("right-click quick-add works on an empty cell value, a value containing quo
 
   // Quoted value.
   await page.locator('tr.data-row[data-row-id="1"]').locator("td").nth(2).click({ button: "right" });
-  await page.locator("#context-menu button", { hasText: "include this value" }).click();
+  await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
   await expect(page.locator(".rule-row")).toHaveCount(1);
   await expect(page.locator(".rule-row").last().locator('input[type="text"]')).toHaveValue('He said "hi" to me');
   await page.locator(".rule-row").last().locator(".remove-rule-btn").click();
@@ -169,7 +169,7 @@ test("right-click quick-add works on an empty cell value, a value containing quo
 
   // Very long value.
   await page.locator('tr.data-row[data-row-id="2"]').locator("td").nth(2).click({ button: "right" });
-  await page.locator("#context-menu button", { hasText: "include this value" }).click();
+  await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
   await expect(page.locator(".rule-row")).toHaveCount(1);
   await expect(page.locator(".rule-row").last().locator('input[type="text"]')).toHaveValue(longValue);
 });

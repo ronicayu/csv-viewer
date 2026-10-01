@@ -17,6 +17,19 @@ export function isValidRule(rule: FilterRule): boolean {
   }
 }
 
+/** The JS engine's own message for why `value` doesn't parse as a regex,
+ * or null if it parses fine. Used only for the filter panel's "Skipped:
+ * invalid regex (<message>)" hint (see main.ts) — never affects filtering
+ * itself, which still goes through isValidRule/isRuleActive above. */
+export function regexErrorMessage(value: string): string | null {
+  try {
+    new RegExp(value);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 /**
  * Whether a rule can actually apply right now, independent of its
  * `enabled` checkbox: its regex (if any) parses, its column (if any) still

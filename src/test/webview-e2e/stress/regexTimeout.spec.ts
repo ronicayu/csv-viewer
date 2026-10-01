@@ -5,7 +5,7 @@
 // syntactically-valid regex rule; if it fires, the stuck worker is
 // terminated and replaced, the offending rule(s) are marked "too slow" and
 // excluded from the next query (ignored the same way an invalid regex is
-// ignored), and the filter panel shows "Regex too slow — rule disabled".
+// ignored), and the filter panel shows "Skipped: pattern took over 2 s. Edit it to retry.".
 // Because parsing/filtering/sorting live in a worker (not the main
 // thread), the page itself never freezes while this plays out — proven
 // here by clicking "Next page" *during* the stuck window and getting a
@@ -68,7 +68,7 @@ test("a catastrophic regex rule is marked 'too slow' within ~3s while the UI sta
 
   // Within ~3s the watchdog fires (2000ms timeout), terminates the stuck
   // worker, and the rule is marked disabled.
-  await expect(rule.locator(".rule-error-text")).toHaveText("Regex too slow — rule disabled", { timeout: 3_000 });
+  await expect(rule.locator(".rule-error-text")).toHaveText("Skipped: pattern took over 2 s. Edit it to retry.", { timeout: 3_000 });
   await expect(rule).toHaveClass(/rule-error/);
 
   // The disabled rule is ignored (like an invalid regex), so every row is
@@ -102,7 +102,7 @@ test("editing a timed-out rule's value clears the 'too slow' mark and re-queries
   const valueInput = rule.locator('input[type="text"]');
   await valueInput.fill("(a+)+$");
 
-  await expect(rule.locator(".rule-error-text")).toHaveText("Regex too slow — rule disabled", { timeout: 3_000 });
+  await expect(rule.locator(".rule-error-text")).toHaveText("Skipped: pattern took over 2 s. Edit it to retry.", { timeout: 3_000 });
 
   // Editing the value clears the mark immediately (before any requery
   // even answers) and the rule gets a fresh chance with a safe pattern.
@@ -177,7 +177,7 @@ test("a slow-but-finite legitimate regex, queued right behind another in-flight 
   // worker.ts) by the time the race below happens, matching the
   // documented scenario ("with a sort active").
   await page.locator("th", { hasText: "col_2" }).click();
-  await expect(page.locator("th", { hasText: "col_2" }).locator(".sort-indicator")).toHaveText("▲");
+  await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "ascending");
 
   // Set up the regex rule's column/operator now, with no value yet —
   // per the no-op query skip (see noopQuery.spec.ts), this sends no
@@ -225,7 +225,7 @@ test("a slow-but-finite legitimate regex, queued right behind another in-flight 
   // everything itself. Generous timeout — this is deliberately a
   // multi-hundred-ms operation on 150k rows, and this environment can be
   // under real concurrent load.
-  await expect(page.locator("#status-bar")).toHaveText(`Showing 0 of ${RACE_ROWS} rows`, { timeout: 10_000 });
+  await expect(page.locator("#status-bar")).toHaveText(`Showing 0 of ${RACE_ROWS.toLocaleString()} rows`, { timeout: 10_000 });
 
   // The direct check, and the whole point of this test: despite being
   // queued behind another still-running query, the regex rule is never

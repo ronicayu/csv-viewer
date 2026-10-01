@@ -17,9 +17,9 @@
 //     page's rows (with FULL, untruncated cell values — truncation is a
 //     render-time-only concern, see src/core/truncate.ts).
 
-import { isRuleActive, isValidRule } from "../core/filter";
+import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
-import { detailFieldsFor, getVisibility, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
+import { detailOnlyColumns, getVisibility, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
 import type {
@@ -113,8 +113,8 @@ const app = document.getElementById("app")!;
 app.innerHTML = `
   <div class="toolbar">
     <input id="quick-search" type="search" placeholder="Search all columns…" aria-label="Search all columns" />
-    <button id="columns-btn" type="button">Columns</button>
-    <button id="filters-btn" type="button">Filters</button>
+    <button id="columns-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="columns-popover">Columns</button>
+    <button id="filters-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="filter-panel">Filters</button>
     <button id="expand-all-btn" type="button">Expand page</button>
     <button id="collapse-all-btn" type="button">Collapse page</button>
     <label class="sort-by-label">Sort by…
@@ -136,7 +136,7 @@ app.innerHTML = `
     </label>
     <button id="open-as-text-btn" type="button">Open as Text</button>
   </div>
-  <div id="columns-popover" class="popover" hidden>
+  <div id="columns-popover" class="popover" role="dialog" aria-label="Columns" hidden>
     <input id="columns-search" type="search" placeholder="Filter columns…" aria-label="Filter columns" />
     <div class="popover-actions">
       <button id="columns-show-all" type="button">Show all</button>
@@ -144,18 +144,21 @@ app.innerHTML = `
     </div>
     <div id="columns-list" class="columns-list"></div>
   </div>
-  <div id="filter-panel" class="panel" hidden>
+  <div id="filter-panel" class="panel" role="dialog" aria-label="Filters" hidden>
+    <p class="filter-panel-hint">Rows must match all rules.</p>
     <div id="filter-rules"></div>
-    <button id="add-rule-btn" type="button">+ Add rule</button>
+    <p id="filter-panel-tip" class="filter-panel-hint" hidden>Tip: right-click any cell to filter by its value.</p>
+    <button id="add-rule-btn" type="button">Add rule</button>
   </div>
   <div class="status-row">
-    <div id="status-bar" class="status-bar"></div>
+    <div id="status-bar" class="status-bar" role="status"></div>
     <span id="working-indicator" class="working-indicator" hidden>Working…</span>
   </div>
-  <div id="quote-warning-banner" class="quote-warning-banner" hidden>
+  <div id="quote-warning-banner" class="quote-warning-banner" role="alert" hidden>
+    <span class="codicon codicon-warning" aria-hidden="true"></span>
     <span id="quote-warning-text"></span>
-    <button id="quote-warning-fix-btn" type="button">Treat quotes as plain text</button>
-    <button id="quote-warning-dismiss-btn" type="button" aria-label="Dismiss">✕</button>
+    <button id="quote-warning-fix-btn" type="button" class="primary">Treat quotes as plain text</button>
+    <button id="quote-warning-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
   </div>
   <div id="table-scroll" class="table-scroll">
     <table id="table">
@@ -164,20 +167,20 @@ app.innerHTML = `
     </table>
   </div>
   <div id="pager-bar" class="pager-bar">
-    <button id="pager-first-btn" type="button" title="First page">«</button>
-    <button id="pager-prev-btn" type="button" title="Previous page (Alt+←)">‹</button>
+    <button id="pager-first-btn" type="button" class="icon-btn" title="First page" aria-label="First page"><span class="codicon codicon-chevron-left" aria-hidden="true"></span></button>
+    <button id="pager-prev-btn" type="button" class="icon-btn" title="Previous page (Alt+←)" aria-label="Previous page"><span class="codicon codicon-chevron-left" aria-hidden="true"></span></button>
     <span class="pager-page-label">Page
       <input id="pager-page-input" type="number" min="1" step="1" aria-label="Page number" />
       of <span id="pager-page-count">1</span>
     </span>
-    <button id="pager-next-btn" type="button" title="Next page (Alt+→)">›</button>
-    <button id="pager-last-btn" type="button" title="Last page">»</button>
+    <button id="pager-next-btn" type="button" class="icon-btn" title="Next page (Alt+→)" aria-label="Next page"><span class="codicon codicon-chevron-right" aria-hidden="true"></span></button>
+    <button id="pager-last-btn" type="button" class="icon-btn" title="Last page" aria-label="Last page"><span class="codicon codicon-chevron-right" aria-hidden="true"></span></button>
     <span id="pager-row-range" class="pager-row-range"></span>
     <label class="pager-size-label">Rows per page
       <select id="pager-page-size-select" aria-label="Rows per page"></select>
     </label>
   </div>
-  <div id="context-menu" class="context-menu" hidden></div>
+  <div id="context-menu" class="context-menu" role="menu" hidden></div>
 `;
 
 const quickSearchInput = document.getElementById("quick-search") as HTMLInputElement;
@@ -204,6 +207,7 @@ const columnsHideAll = document.getElementById("columns-hide-all") as HTMLButton
 const columnsList = document.getElementById("columns-list") as HTMLDivElement;
 const filterPanel = document.getElementById("filter-panel") as HTMLDivElement;
 const filterRulesEl = document.getElementById("filter-rules") as HTMLDivElement;
+const filterPanelTip = document.getElementById("filter-panel-tip") as HTMLParagraphElement;
 const addRuleBtn = document.getElementById("add-rule-btn") as HTMLButtonElement;
 const statusBar = document.getElementById("status-bar") as HTMLDivElement;
 const workingIndicator = document.getElementById("working-indicator") as HTMLSpanElement;
@@ -226,6 +230,28 @@ for (const size of PAGE_SIZES) {
   option.textContent = String(size);
   pagerPageSizeSelect.appendChild(option);
 }
+
+// ---- Detail panel width (pinned to the visible scroll viewport) -----------
+//
+// A wide table scrolls horizontally inside #table-scroll; an expanded
+// row's detail block is `position: sticky; left: 0` (see .detail-wrap in
+// main.css) so it doesn't scroll sideways with it, but it still needs an
+// explicit width to wrap prose *inside* what's actually visible rather
+// than the table's full (scrolled) width. Kept in sync with
+// #table-scroll's clientWidth via ResizeObserver — covers both window
+// resizes and VS Code split-editor resizing, neither of which fires a
+// plain `resize` event on `window`.
+function updateDetailViewportWidth(): void {
+  tableScroll.style.setProperty("--detail-viewport-w", `${tableScroll.clientWidth}px`);
+}
+
+if (typeof ResizeObserver !== "undefined") {
+  const detailWidthObserver = new ResizeObserver(() => updateDetailViewportWidth());
+  detailWidthObserver.observe(tableScroll);
+} else {
+  window.addEventListener("resize", updateDetailViewportWidth);
+}
+updateDetailViewportWidth();
 
 // ---- Worker lifecycle ---------------------------------------------------
 //
@@ -720,7 +746,7 @@ function renderTableHead(): void {
   if (!state) return;
   const columns = visibleColumns(state.headers, state.view.columnVisibility);
 
-  // Restore focus to the header cell of the same column after this
+  // Restore focus to the header button of the same column after this
   // function rebuilds the whole <tr> — otherwise a keyboard-only user
   // cycling a column's sort direction with repeated Space/Enter loses
   // focus after the very first press (see keyboard.spec.ts). Matched by
@@ -728,7 +754,7 @@ function renderTableHead(): void {
   // can reorder/remove columns between renders.
   let previousFocusColumn: string | null = null;
   if (document.activeElement instanceof HTMLElement && tableHead.contains(document.activeElement)) {
-    previousFocusColumn = document.activeElement.firstElementChild?.textContent ?? null;
+    previousFocusColumn = document.activeElement.closest("th")?.dataset.column ?? null;
   }
 
   const tr = document.createElement("tr");
@@ -740,30 +766,53 @@ function renderTableHead(): void {
   for (const column of columns) {
     const th = document.createElement("th");
     th.className = "sortable";
-    th.tabIndex = 0;
-    th.setAttribute("role", "button");
+    th.dataset.column = column;
+
+    const keyIndex = state.view.sortKeys.findIndex((k) => k.column === column);
+    const key = keyIndex !== -1 ? state.view.sortKeys[keyIndex] : undefined;
+    th.setAttribute("aria-sort", key ? (key.direction === "asc" ? "ascending" : "descending") : "none");
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "col-header-btn";
+    btn.title = "Sort. Shift+click to add a secondary sort";
 
     const label = document.createElement("span");
     label.textContent = column;
-    th.appendChild(label);
+    btn.appendChild(label);
 
-    const keyIndex = state.view.sortKeys.findIndex((k) => k.column === column);
-    if (keyIndex !== -1) {
-      const key = state.view.sortKeys[keyIndex];
+    if (key) {
       const indicator = document.createElement("span");
       indicator.className = "sort-indicator";
-      indicator.textContent = key.direction === "asc" ? "▲" : "▼";
-      if (state.view.sortKeys.length > 1) indicator.textContent += String(keyIndex + 1);
-      th.appendChild(indicator);
+      const icon = document.createElement("span");
+      icon.className = `codicon ${key.direction === "asc" ? "codicon-arrow-up" : "codicon-arrow-down"}`;
+      icon.setAttribute("aria-hidden", "true");
+      indicator.appendChild(icon);
+      if (state.view.sortKeys.length > 1) {
+        const priority = document.createElement("span");
+        priority.className = "sort-priority";
+        priority.setAttribute("aria-hidden", "true");
+        priority.textContent = String(keyIndex + 1);
+        indicator.appendChild(priority);
+      }
+      const srText = document.createElement("span");
+      srText.className = "visually-hidden";
+      srText.textContent =
+        state.view.sortKeys.length > 1
+          ? `sorted ${key.direction === "asc" ? "ascending" : "descending"}, priority ${keyIndex + 1}`
+          : `sorted ${key.direction === "asc" ? "ascending" : "descending"}`;
+      indicator.appendChild(srText);
+      btn.appendChild(indicator);
     }
 
-    th.addEventListener("click", (ev) => onHeaderClick(column, ev.shiftKey));
-    th.addEventListener("keydown", (ev) => {
+    btn.addEventListener("click", (ev) => onHeaderClick(column, ev.shiftKey));
+    btn.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
         onHeaderClick(column, ev.shiftKey);
       }
     });
+    th.appendChild(btn);
     tr.appendChild(th);
   }
 
@@ -771,12 +820,8 @@ function renderTableHead(): void {
   tableHead.appendChild(tr);
 
   if (previousFocusColumn !== null) {
-    for (const th of Array.from(tr.querySelectorAll<HTMLTableCellElement>("th.sortable"))) {
-      if (th.firstElementChild?.textContent === previousFocusColumn) {
-        th.focus();
-        break;
-      }
-    }
+    const th = tr.querySelector<HTMLTableCellElement>(`th.sortable[data-column="${CSS.escape(previousFocusColumn)}"]`);
+    th?.querySelector<HTMLButtonElement>(".col-header-btn")?.focus();
   }
 }
 
@@ -789,18 +834,117 @@ function onHeaderClick(column: string, shiftKey: boolean): void {
 
 // ---- Table body (one page at a time) --------------------------------------
 
+/** Tracks the pointer position at `mousedown` on a data row, so the click
+ * handler can tell a plain click from the tail end of a text-selection
+ * drag (see onRowClick). Reset on every mousedown. */
+let rowMouseDownPos: { x: number; y: number } | null = null;
+
+function onRowMouseDown(ev: MouseEvent): void {
+  rowMouseDownPos = { x: ev.clientX, y: ev.clientY };
+}
+
+/** A row click must not toggle the row when the user was actually
+ * selecting text: ignore the click if a selection exists anywhere (e.g.
+ * finishing a drag-select, or the word a double-click just selected), or
+ * if the pointer moved more than 4px between mousedown and click (a drag,
+ * even one that ends without a surviving selection). */
+function onRowClick(ev: MouseEvent, rowId: number): void {
+  const selection = window.getSelection();
+  if (selection && selection.toString() !== "") return;
+  if (rowMouseDownPos) {
+    const dx = ev.clientX - rowMouseDownPos.x;
+    const dy = ev.clientY - rowMouseDownPos.y;
+    if (Math.hypot(dx, dy) > 4) return;
+  }
+  toggleExpanded(rowId);
+}
+
 function renderTableBody(): void {
   if (!state) return;
   tableBody.innerHTML = "";
   const columns = visibleColumns(state.headers, state.view.columnVisibility);
   const fragment = document.createDocumentFragment();
 
-  for (const row of state.currentPageRows) {
-    fragment.appendChild(buildRowTr(row, columns));
-    fragment.appendChild(buildDetailTr(row, columns.length + 1));
+  if (state.totalRows === 0) {
+    fragment.appendChild(buildEmptyStateRow(columns.length + 1, "zero-file"));
+  } else if (state.filteredCount === 0) {
+    fragment.appendChild(buildEmptyStateRow(columns.length + 1, "zero-matches"));
+  } else {
+    // All columns hidden: the data rows (and their arrows) still render —
+    // expanding a row is still how you read it — but a banner above them
+    // explains where the columns went and offers the fix, instead of
+    // leaving a table of anonymous arrows with no context.
+    if (columns.length === 0) fragment.appendChild(buildEmptyStateRow(1, "all-hidden"));
+    for (const row of state.currentPageRows) {
+      fragment.appendChild(buildRowTr(row, columns));
+      fragment.appendChild(buildDetailTr(row, columns.length + 1));
+    }
   }
 
   tableBody.appendChild(fragment);
+  updateDetailViewportWidth();
+  populateExpandedDetails(columns);
+}
+
+function buildEmptyStateRow(colSpan: number, kind: "zero-file" | "zero-matches" | "all-hidden"): HTMLTableRowElement {
+  const tr = document.createElement("tr");
+  tr.className = "empty-state-row";
+  const td = document.createElement("td");
+  td.colSpan = colSpan;
+
+  if (kind === "zero-file") {
+    td.textContent = "This file has no data rows.";
+  } else if (kind === "zero-matches") {
+    const p = document.createElement("p");
+    p.textContent = "No rows match.";
+    td.appendChild(p);
+
+    const actions = document.createElement("div");
+    actions.className = "empty-state-actions";
+    if (state!.view.quickSearch !== "") {
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.textContent = "Clear search";
+      clearBtn.addEventListener("click", () => {
+        if (!state) return;
+        quickSearchInput.value = "";
+        state.view.quickSearch = "";
+        requery();
+        saveState();
+      });
+      actions.appendChild(clearBtn);
+    }
+    if (state!.view.filterRules.some((r) => r.enabled)) {
+      const turnOffBtn = document.createElement("button");
+      turnOffBtn.type = "button";
+      turnOffBtn.textContent = "Turn off filters";
+      turnOffBtn.addEventListener("click", () => {
+        if (!state) return;
+        for (const r of state.view.filterRules) r.enabled = false;
+        renderFilterPanel();
+        requery();
+        saveState();
+      });
+      actions.appendChild(turnOffBtn);
+    }
+    if (actions.childElementCount > 0) td.appendChild(actions);
+  } else {
+    const p = document.createElement("p");
+    p.textContent = "All columns are in the row details. Click a row's arrow to open it, or choose table columns.";
+    td.appendChild(p);
+
+    const actions = document.createElement("div");
+    actions.className = "empty-state-actions";
+    const chooseBtn = document.createElement("button");
+    chooseBtn.type = "button";
+    chooseBtn.textContent = "Choose columns";
+    chooseBtn.addEventListener("click", () => openColumnsPopover(chooseBtn));
+    actions.appendChild(chooseBtn);
+    td.appendChild(actions);
+  }
+
+  tr.appendChild(td);
+  return tr;
 }
 
 function buildRowTr(row: WorkerRow, columns: string[]): HTMLTableRowElement {
@@ -810,10 +954,22 @@ function buildRowTr(row: WorkerRow, columns: string[]): HTMLTableRowElement {
 
   const chevronTd = document.createElement("td");
   chevronTd.className = "chevron-col";
-  const chevron = document.createElement("span");
-  chevron.className = "chevron";
-  chevron.textContent = state!.expanded.has(row.id) ? "▼" : "▶";
-  chevronTd.appendChild(chevron);
+  const expanded = state!.expanded.has(row.id);
+  const twisty = document.createElement("button");
+  twisty.type = "button";
+  twisty.className = "twisty";
+  const chevronIcon = document.createElement("span");
+  chevronIcon.className = `codicon ${expanded ? "codicon-chevron-down" : "codicon-chevron-right"}`;
+  chevronIcon.setAttribute("aria-hidden", "true");
+  twisty.appendChild(chevronIcon);
+  twisty.setAttribute("aria-expanded", String(expanded));
+  twisty.setAttribute("aria-controls", `detail-row-${row.id}`);
+  twisty.setAttribute("aria-label", `${expanded ? "Hide" : "Show"} details for row ${row.id + 1}`);
+  twisty.addEventListener("click", (ev) => {
+    ev.stopPropagation(); // don't also fire the <tr> click handler below
+    toggleExpanded(row.id);
+  });
+  chevronTd.appendChild(twisty);
   tr.appendChild(chevronTd);
 
   const indexByHeader = new Map(state!.headers.map((h, i) => [h, i]));
@@ -825,26 +981,118 @@ function buildRowTr(row: WorkerRow, columns: string[]): HTMLTableRowElement {
     // unresponsive-webview watchdog. Quick-add (below) always uses the
     // FULL value; only the rendered text is truncated.
     td.textContent = truncateForTable(value).text;
+    // A tooltip is only useful (and worth the DOM write) on a cell that's
+    // actually clipped — set it lazily on first hover rather than
+    // measuring every cell's scrollWidth on every render.
+    td.addEventListener("mouseenter", () => {
+      if (td.title) return;
+      if (td.scrollWidth > td.clientWidth) {
+        td.title = value.slice(0, 500);
+        td.classList.add("clipped-cell");
+      }
+    });
     td.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, column, value));
     tr.appendChild(td);
   }
 
-  tr.addEventListener("click", () => toggleExpanded(row.id));
+  tr.addEventListener("mousedown", onRowMouseDown);
+  tr.addEventListener("click", (ev) => onRowClick(ev, row.id));
   return tr;
 }
 
+/** Builds the (initially empty) detail <tr> — its content is filled in by
+ * populateDetailContent, which needs the corresponding data row's cells
+ * already laid out in the live document to measure clipping (see
+ * clippedVisibleColumnsForRow), so it can't run until after this row is
+ * actually attached. */
 function buildDetailTr(row: WorkerRow, colSpan: number): HTMLTableRowElement {
   const tr = document.createElement("tr");
   tr.className = "detail-row";
+  tr.id = `detail-row-${row.id}`;
   tr.hidden = !state!.expanded.has(row.id);
 
   const td = document.createElement("td");
   td.colSpan = colSpan;
+  const wrap = document.createElement("div");
+  wrap.className = "detail-wrap";
+  td.appendChild(wrap);
+  tr.appendChild(td);
+  return tr;
+}
 
+/** Which of `columns` (table-visible columns, in display order) are
+ * visually clipped (ellipsis) in `rowTr`'s already-laid-out cells. Must
+ * only be called after `rowTr` is attached to the live document — a
+ * detached/fragment element always reports scrollWidth === clientWidth. */
+function clippedVisibleColumnsForRow(rowTr: HTMLTableRowElement, columns: string[]): Set<string> {
+  const cells = Array.from(rowTr.children).slice(1) as HTMLTableCellElement[]; // skip the chevron <td>
+  const result = new Set<string>();
+  cells.forEach((td, i) => {
+    const column = columns[i];
+    if (column !== undefined && td.scrollWidth > td.clientWidth) result.add(column);
+  });
+  return result;
+}
+
+/** Fills in the detail content for every currently-expanded row on this
+ * page after a full render, batching every layout read (scrollWidth/
+ * clientWidth, via clippedVisibleColumnsForRow) before any write
+ * (populateDetailContent's DOM mutation) — reading and writing
+ * interleaved row by row would force a synchronous layout recalculation
+ * per row, which matters once "Expand page" has 100+ rows expanded at
+ * once. */
+function populateExpandedDetails(columns: string[]): void {
+  if (!state) return;
+  const toPopulate: { row: WorkerRow; rowTr: HTMLTableRowElement; detailTr: HTMLTableRowElement }[] = [];
+  for (const row of state.currentPageRows) {
+    if (!state.expanded.has(row.id)) continue;
+    const rowTr = tableBody.querySelector<HTMLTableRowElement>(`tr.data-row[data-row-id="${row.id}"]`);
+    const detailTr = document.getElementById(`detail-row-${row.id}`) as HTMLTableRowElement | null;
+    if (rowTr && detailTr) toPopulate.push({ row, rowTr, detailTr });
+  }
+  const clippedSets = toPopulate.map(({ rowTr }) => clippedVisibleColumnsForRow(rowTr, columns)); // reads
+  toPopulate.forEach(({ row, detailTr }, i) => populateDetailContent(row, detailTr, columns, clippedSets[i])); // writes
+}
+
+/**
+ * Row details list detail-only (hidden) columns first, then a second
+ * "Also in table" group for every table-visible column whose cell is
+ * clipped or contains a line break — the only way to read a long value
+ * that happens to live in a visible column (see docs/reviews/ux-review.md
+ * P0-1). If nothing is hidden and nothing is clipped, falls back to
+ * today's behavior: show every column.
+ */
+function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, columns: string[], clippedColumns: Set<string>): void {
+  if (!state) return;
+  const wrap = detailTr.querySelector<HTMLDivElement>(".detail-wrap");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+
+  const indexByHeader = new Map(state.headers.map((h, i) => [h, i]));
+  const detailOnly = detailOnlyColumns(state.headers, state.view.columnVisibility);
+  const alsoInTable = columns.filter((c) => {
+    if (clippedColumns.has(c)) return true;
+    const value = row.cells[indexByHeader.get(c)!] ?? "";
+    return value.includes("\n");
+  });
+
+  if (detailOnly.length === 0 && alsoInTable.length === 0) {
+    wrap.appendChild(buildDetailFieldList(row, state.headers, indexByHeader));
+    return;
+  }
+  if (detailOnly.length > 0) wrap.appendChild(buildDetailFieldList(row, detailOnly, indexByHeader));
+  if (alsoInTable.length > 0) {
+    const heading = document.createElement("p");
+    heading.className = "detail-group-heading";
+    heading.textContent = "Also in table";
+    wrap.appendChild(heading);
+    wrap.appendChild(buildDetailFieldList(row, alsoInTable, indexByHeader));
+  }
+}
+
+function buildDetailFieldList(row: WorkerRow, fields: string[], indexByHeader: Map<string, number>): HTMLDListElement {
   const dl = document.createElement("dl");
   dl.className = "detail-fields";
-  const fields = detailFieldsFor(state!.headers, state!.view.columnVisibility);
-  const indexByHeader = new Map(state!.headers.map((h, i) => [h, i]));
 
   for (const field of fields) {
     const dt = document.createElement("dt");
@@ -857,8 +1105,8 @@ function buildDetailTr(row: WorkerRow, colSpan: number): HTMLTableRowElement {
     if (truncated) {
       const showAllBtn = document.createElement("button");
       showAllBtn.type = "button";
-      showAllBtn.className = "show-all-btn";
-      showAllBtn.textContent = `Show all (${fullLength} characters)`;
+      showAllBtn.className = "show-all-btn link-btn";
+      showAllBtn.textContent = `Show all (${fullLength.toLocaleString()} characters)`;
       if (fullLength > DETAIL_WARN_CHARS) {
         showAllBtn.title = "This value is very large — showing it in full may be slow.";
       }
@@ -873,30 +1121,39 @@ function buildDetailTr(row: WorkerRow, colSpan: number): HTMLTableRowElement {
     dl.appendChild(dd);
   }
 
-  td.appendChild(dl);
-  tr.appendChild(td);
-  return tr;
+  return dl;
 }
 
 function toggleExpanded(rowId: number): void {
   if (!state) return;
-  if (state.expanded.has(rowId)) state.expanded.delete(rowId);
-  else state.expanded.add(rowId);
+  const opening = !state.expanded.has(rowId);
+  if (opening) state.expanded.add(rowId);
+  else state.expanded.delete(rowId);
 
   const rowTr = tableBody.querySelector<HTMLTableRowElement>(`tr.data-row[data-row-id="${rowId}"]`);
-  const detailTr = rowTr?.nextElementSibling as HTMLTableRowElement | null;
-  if (rowTr) {
-    const chevron = rowTr.querySelector(".chevron");
-    if (chevron) chevron.textContent = state.expanded.has(rowId) ? "▼" : "▶";
+  const detailTr = document.getElementById(`detail-row-${rowId}`) as HTMLTableRowElement | null;
+  const twisty = rowTr?.querySelector<HTMLButtonElement>(".twisty");
+  if (twisty) {
+    const icon = twisty.querySelector(".codicon");
+    if (icon) icon.className = `codicon ${opening ? "codicon-chevron-down" : "codicon-chevron-right"}`;
+    twisty.setAttribute("aria-expanded", String(opening));
+    twisty.setAttribute("aria-label", `${opening ? "Hide" : "Show"} details for row ${rowId + 1}`);
   }
-  if (detailTr) detailTr.hidden = !state.expanded.has(rowId);
+  if (detailTr) {
+    if (opening && rowTr) {
+      const columns = visibleColumns(state.headers, state.view.columnVisibility);
+      const row = state.currentPageRows.find((r) => r.id === rowId);
+      if (row) populateDetailContent(row, detailTr, columns, clippedVisibleColumnsForRow(rowTr, columns));
+    }
+    detailTr.hidden = !opening;
+  }
 }
 
 // ---- Status bar ----------------------------------------------------------
 
 function renderStatusBar(): void {
   if (!state) return;
-  statusBar.textContent = `Showing ${state.filteredCount} of ${state.totalRows} rows`;
+  statusBar.textContent = `Showing ${state.filteredCount.toLocaleString()} of ${state.totalRows.toLocaleString()} rows`;
 }
 
 // ---- Pager bar ----------------------------------------------------------
@@ -917,7 +1174,7 @@ function renderPagerBar(): void {
   pagerPageInput.max = String(count);
   pagerPageCount.textContent = String(count);
   pagerPageSizeSelect.value = String(size);
-  pagerRowRange.textContent = total === 0 ? "No matching rows" : `Rows ${start + 1}–${end} of ${total}`;
+  pagerRowRange.textContent = total === 0 ? "No matching rows" : `Rows ${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}`;
 
   const noRows = total === 0;
   pagerFirstBtn.disabled = noRows || state.page <= 1;
@@ -1079,11 +1336,18 @@ function renderSeparatorControl(): void {
 
 function hideSeparatorCustomError(): void {
   separatorCustomError.hidden = true;
-  separatorCustomError.textContent = "";
+  separatorCustomError.innerHTML = "";
+  separatorCustomError.classList.remove("input-error-box");
 }
 
 function showSeparatorCustomError(message: string): void {
-  separatorCustomError.textContent = message;
+  separatorCustomError.innerHTML = "";
+  const icon = document.createElement("span");
+  icon.className = "codicon codicon-error";
+  icon.setAttribute("aria-hidden", "true");
+  separatorCustomError.appendChild(icon);
+  separatorCustomError.appendChild(document.createTextNode(message));
+  separatorCustomError.classList.add("input-error-box");
   separatorCustomError.hidden = false;
 }
 
@@ -1240,6 +1504,110 @@ sortDirBtn.addEventListener("click", () => {
   saveState();
 });
 
+// ---- Popover positioning & focus management --------------------------------
+//
+// Both the Columns popover and the Filters panel share this: anchored
+// under their trigger button (not a fixed top/right offset), clamped
+// inside the viewport, re-clamped on resize; opening one closes the
+// other; opening moves focus to the popover's first field; outside-click
+// and Escape close it — Escape also returns focus to the trigger, an
+// outside click does not (the user clicked somewhere else on purpose).
+
+let activePopoverTrigger: HTMLButtonElement | null = null;
+
+/** Anchors `el` (already un-hidden, so it has real dimensions) under
+ * `trigger`, then clamps inside the viewport with an 8px margin, flipping
+ * above the trigger instead of overflowing the bottom edge. Both
+ * `.popover`/`.panel` are `position: fixed` (see main.css), so viewport
+ * coordinates from getBoundingClientRect apply directly. */
+function positionPopoverNear(el: HTMLElement, trigger: HTMLElement): void {
+  const margin = 8;
+  const triggerRect = trigger.getBoundingClientRect();
+  el.style.left = `${triggerRect.left}px`;
+  el.style.top = `${triggerRect.bottom + 4}px`;
+
+  const elRect = el.getBoundingClientRect();
+  let left = triggerRect.left;
+  let top = triggerRect.bottom + 4;
+  if (left + elRect.width > window.innerWidth - margin) left = Math.max(margin, window.innerWidth - margin - elRect.width);
+  if (left < margin) left = margin;
+  if (top + elRect.height > window.innerHeight - margin) top = Math.max(margin, triggerRect.top - 4 - elRect.height);
+  if (top < margin) top = margin;
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
+function repositionOpenPopover(): void {
+  if (!columnsPopover.hidden && activePopoverTrigger) positionPopoverNear(columnsPopover, activePopoverTrigger);
+  if (!filterPanel.hidden && activePopoverTrigger) positionPopoverNear(filterPanel, activePopoverTrigger);
+}
+
+window.addEventListener("resize", repositionOpenPopover);
+
+/** Closes whichever popover is open. `returnFocusToTrigger` is true only
+ * for Escape — an outside click deliberately moved focus/attention
+ * elsewhere, so it shouldn't be yanked back. */
+function closeAllPopovers(returnFocusToTrigger = false): void {
+  const trigger = activePopoverTrigger;
+  columnsPopover.hidden = true;
+  filterPanel.hidden = true;
+  columnsBtn.setAttribute("aria-expanded", "false");
+  filtersBtn.setAttribute("aria-expanded", "false");
+  activePopoverTrigger = null;
+  if (returnFocusToTrigger) trigger?.focus();
+}
+
+function openColumnsPopover(trigger: HTMLButtonElement = columnsBtn): void {
+  closeAllPopovers();
+  columnsPopover.hidden = false;
+  columnsBtn.setAttribute("aria-expanded", "true");
+  activePopoverTrigger = trigger;
+  positionPopoverNear(columnsPopover, trigger);
+  columnsSearch.focus();
+}
+
+function openFilterPanel(trigger: HTMLButtonElement = filtersBtn): void {
+  closeAllPopovers();
+  filterPanel.hidden = false;
+  filtersBtn.setAttribute("aria-expanded", "true");
+  activePopoverTrigger = trigger;
+  positionPopoverNear(filterPanel, trigger);
+  const firstField = filterPanel.querySelector<HTMLElement>("#filter-rules input, #filter-rules select, #add-rule-btn");
+  firstField?.focus();
+}
+
+// Outside clicks are intercepted in the CAPTURE phase (before the click
+// reaches its target's own bubble-phase listener) so a click on a row
+// *through* an open popover closes the popover WITHOUT also toggling
+// that row — stopping propagation here means the row's own "click"
+// listener (attached directly to the row, fired later in the dispatch
+// order) never runs for this event.
+document.addEventListener(
+  "click",
+  (ev) => {
+    const openEl = !columnsPopover.hidden ? columnsPopover : !filterPanel.hidden ? filterPanel : null;
+    if (!openEl) return;
+    const target = ev.target as Node;
+    if (openEl.contains(target)) return; // inside the open popover itself
+    if (contextMenu.contains(target)) return; // the cell context menu has its own click handling
+    // Let either trigger button's own click handler run normally — it
+    // already calls closeAllPopovers() before opening (or closes if it's
+    // the same trigger toggling itself shut), so this correctly switches
+    // straight from one popover to the other.
+    if (target instanceof Element && (columnsBtn.contains(target) || filtersBtn.contains(target))) return;
+    // Only a row click needs its OWN action suppressed (the documented
+    // "no row toggling through an open popover" trap) — every other
+    // control (pager, headers, toolbar) should still do its own thing;
+    // the popover closing is just a side effect of clicking elsewhere.
+    if (target instanceof Element && target.closest("tr.data-row")) {
+      ev.stopPropagation();
+      ev.preventDefault();
+    }
+    closeAllPopovers();
+  },
+  true,
+);
+
 // ---- Columns popover ----------------------------------------------------------
 //
 // Purely local: visibility doesn't change which rows match or their
@@ -1247,8 +1615,11 @@ sortDirBtn.addEventListener("click", () => {
 // cached state.currentPageRows, no worker round-trip.
 
 columnsBtn.addEventListener("click", () => {
-  filterPanel.hidden = true;
-  columnsPopover.hidden = !columnsPopover.hidden;
+  if (!columnsPopover.hidden) {
+    closeAllPopovers();
+    return;
+  }
+  openColumnsPopover(columnsBtn);
 });
 
 function renderColumnsPopover(): void {
@@ -1353,8 +1724,11 @@ function debouncedRequery(): void {
 }
 
 filtersBtn.addEventListener("click", () => {
-  columnsPopover.hidden = true;
-  filterPanel.hidden = !filterPanel.hidden;
+  if (!filterPanel.hidden) {
+    closeAllPopovers();
+    return;
+  }
+  openFilterPanel(filtersBtn);
 });
 
 addRuleBtn.addEventListener("click", () => {
@@ -1377,6 +1751,7 @@ function renderFilterPanel(): void {
   if (!state) return;
   filterRulesEl.innerHTML = "";
   for (const rule of state.view.filterRules) filterRulesEl.appendChild(buildRuleRow(rule));
+  filterPanelTip.hidden = state.view.filterRules.length > 0;
 }
 
 function buildRuleRow(rule: FilterRule): HTMLDivElement {
@@ -1386,7 +1761,8 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   const enabledCheckbox = document.createElement("input");
   enabledCheckbox.type = "checkbox";
   enabledCheckbox.checked = rule.enabled;
-  enabledCheckbox.title = "Enabled";
+  enabledCheckbox.setAttribute("aria-label", "Rule enabled");
+  enabledCheckbox.title = "Rule enabled";
   enabledCheckbox.addEventListener("change", () => {
     rule.enabled = enabledCheckbox.checked;
     syncRuleError();
@@ -1395,6 +1771,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   row.appendChild(enabledCheckbox);
 
   const columnSelect = document.createElement("select");
+  columnSelect.setAttribute("aria-label", "Column");
   const anyOption = document.createElement("option");
   anyOption.value = "";
   anyOption.textContent = "(any column)";
@@ -1405,6 +1782,17 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     option.textContent = header;
     columnSelect.appendChild(option);
   }
+  // A rule whose column no longer exists (header renamed/removed, or a
+  // separator change produced different headers) shows that column as a
+  // disabled option instead of leaving the select looking blank — so the
+  // user can tell *which* column was missing (see syncRuleError below).
+  if (rule.column !== null && !state!.headers.includes(rule.column)) {
+    const missingOption = document.createElement("option");
+    missingOption.value = rule.column;
+    missingOption.textContent = `${rule.column} (missing)`;
+    missingOption.disabled = true;
+    columnSelect.appendChild(missingOption);
+  }
   columnSelect.value = rule.column ?? "";
   columnSelect.addEventListener("change", () => {
     rule.column = columnSelect.value === "" ? null : columnSelect.value;
@@ -1414,6 +1802,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   row.appendChild(columnSelect);
 
   const operatorSelect = document.createElement("select");
+  operatorSelect.setAttribute("aria-label", "Condition");
   for (const op of OPERATORS) {
     const option = document.createElement("option");
     option.value = op.value;
@@ -1448,7 +1837,8 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   const caseCheckbox = document.createElement("input");
   caseCheckbox.type = "checkbox";
   caseCheckbox.checked = rule.caseSensitive;
-  caseCheckbox.title = "Case-sensitive";
+  caseCheckbox.setAttribute("aria-label", "Match case");
+  caseCheckbox.title = "Match Case";
   caseCheckbox.addEventListener("change", () => {
     rule.caseSensitive = caseCheckbox.checked;
     debouncedRequery();
@@ -1463,17 +1853,21 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   modeToggle.type = "button";
   modeToggle.className = "mode-toggle";
   modeToggle.textContent = rule.mode === "include" ? "Include" : "Exclude";
+  modeToggle.setAttribute("aria-pressed", String(rule.mode === "exclude"));
+  modeToggle.setAttribute("aria-label", `Filter mode: ${rule.mode === "include" ? "Include" : "Exclude"}`);
   modeToggle.addEventListener("click", () => {
     rule.mode = rule.mode === "include" ? "exclude" : "include";
     modeToggle.textContent = rule.mode === "include" ? "Include" : "Exclude";
+    modeToggle.setAttribute("aria-pressed", String(rule.mode === "exclude"));
+    modeToggle.setAttribute("aria-label", `Filter mode: ${rule.mode === "include" ? "Include" : "Exclude"}`);
     debouncedRequery();
   });
   row.appendChild(modeToggle);
 
   const removeBtn = document.createElement("button");
   removeBtn.type = "button";
-  removeBtn.className = "remove-rule-btn";
-  removeBtn.textContent = "✕";
+  removeBtn.className = "remove-rule-btn icon-btn";
+  removeBtn.innerHTML = '<span class="codicon codicon-close" aria-hidden="true"></span>';
   removeBtn.setAttribute("aria-label", "Remove rule");
   removeBtn.addEventListener("click", () => {
     if (!state) return;
@@ -1511,10 +1905,21 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     const inactive = timedOut || !isRuleActive(rule, state.headers);
     row.classList.toggle("rule-error", inactive && (timedOut || regexInvalid || columnMissing));
     row.classList.toggle("rule-hint", inactive && needsValue);
-    if (timedOut) error.textContent = "Regex too slow — rule disabled";
-    else if (regexInvalid) error.textContent = "Invalid regex — rule ignored";
-    else if (columnMissing) error.textContent = "Column not found — rule ignored";
-    else if (needsValue) error.textContent = "Enter a value — rule ignored";
+    error.innerHTML = "";
+    let message: string | null = null;
+    if (timedOut) message = "Skipped: pattern took over 2 s. Edit it to retry.";
+    else if (regexInvalid) message = `Skipped: invalid regex (${regexErrorMessage(rule.value) ?? "unknown error"})`;
+    else if (columnMissing) message = `Skipped: column "${rule.column}" isn't in this file`;
+    else if (needsValue) message = "Enter a value";
+    if (message !== null) {
+      if (timedOut || regexInvalid || columnMissing) {
+        const icon = document.createElement("span");
+        icon.className = "codicon codicon-error";
+        icon.setAttribute("aria-hidden", "true");
+        error.appendChild(icon);
+      }
+      error.appendChild(document.createTextNode(message));
+    }
     error.hidden = !inactive;
   }
   syncRuleError();
@@ -1524,26 +1929,76 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
 
 // ---- Quick-add filter via cell context menu ----------------------------------------------------------
 
+/** Writes `value` to the clipboard, falling back to a hidden-textarea +
+ * execCommand("copy") when the async Clipboard API is unavailable or
+ * denied (e.g. no clipboard-write permission in the test context). */
+async function copyToClipboard(value: string): Promise<void> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch {
+    // fall through to the execCommand fallback below
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
+}
+
+/** The quick-add menu's rule uses the full, untruncated value; only the
+ * menu item's own label is shortened so a long cell value doesn't blow
+ * out the menu's width. */
+function truncateForMenuLabel(value: string, maxChars = 40): string {
+  return value.length > maxChars ? value.slice(0, maxChars) + "…" : value;
+}
+
 function onCellContextMenu(ev: MouseEvent, column: string, value: string): void {
   ev.preventDefault();
   contextMenu.innerHTML = "";
 
+  const copyItem = document.createElement("button");
+  copyItem.type = "button";
+  copyItem.setAttribute("role", "menuitem");
+  copyItem.textContent = "Copy value";
+  copyItem.addEventListener("click", () => {
+    void copyToClipboard(value);
+    contextMenu.hidden = true;
+  });
+  contextMenu.appendChild(copyItem);
+  contextMenu.appendChild(document.createElement("hr"));
+
+  const label = truncateForMenuLabel(value);
   const includeItem = document.createElement("button");
   includeItem.type = "button";
-  includeItem.textContent = "Filter: include this value";
+  includeItem.setAttribute("role", "menuitem");
+  includeItem.textContent = `Show only rows where ${column} = "${label}"`;
   includeItem.addEventListener("click", () => addQuickFilter(column, value, "include"));
 
   const excludeItem = document.createElement("button");
   excludeItem.type = "button";
-  excludeItem.textContent = "Filter: exclude this value";
+  excludeItem.setAttribute("role", "menuitem");
+  excludeItem.textContent = `Hide rows where ${column} = "${label}"`;
   excludeItem.addEventListener("click", () => addQuickFilter(column, value, "exclude"));
 
   contextMenu.appendChild(includeItem);
   contextMenu.appendChild(excludeItem);
-  contextMenu.style.left = `${ev.pageX}px`;
-  contextMenu.style.top = `${ev.pageY}px`;
+  // The menu is `position: fixed` (see main.css), so viewport-relative
+  // client coordinates are what it needs — not page coordinates, which
+  // would drift from the pointer once the table has scrolled.
+  contextMenu.style.left = `${ev.clientX}px`;
+  contextMenu.style.top = `${ev.clientY}px`;
   contextMenu.hidden = false;
-  clampContextMenuToViewport(ev.pageX, ev.pageY);
+  clampContextMenuToViewport(ev.clientX, ev.clientY);
 }
 
 /** Clamps the (already-shown) context menu inside the viewport, flipping
@@ -1577,7 +2032,7 @@ function addQuickFilter(column: string, value: string, mode: "include" | "exclud
   state.view.filterRules.push(rule);
   contextMenu.hidden = true;
   renderFilterPanel();
-  filterPanel.hidden = false;
+  openFilterPanel(filtersBtn);
   requery();
   saveState();
 }
@@ -1588,10 +2043,19 @@ document.addEventListener("click", (ev) => {
 });
 
 document.addEventListener("keydown", (ev) => {
+  // Cmd/Ctrl+F focuses and selects the quick search box, instead of doing
+  // nothing — VS Code's webview shim swallows the browser's native Find
+  // (see docs/reviews/ux-review.md §3), and every user tries this.
+  if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "f") {
+    ev.preventDefault();
+    quickSearchInput.focus();
+    quickSearchInput.select();
+    return;
+  }
+
   if (ev.key === "Escape") {
     contextMenu.hidden = true;
-    columnsPopover.hidden = true;
-    filterPanel.hidden = true;
+    if (!columnsPopover.hidden || !filterPanel.hidden) closeAllPopovers(true);
     return;
   }
 
