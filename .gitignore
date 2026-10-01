@@ -7,3 +7,4 @@ playwright-report/
 .DS_Store
 .vscode-test/
 .claude/
+docs/reviews/*-screens/
