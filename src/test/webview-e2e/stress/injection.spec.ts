@@ -43,7 +43,7 @@ test("neither the evil header nor the evil cell ever executes", async ({ page })
   expect(consoleErrors).toEqual([]);
 });
 
-test("the evil header renders literally in the table head, columns popover, sort-by dropdown, and filter column dropdown", async ({
+test("the evil header renders literally in the table head, columns popover, sort popover's add-select, and filter column dropdown", async ({
   page,
 }) => {
   await loadEvilFixture(page, 3);
@@ -60,16 +60,18 @@ test("the evil header renders literally in the table head, columns popover, sort
   await expect(columnRow.locator("span")).toHaveText(EVIL_HEADER);
   await page.locator("#columns-btn").click(); // close
 
-  // Sort-by dropdown (option text, not selected value, since jsdom-free
-  // Playwright can read <option> textContent directly).
-  const sortOption = page.locator("#sort-by-select option", { hasText: "onerror" });
+  // Sort popover's "Add sort column" select (option text, not selected
+  // value, since jsdom-free Playwright can read <option> textContent
+  // directly).
+  await page.locator("#sort-btn").click();
+  const sortOption = page.locator("#sort-add-select option", { hasText: "onerror" });
   await expect(sortOption).toHaveCount(1);
   await expect(sortOption).toHaveText(EVIL_HEADER);
 
   // Filter column dropdown, inside a rule row.
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
-  const filterColumnOption = page.locator(".rule-row select").first().locator("option", { hasText: "onerror" });
+  const filterColumnOption = page.locator('.rule-row select[aria-label="Column"]').first().locator("option", { hasText: "onerror" });
   await expect(filterColumnOption).toHaveCount(1);
   await expect(filterColumnOption).toHaveText(EVIL_HEADER);
 });

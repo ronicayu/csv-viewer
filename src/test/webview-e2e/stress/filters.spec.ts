@@ -28,20 +28,19 @@ test("adding 20 rules, deleting one from the middle, and rapidly toggling Includ
   await page.locator(".rule-row").nth(9).locator(".remove-rule-btn").click();
   await expect(page.locator(".rule-row")).toHaveCount(19);
 
-  // Rapidly toggle Include/Exclude on every remaining rule, back to back,
-  // without waiting between clicks.
-  const toggles = await page.locator(".mode-toggle").all();
-  for (const t of toggles) await t.click({ delay: 0 });
-  for (const t of toggles) await t.click({ delay: 0 });
-  // Net effect: two toggles each -> back to "Include" (the default) for
-  // every rule that started life as a default `contains` rule with no
-  // column/value, which never matches anything by "equals"... rules here
-  // default to operator "contains" with empty value, which matches every
-  // cell trivially (`"".includes("")` is true), so every enabled Include
-  // rule still passes every row and every enabled Exclude rule drops every
-  // row. After an even number of toggles they're back to Include.
-  for (const label of await page.locator(".mode-toggle").allTextContents()) {
-    expect(label).toBe("Include");
+  // Rapidly toggle Keep/Hide on every remaining rule, back to back,
+  // without waiting between selections.
+  const toggles = await page.locator(".mode-select").all();
+  for (const t of toggles) await t.selectOption("exclude");
+  for (const t of toggles) await t.selectOption("include");
+  // Net effect: back to "Keep" (the default) for every rule that started
+  // life as a default `contains` rule with no column/value, which never
+  // matches anything by "equals"... rules here default to operator
+  // "contains" with empty value, which matches every cell trivially
+  // (`"".includes("")` is true), so every enabled Keep rule still passes
+  // every row and every enabled Hide rule drops every row.
+  for (const t of await page.locator(".mode-select").all()) {
+    expect(await t.inputValue()).toBe("include");
   }
   expect(consoleErrors).toEqual([]);
 });
@@ -61,8 +60,8 @@ test("typing fast in the filter value box on a 50k-row file: the value box is no
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption("col_2");
-  await rule.locator("select").nth(1).selectOption("contains");
+  await rule.locator('select[aria-label="Column"]').selectOption("col_2");
+  await rule.locator('select[aria-label="Condition"]').selectOption("contains");
   const valueInput = rule.locator('input[type="text"]');
 
   await valueInput.evaluate((el) => {
@@ -109,7 +108,7 @@ test("an invalid regex typed character-by-character shows the error immediately 
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(1).selectOption("regex");
+  await rule.locator('select[aria-label="Condition"]').selectOption("regex");
   const valueInput = rule.locator('input[type="text"]');
 
   await valueInput.pressSequentially("(v0", { delay: 0 });
@@ -158,6 +157,11 @@ test("right-click quick-add works on an empty cell value, a value containing quo
   await expect(page.locator(".rule-row").last().locator(".rule-error-text")).toContainText("Enter a value");
   await page.locator(".rule-row").last().locator(".remove-rule-btn").click();
   await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 3 rows");
+  // Close the still-open Filters panel before the next right-click — the
+  // panel is now anchored further right (the search box grows to fill
+  // the toolbar, see docs/reviews/ux-review.md §2) and can otherwise sit
+  // over the row we're about to target.
+  await page.keyboard.press("Escape");
 
   // Quoted value.
   await page.locator('tr.data-row[data-row-id="1"]').locator("td").nth(2).click({ button: "right" });
@@ -166,6 +170,7 @@ test("right-click quick-add works on an empty cell value, a value containing quo
   await expect(page.locator(".rule-row").last().locator('input[type="text"]')).toHaveValue('He said "hi" to me');
   await page.locator(".rule-row").last().locator(".remove-rule-btn").click();
   await expect(page.locator("#status-bar")).toHaveText("Showing 3 of 3 rows");
+  await page.keyboard.press("Escape");
 
   // Very long value.
   await page.locator('tr.data-row[data-row-id="2"]').locator("td").nth(2).click({ button: "right" });

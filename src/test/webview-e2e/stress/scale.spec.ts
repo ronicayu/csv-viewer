@@ -108,8 +108,8 @@ test("200k rows x 30 columns: timing table for first render and each interaction
     await page.locator("#filters-btn").click();
     await page.locator("#add-rule-btn").click();
     const rule = page.locator(".rule-row").first();
-    await rule.locator("select").nth(0).selectOption("col_3");
-    await rule.locator("select").nth(1).selectOption("contains");
+    await rule.locator('select[aria-label="Column"]').selectOption("col_3");
+    await rule.locator('select[aria-label="Condition"]').selectOption("contains");
     await rule.locator('input[type="text"]').fill("v1");
     await expect(page.locator("#status-bar")).not.toHaveText(`Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`);
   });
@@ -120,6 +120,7 @@ test("200k rows x 30 columns: timing table for first render and each interaction
   });
 
   await timeStep("separator: switch to Semicolon (collapses to 1 column)", GENEROUS_BOUND_MS, async () => {
+    await page.locator("#format-btn").click();
     await page.locator("#separator-select").selectOption(";");
     await expect(page.locator("th.sortable")).toHaveCount(1);
   });

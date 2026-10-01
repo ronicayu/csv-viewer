@@ -31,33 +31,47 @@ test("every visible, enabled toolbar control is reachable via Tab, in DOM order"
   const consoleErrors = trackConsoleErrors(page);
   const ids = await tabSequence(page, 20);
 
-  // sort-dir-btn is `hidden` (no active sort) and pager-first/prev-btn are
-  // `disabled` (already on page 1) — all three are correctly absent from
-  // the tab order, not a bug.
-  const expectedVisible = [
-    "quick-search",
-    "columns-btn",
-    "filters-btn",
-    "expand-all-btn",
-    "collapse-all-btn",
-    "sort-by-select",
-    "first-row-header",
-    "separator-select",
-    "open-as-text-btn",
-  ];
+  // The toolbar is now Search · Columns · Filters · Sort · (icon buttons:)
+  // expand/collapse · File format · Open as Text — see
+  // docs/reviews/ux-review.md §2. Every popover's own controls (sort key
+  // rows, separator/header/quotes) are display:none while closed, so
+  // they're correctly absent from the tab order here, not a bug.
+  const expectedVisible = ["quick-search", "columns-btn", "filters-btn", "sort-btn", "expand-collapse-btn", "format-btn", "open-as-text-btn"];
   for (const id of expectedVisible) {
     expect(ids, `expected #${id} to receive focus while tabbing`).toContain(id);
   }
-  expect(ids).not.toContain("sort-dir-btn");
+  expect(ids).not.toContain("separator-select");
   expect(ids).not.toContain("separator-custom");
+  expect(ids).not.toContain("first-row-header");
+  expect(ids).not.toContain("sort-add-select");
   expect(consoleErrors).toEqual([]);
 });
 
-test("once a sort is active, sort-dir-btn joins the tab order", async ({ page }) => {
+test("once the Sort popover is open, its controls (including a key's direction toggle) join the tab order", async ({ page }) => {
   await page.locator("th", { hasText: "age" }).click();
-  await expect(page.locator("#sort-dir-btn")).toBeVisible();
-  const ids = await tabSequence(page, 20);
-  expect(ids).toContain("sort-dir-btn");
+  await page.locator("#sort-btn").click();
+  await expect(page.locator(".sort-key-dir-btn")).toBeVisible();
+
+  // Opening the popover already focused its first field (the direction
+  // toggle, per openSortPopover's focusSelector) — resume tabbing from
+  // there rather than re-deriving the whole sequence from the top.
+  await expect(page.locator(".sort-key-dir-btn")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator(".sort-key-remove-btn")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#sort-add-select")).toBeFocused();
+});
+
+test("once the File format popover is open, its controls join the tab order", async ({ page }) => {
+  await page.locator("#format-btn").click();
+  await expect(page.locator("#separator-select")).toBeFocused();
+  const ids: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press("Tab");
+    ids.push(await page.evaluate(() => document.activeElement?.id ?? ""));
+  }
+  expect(ids).toContain("first-row-header");
+  expect(ids).toContain("quotes-checkbox");
 });
 
 test("table headers are keyboard-activatable via Enter/Space (a real <button> inside the <th>)", async ({ page }) => {
@@ -104,6 +118,20 @@ test("Escape closes the filter panel", async ({ page }) => {
   await expect(page.locator("#filter-panel")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator("#filter-panel")).toBeHidden();
+});
+
+test("Escape closes the Sort popover", async ({ page }) => {
+  await page.locator("#sort-btn").click();
+  await expect(page.locator("#sort-popover")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#sort-popover")).toBeHidden();
+});
+
+test("Escape closes the File format popover", async ({ page }) => {
+  await page.locator("#format-btn").click();
+  await expect(page.locator("#format-popover")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#format-popover")).toBeHidden();
 });
 
 test("Escape closes the cell context menu", async ({ page }) => {

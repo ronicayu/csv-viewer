@@ -1,6 +1,7 @@
-// Sort stress: rapid header clicks, shift-click with 5 keys, the Sort-by
-// dropdown/direction button interacting with header-driven multi-sort, and
-// sort keys surviving (as documented, inert-if-stale) a separator change.
+// Sort stress: rapid header clicks, shift-click with 5 keys, the Sort
+// popover's "Add sort column"/direction toggle interacting with
+// header-driven multi-sort, and sort keys surviving (as documented,
+// inert-if-stale) a separator change.
 
 import { expect, test } from "@playwright/test";
 import { bootAndLoad, bootAndLoadText, defaultViewState } from "../harness";
@@ -26,7 +27,7 @@ test("rapid repeated clicks on the same header cycle asc/desc/none without desyn
 
   await expect(header).toHaveAttribute("aria-sort", "none");
   await expect(header.locator(".sort-indicator")).toHaveCount(0);
-  await expect(page.locator("#sort-by-select")).toHaveValue("");
+  await expect(page.locator("#sort-btn")).toHaveText("Sort");
   expect(consoleErrors).toEqual([]);
 });
 
@@ -51,9 +52,12 @@ test("shift-clicking 5 different headers builds a 5-key multi-sort with priority
     await expect(header).toHaveAttribute("aria-sort", "ascending");
     await expect(header.locator(".sort-priority")).toHaveText(String(i + 1));
   }
+  await expect(page.locator("#sort-btn")).toHaveText("Sort • 5");
+  await page.locator("#sort-btn").click();
+  await expect(page.locator(".sort-key-row")).toHaveCount(5);
 });
 
-test("the Sort by… dropdown replaces an existing header-driven multi-sort with a single key, and the direction button flips it", async ({
+test("the Sort popover's 'Add sort column' replaces an existing header-driven multi-sort is NOT how it works — it ADDS a key, and the direction toggle flips just that key", async ({
   page,
 }) => {
   const fixture = wideFixture(30, 4);
@@ -72,17 +76,41 @@ test("the Sort by… dropdown replaces an existing header-driven multi-sort with
   await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "ascending");
   await expect(page.locator("th", { hasText: "col_2" }).locator(".sort-priority")).toHaveText("2");
 
-  await page.locator("#sort-by-select").selectOption("col_3");
-  // Replaces the whole multi-sort with a single key on col_3 — the
-  // priority indicators on col_1/col_2 disappear entirely.
+  // Unlike the old "Sort by…" dropdown, adding col_3 via the popover is a
+  // THIRD key, not a replacement — col_1/col_2 keep their priorities.
+  await page.locator("#sort-btn").click();
+  await page.locator("#sort-add-select").selectOption("col_3");
+  await expect(page.locator("th", { hasText: "col_1" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(page.locator("th", { hasText: "col_3" })).toHaveAttribute("aria-sort", "ascending");
+  await expect(page.locator("th", { hasText: "col_3" }).locator(".sort-priority")).toHaveText("3");
+
+  // The popover's direction toggle on col_3's row flips only col_3.
+  const col3Row = page.locator(".sort-key-row").nth(2);
+  await expect(col3Row.locator(".sort-key-column")).toHaveText("col_3");
+  await col3Row.locator(".sort-key-dir-btn").click();
+  await expect(page.locator("th", { hasText: "col_3" })).toHaveAttribute("aria-sort", "descending");
+  await expect(page.locator("th", { hasText: "col_1" })).toHaveAttribute("aria-sort", "ascending");
+});
+
+test("Clear sort removes every key at once, including ones built via header Shift+click", async ({ page }) => {
+  const fixture = wideFixture(30, 4);
+  await bootAndLoad(page, {
+    fileKey: "file:///clearsort.csv",
+    headers: fixture.headers,
+    rows: fixture.rows,
+    state: defaultViewState(),
+    defaultTableColumns: 4,
+  });
+
+  await page.locator("th", { hasText: "col_1" }).click();
+  await page.locator("th", { hasText: "col_2" }).click({ modifiers: ["Shift"] });
+  await page.locator("#sort-btn").click();
+  await page.locator("#sort-clear-btn").click();
+
   await expect(page.locator("th", { hasText: "col_1" })).toHaveAttribute("aria-sort", "none");
   await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "none");
-  await expect(page.locator("th", { hasText: "col_3" })).toHaveAttribute("aria-sort", "ascending");
-  await expect(page.locator("th", { hasText: "col_3" }).locator(".sort-priority")).toHaveCount(0);
-
-  await page.locator("#sort-dir-btn").click();
-  await expect(page.locator("th", { hasText: "col_3" })).toHaveAttribute("aria-sort", "descending");
-  await expect(page.locator("#sort-by-select")).toHaveValue("col_3");
+  await expect(page.locator("#sort-btn")).toHaveText("Sort");
 });
 
 test("a sort key pointing at a column removed by a separator change is inert (documented behavior), not a crash", async ({
@@ -104,6 +132,7 @@ test("a sort key pointing at a column removed by a separator change is inert (do
   // Force the separator to "|" — nothing in the text contains "|", so the
   // whole line becomes a single column, collapsing "id,age,city" into one
   // header. The stale sort key {column:"age"} now matches no header.
+  await page.locator("#format-btn").click();
   await page.locator("#separator-select").selectOption("|");
   await expect(page.locator("th.sortable")).toHaveCount(1);
   // No crash, no indicator anywhere (nothing named "age" exists anymore),

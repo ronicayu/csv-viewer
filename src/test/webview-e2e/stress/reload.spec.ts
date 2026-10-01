@@ -28,11 +28,11 @@ test("a same-fileKey reload with fewer rows and a renamed column, while filters/
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption("col_2");
-  await rule.locator("select").nth(1).selectOption("contains");
+  await rule.locator('select[aria-label="Column"]').selectOption("col_2");
+  await rule.locator('select[aria-label="Condition"]').selectOption("contains");
   await rule.locator('input[type="text"]').fill("v0_1");
-  const modeToggle = rule.locator(".mode-toggle");
-  await modeToggle.click(); // Include -> Exclude
+  const modeSelect = rule.locator(".mode-select");
+  await modeSelect.selectOption("exclude"); // Keep -> Hide
   await expect(page.locator("#status-bar")).toHaveText("Showing 249 of 250 rows");
 
   // Navigate to page 2, expand the first row on that page, and leave the

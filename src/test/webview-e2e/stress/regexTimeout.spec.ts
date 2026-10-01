@@ -51,8 +51,8 @@ test("a catastrophic regex rule is marked 'too slow' within ~3s while the UI sta
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption("val");
-  await rule.locator("select").nth(1).selectOption("regex");
+  await rule.locator('select[aria-label="Column"]').selectOption("val");
+  await rule.locator('select[aria-label="Condition"]').selectOption("regex");
   await rule.locator('input[type="text"]').fill("(a+)+$");
 
   // Give the debounced value-change a moment to actually send the query
@@ -97,8 +97,8 @@ test("editing a timed-out rule's value clears the 'too slow' mark and re-queries
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption("val");
-  await rule.locator("select").nth(1).selectOption("regex");
+  await rule.locator('select[aria-label="Column"]').selectOption("val");
+  await rule.locator('select[aria-label="Condition"]').selectOption("regex");
   const valueInput = rule.locator('input[type="text"]');
   await valueInput.fill("(a+)+$");
 
@@ -185,8 +185,8 @@ test("a slow-but-finite legitimate regex, queued right behind another in-flight 
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();
   const rule = page.locator(".rule-row").first();
-  await rule.locator("select").nth(0).selectOption("col_3");
-  await rule.locator("select").nth(1).selectOption("regex");
+  await rule.locator('select[aria-label="Column"]').selectOption("col_3");
+  await rule.locator('select[aria-label="Condition"]').selectOption("regex");
 
   // The "ahead" operation: a quick search over every column of 150k rows
   // — genuinely slow (the marker is only in the last column, forcing a

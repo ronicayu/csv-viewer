@@ -32,12 +32,26 @@ test("clicking a row expands it and shows the detail-only fields", async ({ page
   await expect(firstDetail).toBeHidden();
 });
 
-test("Expand page / Collapse page toggle every visible row's detail panel", async ({ page }) => {
-  await page.locator("#expand-all-btn").click();
+test("the Expand/collapse toggle expands every row on the page, then collapses them, flipping its icon and label each time", async ({ page }) => {
+  const toggle = page.locator("#expand-collapse-btn");
+  await expect(toggle).toHaveAttribute("aria-label", "Expand all rows on this page");
+  await expect(toggle.locator(".codicon-expand-all")).toHaveCount(1);
+
+  await toggle.click();
   const details = page.locator("tr.detail-row");
   await expect(details).toHaveCount(smallFixture.rows.length);
   for (const detail of await details.all()) await expect(detail).toBeVisible();
+  await expect(toggle).toHaveAttribute("aria-label", "Collapse all rows on this page");
+  await expect(toggle.locator(".codicon-collapse-all")).toHaveCount(1);
 
-  await page.locator("#collapse-all-btn").click();
+  await toggle.click();
   for (const detail of await details.all()) await expect(detail).toBeHidden();
+  await expect(toggle).toHaveAttribute("aria-label", "Expand all rows on this page");
+  await expect(toggle.locator(".codicon-expand-all")).toHaveCount(1);
+});
+
+test("the toggle shows 'collapse' once every row on the page is already expanded (e.g. by expanding the last one by hand)", async ({ page }) => {
+  const toggle = page.locator("#expand-collapse-btn");
+  for (const row of await page.locator("tr.data-row").all()) await row.click();
+  await expect(toggle).toHaveAttribute("aria-label", "Collapse all rows on this page");
 });

@@ -66,7 +66,7 @@ test("nav buttons are disabled at the first and last page", async ({ page }) => 
 
 test("zero matching rows shows a message and disables every nav button", async ({ page }) => {
   await page.locator("#quick-search").fill("no-such-row-xyz");
-  await expect(page.locator("#pager-row-range")).toHaveText("No matching rows");
+  await expect(page.locator("#pager-row-range")).toHaveText("0 rows (filtered from 250)");
   await expect(page.locator("#pager-first-btn")).toBeDisabled();
   await expect(page.locator("#pager-prev-btn")).toBeDisabled();
   await expect(page.locator("#pager-next-btn")).toBeDisabled();
