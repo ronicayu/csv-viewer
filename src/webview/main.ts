@@ -17,6 +17,8 @@
 //     page's rows (with FULL, untruncated cell values — truncation is a
 //     render-time-only concern, see src/core/truncate.ts).
 
+import { foldCase } from "../core/caseFold";
+import type { DistinctValue } from "../core/distinct";
 import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
 import { detailOnlyColumns, getVisibility, isNumericColumn, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
@@ -203,6 +205,22 @@ app.innerHTML = `
     </label>
     <p class="quotes-explain">Treat "…" as quoting. Turn off if quotes in your data are literal text.</p>
   </div>
+  <div id="values-popover" class="popover values-popover" role="dialog" aria-label="Filter by values" hidden>
+    <p id="values-title" class="vp-title"></p>
+    <input id="values-search" type="search" placeholder="Search values…" aria-label="Search values" />
+    <div class="vp-links">
+      <button id="values-select-all" type="button" class="link-btn">Select all</button>
+      <button id="values-clear" type="button" class="link-btn">Clear</button>
+      <span id="values-selected-count" class="vp-count"></span>
+    </div>
+    <div id="values-list" class="vp-list" role="group" aria-label="Values"></div>
+    <p id="values-note-shown" class="vp-note" hidden></p>
+    <p id="values-note-truncated" class="vp-note" hidden></p>
+    <div class="vp-foot">
+      <button id="values-cancel" type="button">Cancel</button>
+      <button id="values-ok" type="button" class="primary">OK</button>
+    </div>
+  </div>
   <div id="table-scroll" class="table-scroll">
     <table id="table">
       <thead id="table-head"></thead>
@@ -266,6 +284,17 @@ const sortKeysList = document.getElementById("sort-keys-list") as HTMLDivElement
 const sortAddSelect = document.getElementById("sort-add-select") as HTMLSelectElement;
 const sortClearBtn = document.getElementById("sort-clear-btn") as HTMLButtonElement;
 const formatPopover = document.getElementById("format-popover") as HTMLDivElement;
+const valuesPopover = document.getElementById("values-popover") as HTMLDivElement;
+const valuesTitle = document.getElementById("values-title") as HTMLParagraphElement;
+const valuesSearch = document.getElementById("values-search") as HTMLInputElement;
+const valuesSelectAllBtn = document.getElementById("values-select-all") as HTMLButtonElement;
+const valuesClearBtn = document.getElementById("values-clear") as HTMLButtonElement;
+const valuesSelectedCount = document.getElementById("values-selected-count") as HTMLSpanElement;
+const valuesList = document.getElementById("values-list") as HTMLDivElement;
+const valuesNoteShown = document.getElementById("values-note-shown") as HTMLParagraphElement;
+const valuesNoteTruncated = document.getElementById("values-note-truncated") as HTMLParagraphElement;
+const valuesCancelBtn = document.getElementById("values-cancel") as HTMLButtonElement;
+const valuesOkBtn = document.getElementById("values-ok") as HTMLButtonElement;
 const statusBar = document.getElementById("status-bar") as HTMLDivElement;
 const workingIndicator = document.getElementById("working-indicator") as HTMLDivElement;
 const tableScroll = document.getElementById("table-scroll") as HTMLDivElement;
@@ -606,6 +635,10 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   pendingInitIsFreshParse = isFreshParse;
   lastQueryKey = null; // a fresh parse invalidates whatever the worker's cached view meant before
   resetRegexWatchdogState();
+  // A new parse changes what the picker was listing, so it can't survive one
+  // (edits are discarded). Regex-timeout recovery (isFreshParse false) re-parses
+  // the identical text and keeps it — see the re-request in onInitResult.
+  if (isFreshParse) discardValuesPicker();
   postToWorker({ type: "init", requestId, text, options });
 }
 
@@ -638,6 +671,7 @@ function renderFiltersButton(): void {
   if (!state) return;
   const n = activeFilterRuleCount();
   filtersBtn.textContent = n > 0 ? `Filters • ${n}` : "Filters";
+  syncFunnelStates();
 }
 
 function renderSortButton(): void {
@@ -737,6 +771,22 @@ function newRuleId(): string {
   return `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** An `in` rule's chosen values; state saved before the operator existed
+ * (or hand-edited) may lack the field entirely. */
+function ruleValues(rule: FilterRule): string[] {
+  return Array.isArray(rule.values) ? rule.values : [];
+}
+
+/** The label a blank (`""`) value gets wherever values are listed. */
+const BLANKS_LABEL = "(Blanks)";
+
+/** The Filters panel's values button text: the chosen values joined by
+ * ", " (blank shown as "(Blanks)"), cut to ~30 characters. */
+function summarizeValues(values: string[]): string {
+  const text = values.map((v) => (v === "" ? BLANKS_LABEL : v)).join(", ");
+  return text.length > 30 ? `${text.slice(0, 30)}…` : text;
+}
+
 function saveState(): void {
   if (!state) return;
   vscode.postMessage({ type: "saveState", state: state.view });
@@ -785,6 +835,9 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
     case "pageResult":
       onPageResult(msg);
       break;
+    case "distinctResult":
+      onDistinctResult(msg);
+      break;
     case "workerError":
       // Defensive only — src/core's own tests (including a fast-check
       // property test) establish that applyFilters/sortRows/parseCsv never
@@ -824,6 +877,10 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   // settled shouldn't cause a write on every open.
   if (visibilityChanged) saveState();
 
+  // The worker was recreated (regex-timeout recovery) while the picker was
+  // still waiting for its values: the old request died with the old worker.
+  if (valuesPicker && valuesPicker.items === null) requestDistinct();
+
   continueAfterInit();
 }
 
@@ -860,7 +917,16 @@ function buildQueryKey(): string {
   if (!state) return "";
   const activeRules = state.view.filterRules
     .filter((r) => r.enabled && isRuleActive(r, state!.headers) && !state!.timedOutRuleIds.has(r.id))
-    .map((r) => ({ column: r.column, operator: r.operator, value: r.value, mode: r.mode, caseSensitive: r.caseSensitive }));
+    // `values` only matters to `in` (undefined is dropped by JSON.stringify),
+    // so ticking a different set of values is a real change that must query.
+    .map((r) => ({
+      column: r.column,
+      operator: r.operator,
+      value: r.value,
+      values: r.operator === "in" ? ruleValues(r) : undefined,
+      mode: r.mode,
+      caseSensitive: r.caseSensitive,
+    }));
   return JSON.stringify({ q: state.view.quickSearch, rules: activeRules, sort: state.view.sortKeys });
 }
 
@@ -974,10 +1040,14 @@ function renderTableHead(): void {
   // cycling a column's sort direction with repeated Space/Enter loses
   // focus after the very first press (see keyboard.spec.ts). Matched by
   // the column's label text (not DOM position), since visibility changes
-  // can reorder/remove columns between renders.
-  let previousFocusColumn: string | null = null;
+  // can reorder/remove columns between renders. Restores the same KIND of
+  // control (sort button vs. filter funnel) that had focus.
+  let previousFocus: { column: string; kind: "sort" | "filter" } | null = null;
   if (document.activeElement instanceof HTMLElement && tableHead.contains(document.activeElement)) {
-    previousFocusColumn = document.activeElement.closest("th")?.dataset.column ?? null;
+    const focusedColumn = document.activeElement.closest("th")?.dataset.column;
+    if (focusedColumn !== undefined) {
+      previousFocus = { column: focusedColumn, kind: document.activeElement.classList.contains("col-filter-btn") ? "filter" : "sort" };
+    }
   }
 
   const tr = document.createElement("tr");
@@ -995,12 +1065,19 @@ function renderTableHead(): void {
     const key = keyIndex !== -1 ? state.view.sortKeys[keyIndex] : undefined;
     th.setAttribute("aria-sort", key ? (key.direction === "asc" ? "ascending" : "descending") : "none");
 
+    // The sort button takes the remaining width (a long name ellipsizes
+    // inside it) and the funnel after it never shrinks — see .th-inner in
+    // main.css.
+    const inner = document.createElement("div");
+    inner.className = "th-inner";
+
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "col-header-btn";
     btn.title = "Sort. Shift+click to add a secondary sort";
 
     const label = document.createElement("span");
+    label.className = "col-header-label";
     label.textContent = column;
     btn.appendChild(label);
 
@@ -1035,16 +1112,60 @@ function renderTableHead(): void {
         onHeaderClick(column, ev.shiftKey);
       }
     });
-    th.appendChild(btn);
+    inner.appendChild(btn);
+
+    // "Filter by values" funnel, after the sort button in Tab order. A
+    // separate button, so clicking it never sorts.
+    const funnel = document.createElement("button");
+    funnel.type = "button";
+    funnel.className = "col-filter-btn";
+    const funnelLabel = `Filter ${column} by values`;
+    funnel.title = funnelLabel;
+    funnel.setAttribute("aria-label", funnelLabel);
+    funnel.setAttribute("aria-haspopup", "dialog");
+    funnel.setAttribute("aria-expanded", "false");
+    const funnelIcon = document.createElement("span");
+    funnelIcon.className = "codicon codicon-filter";
+    funnelIcon.setAttribute("aria-hidden", "true");
+    funnel.appendChild(funnelIcon);
+    funnel.addEventListener("click", () => onFunnelClick(column));
+    inner.appendChild(funnel);
+
+    th.appendChild(inner);
     tr.appendChild(th);
   }
 
   tableHead.innerHTML = "";
   tableHead.appendChild(tr);
+  syncFunnelStates();
+  syncPickerExpanded();
+  repositionValuesPicker();
 
-  if (previousFocusColumn !== null) {
-    const th = tr.querySelector<HTMLTableCellElement>(`th.sortable[data-column="${CSS.escape(previousFocusColumn)}"]`);
-    th?.querySelector<HTMLButtonElement>(".col-header-btn")?.focus();
+  if (previousFocus !== null) {
+    const th = tr.querySelector<HTMLTableCellElement>(`th.sortable[data-column="${CSS.escape(previousFocus.column)}"]`);
+    th?.querySelector<HTMLButtonElement>(previousFocus.kind === "filter" ? ".col-filter-btn" : ".col-header-btn")?.focus();
+  }
+}
+
+/** Whether `column` has an enabled, active "is any of" rule — what the
+ * header funnel's filled/accent state means. */
+function columnHasActiveValuesRule(column: string): boolean {
+  if (!state) return false;
+  return state.view.filterRules.some((r) => r.operator === "in" && r.column === column && r.enabled && isRuleActive(r, state!.headers));
+}
+
+/** Updates every header funnel's active state in place from the current
+ * rules. Called wherever the rules' effect on the badge is recomputed
+ * (renderFiltersButton), so it follows every path that changes a rule —
+ * picker OK, panel edits, the enable checkbox, remove, Turn Off Filters,
+ * reload — without waiting for a worker round-trip to re-render the head. */
+function syncFunnelStates(): void {
+  for (const funnel of tableHead.querySelectorAll<HTMLButtonElement>(".col-filter-btn")) {
+    const column = funnel.closest("th")?.dataset.column;
+    const active = column !== undefined && columnHasActiveValuesRule(column);
+    funnel.classList.toggle("active", active);
+    const icon = funnel.querySelector(".codicon");
+    if (icon) icon.className = `codicon ${active ? "codicon-filter-filled" : "codicon-filter"}`;
   }
 }
 
@@ -2137,7 +2258,7 @@ sortClearBtn.addEventListener("click", () => {
 // trigger, an outside click does not (the user clicked somewhere else on
 // purpose).
 
-const ALL_POPOVERS: HTMLElement[] = [columnsPopover, filterPanel, sortPopover, formatPopover];
+const ALL_POPOVERS: HTMLElement[] = [columnsPopover, filterPanel, sortPopover, formatPopover, valuesPopover];
 const POPOVER_TRIGGERS: HTMLButtonElement[] = [columnsBtn, filtersBtn, sortBtn, formatBtn];
 
 let activePopoverEl: HTMLElement | null = null;
@@ -2149,8 +2270,13 @@ let activePopoverTrigger: HTMLButtonElement | null = null;
  * `.popover`/`.panel` are `position: fixed` (see main.css), so viewport
  * coordinates from getBoundingClientRect apply directly. */
 function positionPopoverNear(el: HTMLElement, trigger: HTMLElement): void {
+  positionPopoverAtRect(el, trigger.getBoundingClientRect());
+}
+
+/** The clamp/flip logic behind positionPopoverNear, for any anchor
+ * rectangle (a zero-size one for a bare pointer position). */
+function positionPopoverAtRect(el: HTMLElement, triggerRect: { left: number; top: number; bottom: number }): void {
   const margin = 8;
-  const triggerRect = trigger.getBoundingClientRect();
   el.style.left = `${triggerRect.left}px`;
   el.style.top = `${triggerRect.bottom + 4}px`;
 
@@ -2167,6 +2293,7 @@ function positionPopoverNear(el: HTMLElement, trigger: HTMLElement): void {
 
 function repositionOpenPopover(): void {
   if (activePopoverEl && !activePopoverEl.hidden && activePopoverTrigger) positionPopoverNear(activePopoverEl, activePopoverTrigger);
+  repositionValuesPicker();
 }
 
 window.addEventListener("resize", repositionOpenPopover);
@@ -2176,6 +2303,7 @@ window.addEventListener("resize", repositionOpenPopover);
  * elsewhere, so it shouldn't be yanked back. */
 function closeAllPopovers(returnFocusToTrigger = false): void {
   const trigger = activePopoverTrigger;
+  discardValuesPicker();
   for (const el of ALL_POPOVERS) el.hidden = true;
   for (const btn of POPOVER_TRIGGERS) btn.setAttribute("aria-expanded", "false");
   activePopoverEl = null;
@@ -2222,15 +2350,27 @@ document.addEventListener(
   "click",
   (ev) => {
     const openEl = activePopoverEl && !activePopoverEl.hidden ? activePopoverEl : null;
-    if (!openEl) return;
+    if (!openEl && !valuesPicker) return;
     const target = ev.target as Node;
-    if (openEl.contains(target)) return; // inside the open popover itself
+    if (valuesPicker) {
+      if (valuesPopover.contains(target)) return; // inside the picker itself
+      // A picker opened from the Filters panel sits on top of it: a click
+      // elsewhere in the panel just cancels the picker and leaves the panel
+      // open (the click itself goes on to do whatever it was aimed at).
+      if (valuesPicker.anchor === "panel" && filterPanel.contains(target) && !isValuesTrigger(target)) {
+        discardValuesPicker();
+        return;
+      }
+    }
+    if (openEl && openEl.contains(target)) return; // inside the open popover itself
     if (contextMenu.contains(target)) return; // the cell context menu has its own click handling
     // Let any trigger button's own click handler run normally — it
     // already calls closeAllPopovers() before opening (or closes if it's
     // the same trigger toggling itself shut), so this correctly switches
-    // straight from one popover to another.
+    // straight from one popover to another. The header funnels and the
+    // panel's values buttons are triggers of the picker in the same way.
     if (target instanceof Element && POPOVER_TRIGGERS.some((btn) => btn.contains(target))) return;
+    if (isValuesTrigger(target)) return;
     // Only a row click needs its OWN action suppressed (the documented
     // "no row toggling through an open popover" trap) — every other
     // control (pager, headers, toolbar) should still do its own thing;
@@ -2335,6 +2475,7 @@ columnsHideAll.addEventListener("click", () => {
 const OPERATORS: { value: FilterOperator; label: string; needsValue: boolean }[] = [
   { value: "contains", label: "contains", needsValue: true },
   { value: "equals", label: "equals", needsValue: true },
+  { value: "in", label: "is any of", needsValue: false },
   { value: "startsWith", label: "starts with", needsValue: true },
   { value: "endsWith", label: "ends with", needsValue: true },
   { value: "regex", label: "regex", needsValue: true },
@@ -2408,6 +2549,7 @@ function renderFilterPanel(): void {
   for (const rule of state.view.filterRules) filterRulesEl.appendChild(buildRuleRow(rule));
   filterPanelTip.hidden = state.view.filterRules.length > 0;
   renderFiltersButton();
+  syncPickerExpanded();
 }
 
 /** Sentence-ordered rule row: `[enabled] [Keep|Hide] rows where [column]
@@ -2418,6 +2560,7 @@ function renderFilterPanel(): void {
 function buildRuleRow(rule: FilterRule): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "rule-row";
+  row.dataset.ruleId = rule.id;
 
   const enabledCheckbox = document.createElement("input");
   enabledCheckbox.type = "checkbox";
@@ -2480,6 +2623,8 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   columnSelect.value = rule.column ?? "";
   columnSelect.addEventListener("change", () => {
     rule.column = columnSelect.value === "" ? null : columnSelect.value;
+    // The ticked values belong to the old column's value list.
+    if (rule.values !== undefined) rule.values = [];
     syncRuleError();
     debouncedRequery();
   });
@@ -2496,7 +2641,7 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   operatorSelect.value = rule.operator;
   operatorSelect.addEventListener("change", () => {
     rule.operator = operatorSelect.value as FilterOperator;
-    valueInput.hidden = rule.operator === "isEmpty";
+    syncValueControls();
     state?.timedOutRuleIds.delete(rule.id);
     syncRuleError();
     debouncedRequery();
@@ -2506,7 +2651,6 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   const valueInput = document.createElement("input");
   valueInput.type = "text";
   valueInput.value = rule.value;
-  valueInput.hidden = rule.operator === "isEmpty";
   valueInput.placeholder = "Value";
   valueInput.addEventListener("input", () => {
     rule.value = valueInput.value;
@@ -2517,6 +2661,25 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     debouncedRequery();
   });
   row.appendChild(valueInput);
+
+  // "Is any of" swaps the text input (and the Aa toggle, which `in` ignores)
+  // for a button showing the chosen values; it opens the same picker the
+  // header funnels do. `value` and `caseSensitive` stay on the rule untouched.
+  const valuesBtn = document.createElement("button");
+  valuesBtn.type = "button";
+  valuesBtn.className = "values-btn";
+  valuesBtn.setAttribute("aria-haspopup", "dialog");
+  valuesBtn.setAttribute("aria-expanded", "false");
+  valuesBtn.addEventListener("click", () => {
+    if (!state) return;
+    if (valuesPicker && valuesPicker.anchor === "panel" && valuesPicker.ruleId === rule.id) {
+      closeValuesPicker(false);
+      return;
+    }
+    if (rule.column === null) return;
+    openValuesPicker({ column: rule.column, ruleId: rule.id, anchor: "panel" });
+  });
+  row.appendChild(valuesBtn);
 
   const caseCheckbox = document.createElement("input");
   caseCheckbox.type = "checkbox";
@@ -2532,6 +2695,37 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   caseLabel.appendChild(caseCheckbox);
   caseLabel.appendChild(document.createTextNode("Aa"));
   row.appendChild(caseLabel);
+
+  /** Which of the value controls this rule's condition uses. */
+  function syncValueControls(): void {
+    const isIn = rule.operator === "in";
+    valueInput.hidden = rule.operator === "isEmpty" || isIn;
+    caseLabel.hidden = isIn;
+    valuesBtn.hidden = !isIn;
+  }
+  syncValueControls();
+
+  function syncValuesBtn(): void {
+    const values = ruleValues(rule);
+    valuesBtn.disabled = rule.column === null;
+    valuesBtn.replaceChildren();
+    const text = document.createElement("span");
+    text.className = "values-btn-text";
+    if (values.length === 0) {
+      text.textContent = "Choose values…";
+    } else {
+      text.appendChild(document.createTextNode(summarizeValues(values)));
+      const count = document.createElement("span");
+      count.className = "muted";
+      count.textContent = ` (${values.length})`;
+      text.appendChild(count);
+    }
+    const chevron = document.createElement("span");
+    chevron.className = "codicon codicon-chevron-down";
+    chevron.setAttribute("aria-hidden", "true");
+    valuesBtn.appendChild(text);
+    valuesBtn.appendChild(chevron);
+  }
 
   const removeBtn = document.createElement("button");
   removeBtn.type = "button";
@@ -2563,7 +2757,11 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     const timedOut = state.timedOutRuleIds.has(rule.id);
     const regexInvalid = !timedOut && !isValidRule(rule);
     const columnMissing = !timedOut && !regexInvalid && rule.column !== null && state.headers.indexOf(rule.column) === -1;
-    const needsValue = !timedOut && !regexInvalid && !columnMissing && rule.operator !== "isEmpty" && rule.value === "";
+    const usable = !timedOut && !regexInvalid && !columnMissing;
+    const isIn = rule.operator === "in";
+    const needsValue = usable && !isIn && rule.operator !== "isEmpty" && rule.value === "";
+    const needsColumn = usable && isIn && rule.column === null;
+    const needsValues = usable && isIn && rule.column !== null && ruleValues(rule).length === 0;
     // isRuleActive is the single source of truth applyFilters itself uses
     // for "does this rule do anything"; gating on it here (rather than
     // just the checks above) keeps the UI from silently drifting out of
@@ -2573,13 +2771,15 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     // isRuleActive itself doesn't know about that webview-only concept.
     const inactive = timedOut || !isRuleActive(rule, state.headers);
     row.classList.toggle("rule-error", inactive && (timedOut || regexInvalid || columnMissing));
-    row.classList.toggle("rule-hint", inactive && needsValue);
+    row.classList.toggle("rule-hint", inactive && (needsValue || needsColumn || needsValues));
     error.innerHTML = "";
     let message: string | null = null;
     if (timedOut) message = "Skipped: pattern took over 2 s. Edit it to retry.";
     else if (regexInvalid) message = `Skipped: invalid regex (${regexErrorMessage(rule.value) ?? "unknown error"})`;
     else if (columnMissing) message = `Skipped: column "${rule.column}" isn't in this file`;
     else if (needsValue) message = "Enter a value";
+    else if (needsColumn) message = "Choose a column";
+    else if (needsValues) message = "Choose values";
     if (message !== null) {
       if (timedOut || regexInvalid || columnMissing) {
         const icon = document.createElement("span");
@@ -2590,11 +2790,365 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
       error.appendChild(document.createTextNode(message));
     }
     error.hidden = !inactive;
+    syncValuesBtn();
     renderFiltersButton();
   }
   syncRuleError();
 
   return row;
+}
+
+// ---- Values picker ("filter by values") ----------------------------------------
+//
+// One shared #values-popover, opened from a header funnel, the Filters
+// panel's "is any of" values button, or the cell context menu. It lists a
+// column's distinct values with row counts (computed by the worker over the
+// whole file, not the filtered view), and nothing changes in the table until
+// OK. See docs/spec.md §2.
+
+/** Most rows rendered in the list at once; the rest are reached by search. */
+const VALUES_MAX_RENDERED = 500;
+/** Longer values are cut for display only (the full value is the tooltip). */
+const VALUES_MAX_LABEL_CHARS = 80;
+
+interface ValuesPickerState {
+  column: string;
+  /** The `in` rule the picker edits, or null when OK should create one. */
+  ruleId: string | null;
+  /** That rule's mode (include/"Keep" for a new one) — drives the title. */
+  mode: FilterMode;
+  /** What the popover is anchored to, and where Escape returns focus:
+   * the column's header funnel, the panel rule's values button, or (for the
+   * context menu on a column that isn't in the table) a bare point. */
+  anchor: "funnel" | "panel" | "point";
+  point: { x: number; y: number } | null;
+  /** Id of the in-flight `distinct` request; a response must echo it. */
+  requestId: number;
+  /** The listed values (rule values the file lacks first, count 0), or null
+   * while the worker is still answering. */
+  items: DistinctValue[] | null;
+  truncated: boolean;
+  selected: Set<string>;
+  search: string;
+}
+
+let valuesPicker: ValuesPickerState | null = null;
+
+function findFunnel(column: string): HTMLButtonElement | null {
+  return tableHead.querySelector<HTMLButtonElement>(`th.sortable[data-column="${CSS.escape(column)}"] .col-filter-btn`);
+}
+
+function findValuesBtn(ruleId: string | null): HTMLButtonElement | null {
+  if (ruleId === null) return null;
+  return filterRulesEl.querySelector<HTMLButtonElement>(`.rule-row[data-rule-id="${CSS.escape(ruleId)}"] .values-btn`);
+}
+
+function isValuesTrigger(target: Node): boolean {
+  return target instanceof Element && target.closest(".col-filter-btn, .values-btn") !== null;
+}
+
+/** The first "is any of" rule on `column`, in either mode, enabled or not —
+ * the one a funnel (or the context menu item) edits. */
+function firstValuesRule(column: string): FilterRule | undefined {
+  return state?.view.filterRules.find((r) => r.operator === "in" && r.column === column);
+}
+
+/** Keeps every funnel's and values button's `aria-expanded` (and the funnel's
+ * "open" look) in line with the picker, after any of them were rebuilt. */
+function syncPickerExpanded(): void {
+  const p = valuesPicker;
+  for (const funnel of tableHead.querySelectorAll<HTMLButtonElement>(".col-filter-btn")) {
+    const expanded = p !== null && p.anchor === "funnel" && funnel.closest("th")?.dataset.column === p.column;
+    funnel.setAttribute("aria-expanded", String(expanded));
+  }
+  for (const btn of filterRulesEl.querySelectorAll<HTMLButtonElement>(".values-btn")) {
+    const expanded = p !== null && p.anchor === "panel" && btn.closest<HTMLElement>(".rule-row")?.dataset.ruleId === p.ruleId;
+    btn.setAttribute("aria-expanded", String(expanded));
+  }
+}
+
+function repositionValuesPicker(): void {
+  const p = valuesPicker;
+  if (!p || valuesPopover.hidden) return;
+  const anchorEl = p.anchor === "funnel" ? findFunnel(p.column) : p.anchor === "panel" ? findValuesBtn(p.ruleId) : null;
+  if (anchorEl) positionPopoverNear(valuesPopover, anchorEl);
+  else if (p.point) positionPopoverAtRect(valuesPopover, { left: p.point.x, top: p.point.y, bottom: p.point.y - 4 });
+}
+
+function onFunnelClick(column: string): void {
+  if (!state) return;
+  if (valuesPicker && valuesPicker.anchor === "funnel" && valuesPicker.column === column) {
+    closeValuesPicker(false); // same funnel again: toggle shut
+    return;
+  }
+  openValuesPicker({ column, ruleId: firstValuesRule(column)?.id ?? null, anchor: "funnel" });
+}
+
+/** Opens the picker for `column` from the cell context menu: under that
+ * column's funnel when the column is in the table, else at the click. */
+function openValuesPickerFromMenu(column: string, x: number, y: number): void {
+  const ruleId = firstValuesRule(column)?.id ?? null;
+  if (findFunnel(column)) openValuesPicker({ column, ruleId, anchor: "funnel" });
+  else openValuesPicker({ column, ruleId, anchor: "point", point: { x, y } });
+}
+
+function openValuesPicker(opts: {
+  column: string;
+  ruleId: string | null;
+  anchor: ValuesPickerState["anchor"];
+  point?: { x: number; y: number };
+}): void {
+  if (!state) return;
+  // From the Filters panel the panel must stay open underneath; from
+  // anywhere else this behaves like any other popover and closes the rest.
+  if (opts.anchor === "panel") discardValuesPicker();
+  else closeAllPopovers();
+
+  const rule = opts.ruleId === null ? undefined : state.view.filterRules.find((r) => r.id === opts.ruleId);
+  const mode: FilterMode = rule?.mode ?? "include";
+  const title = mode === "exclude" ? `Hide rows where “${opts.column}” is any of` : `Filter “${opts.column}” by values`;
+  valuesPicker = {
+    column: opts.column,
+    ruleId: rule?.id ?? null,
+    mode,
+    anchor: opts.anchor,
+    point: opts.point ?? null,
+    requestId: -1,
+    items: null,
+    truncated: false,
+    selected: new Set<string>(),
+    search: "",
+  };
+  valuesTitle.textContent = title;
+  valuesPopover.setAttribute("aria-label", title);
+  valuesSearch.value = "";
+  valuesPopover.hidden = false;
+  renderValuesPicker();
+  syncPickerExpanded();
+  repositionValuesPicker();
+  valuesSearch.focus();
+  requestDistinct();
+}
+
+function requestDistinct(): void {
+  const p = valuesPicker;
+  if (!p) return;
+  p.requestId = nextRequestId++;
+  postToWorker({ type: "distinct", requestId: p.requestId, column: p.column });
+}
+
+function onDistinctResult(msg: Extract<WorkerResponse, { type: "distinctResult" }>): void {
+  const p = valuesPicker;
+  if (!state || !p || msg.requestId !== p.requestId || msg.column !== p.column) return; // stale, or the picker is gone
+  const rule = p.ruleId === null ? undefined : state.view.filterRules.find((r) => r.id === p.ruleId);
+  if (rule) {
+    // Ticks start from the rule's values; one the file doesn't have (any
+    // more) is still listed — first, count 0 — so it can be unticked.
+    const listed = new Set(msg.values.map((v) => v.value));
+    const missing = [...new Set(ruleValues(rule))].filter((v) => !listed.has(v)).map((value) => ({ value, count: 0 }));
+    p.items = [...missing, ...msg.values];
+    p.selected = new Set(ruleValues(rule));
+  } else {
+    p.items = msg.values;
+    p.selected = new Set(msg.values.map((v) => v.value)); // no rule yet: start from everything
+  }
+  p.truncated = msg.truncated;
+  renderValuesPicker();
+  repositionValuesPicker(); // the list changed the popover's height
+}
+
+/** Display text for a value: blank gets its label; a very long one is cut. */
+function valueDisplayText(value: string): string {
+  if (value === "") return BLANKS_LABEL;
+  return value.length > VALUES_MAX_LABEL_CHARS ? `${value.slice(0, VALUES_MAX_LABEL_CHARS)}…` : value;
+}
+
+/** The listed values matching the search box (case-insensitive substring;
+ * "(Blanks)" matches the blank entry's label). */
+function shownValues(p: ValuesPickerState): DistinctValue[] {
+  if (!p.items) return [];
+  if (p.search === "") return p.items;
+  const needle = foldCase(p.search);
+  return p.items.filter((item) => foldCase(item.value === "" ? BLANKS_LABEL : item.value).includes(needle));
+}
+
+/** Everything that depends on the ticked set: the "X of Y selected" count and
+ * OK's enabled state. Cheap, so checkbox changes call it without re-rendering
+ * the list. */
+function renderValuesSelection(): void {
+  const p = valuesPicker;
+  if (!p) return;
+  valuesSelectedCount.textContent = p.items ? `${p.selected.size} of ${p.items.length} selected` : "";
+  valuesOkBtn.disabled = p.items === null || p.selected.size === 0;
+}
+
+function renderValuesPicker(): void {
+  const p = valuesPicker;
+  if (!p) return;
+  valuesList.replaceChildren();
+  valuesNoteShown.hidden = true;
+  valuesNoteTruncated.hidden = true;
+
+  if (p.items === null) {
+    const loading = document.createElement("p");
+    loading.className = "vp-empty";
+    loading.textContent = "Loading values…";
+    valuesList.appendChild(loading);
+    valuesSelectAllBtn.textContent = "Select all";
+    valuesSelectAllBtn.disabled = true;
+    valuesClearBtn.disabled = true;
+    renderValuesSelection();
+    return;
+  }
+
+  const shown = shownValues(p);
+  valuesSelectAllBtn.textContent = `Select all ${shown.length}`;
+  valuesSelectAllBtn.disabled = false;
+  valuesClearBtn.disabled = false;
+
+  if (shown.length === 0) {
+    const none = document.createElement("p");
+    none.className = "vp-empty";
+    none.textContent = "No values match";
+    valuesList.appendChild(none);
+  }
+  const fragment = document.createDocumentFragment();
+  for (const item of shown.slice(0, VALUES_MAX_RENDERED)) {
+    const label = document.createElement("label");
+    label.className = item.value === "" ? "vp-row blank" : "vp-row";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = p.selected.has(item.value);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) p.selected.add(item.value);
+      else p.selected.delete(item.value);
+      renderValuesSelection();
+    });
+    const text = document.createElement("span");
+    text.className = "v";
+    text.textContent = valueDisplayText(item.value);
+    if (item.value.length > VALUES_MAX_LABEL_CHARS) text.title = item.value.slice(0, 500);
+    const count = document.createElement("span");
+    count.className = "n";
+    count.textContent = item.count.toLocaleString();
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    label.appendChild(count);
+    fragment.appendChild(label);
+  }
+  valuesList.appendChild(fragment);
+
+  if (shown.length > VALUES_MAX_RENDERED) {
+    valuesNoteShown.textContent = `Showing the first ${VALUES_MAX_RENDERED} of ${shown.length}. Search to narrow.`;
+    valuesNoteShown.hidden = false;
+  }
+  if (p.truncated) {
+    valuesNoteTruncated.textContent = "This column has more than 10,000 distinct values; only the first 10,000 are listed.";
+    valuesNoteTruncated.hidden = false;
+  }
+  renderValuesSelection();
+}
+
+valuesSearch.addEventListener("input", () => {
+  if (!valuesPicker) return;
+  valuesPicker.search = valuesSearch.value;
+  renderValuesPicker();
+});
+
+// Select all / Clear act only on the values currently shown (those matching
+// the search), as in Google Sheets.
+valuesSelectAllBtn.addEventListener("click", () => {
+  const p = valuesPicker;
+  if (!p) return;
+  for (const item of shownValues(p)) p.selected.add(item.value);
+  renderValuesPicker();
+});
+
+valuesClearBtn.addEventListener("click", () => {
+  const p = valuesPicker;
+  if (!p) return;
+  for (const item of shownValues(p)) p.selected.delete(item.value);
+  renderValuesPicker();
+});
+
+valuesCancelBtn.addEventListener("click", () => closeValuesPicker(true));
+valuesOkBtn.addEventListener("click", () => applyValuesPicker());
+
+// Enter in the search box or on a checkbox is OK (when enabled); on a button
+// it keeps its native meaning (Cancel, Clear, ...). An Enter that only commits
+// an IME composition in the search box is not OK. Escape is handled by the
+// document-level keydown handler at the bottom of this file.
+valuesPopover.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter" || ev.isComposing || !(ev.target instanceof HTMLInputElement)) return;
+  ev.preventDefault();
+  if (!valuesOkBtn.disabled) applyValuesPicker();
+});
+
+/** Hides the picker and forgets its state without touching focus. */
+function discardValuesPicker(): void {
+  valuesPicker = null;
+  valuesPopover.hidden = true;
+  syncPickerExpanded();
+}
+
+/** Where focus belongs after the picker goes away: the control it was opened
+ * from, found again by column / rule id since the header and the panel's
+ * rows are rebuilt by renders. */
+function focusPickerOrigin(p: ValuesPickerState): void {
+  if (p.anchor === "funnel") {
+    findFunnel(p.column)?.focus();
+  } else if (p.anchor === "panel") {
+    const btn = findValuesBtn(p.ruleId);
+    if (btn) btn.focus();
+    else if (!filterPanel.hidden) addRuleBtn.focus(); // the rule's row is gone
+  }
+}
+
+function closeValuesPicker(returnFocus: boolean): void {
+  const p = valuesPicker;
+  discardValuesPicker();
+  if (returnFocus && p) focusPickerOrigin(p);
+}
+
+/** OK: turns the ticked set into the column's "is any of" rule. A Keep rule
+ * that would let every value through is dropped (or never created) instead of
+ * stored as a no-op; anything else creates/updates the rule, enabled. */
+function applyValuesPicker(): void {
+  const p = valuesPicker;
+  if (!state || !p || p.items === null || p.selected.size === 0) return;
+  const values = p.items.filter((item) => p.selected.has(item.value)).map((item) => item.value);
+  const rule = p.ruleId === null ? undefined : state.view.filterRules.find((r) => r.id === p.ruleId);
+  const mode = rule?.mode ?? "include";
+  const everything = !p.truncated && values.length === p.items.length;
+
+  if (mode === "include" && everything) {
+    if (rule) {
+      state.view.filterRules = state.view.filterRules.filter((r) => r.id !== rule.id);
+      state.timedOutRuleIds.delete(rule.id);
+    }
+  } else if (rule) {
+    rule.values = values;
+    rule.enabled = true;
+  } else {
+    state.view.filterRules.push({
+      id: newRuleId(),
+      column: p.column,
+      operator: "in",
+      value: "",
+      values,
+      mode: "include",
+      caseSensitive: false,
+      enabled: true,
+    });
+  }
+
+  discardValuesPicker();
+  renderFilterPanel(); // also refreshes the Filters badge and the funnels
+  requery();
+  saveState();
+  // After the panel re-render (its rows were rebuilt); a header re-render
+  // when the new page arrives restores focus to the funnel by column.
+  focusPickerOrigin(p);
 }
 
 // ---- Quick-add filter via cell context menu ----------------------------------------------------------
@@ -2673,8 +3227,18 @@ function onCellContextMenu(ev: MouseEvent, column: string, value: string, row: W
   excludeItem.textContent = `Hide rows where ${column} = "${label}"`;
   excludeItem.addEventListener("click", () => addQuickFilter(column, value, "exclude"));
 
+  const valuesItem = document.createElement("button");
+  valuesItem.type = "button";
+  valuesItem.setAttribute("role", "menuitem");
+  valuesItem.textContent = `Filter ${column} by Values…`;
+  valuesItem.addEventListener("click", () => {
+    closeContextMenu();
+    openValuesPickerFromMenu(column, ev.clientX, ev.clientY);
+  });
+
   contextMenu.appendChild(includeItem);
   contextMenu.appendChild(excludeItem);
+  contextMenu.appendChild(valuesItem);
   contextMenu.appendChild(document.createElement("hr"));
   for (const item of buildCopyRowItems(row)) contextMenu.appendChild(item);
 
@@ -2831,6 +3395,11 @@ document.addEventListener("keydown", (ev) => {
 
   if (ev.key === "Escape") {
     if (!contextMenu.hidden) closeContextMenu();
+    // The picker closes alone: a Filters panel underneath it stays open.
+    if (valuesPicker) {
+      closeValuesPicker(true);
+      return;
+    }
     if (activePopoverEl) closeAllPopovers(true);
     return;
   }

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+**Added**
+- Filter a column by several values at once: click the funnel next to a column name,
+  tick the values to keep, and press OK. The list shows each distinct value with its
+  row count, a search box, and **Select all** / **Clear**; the funnel turns blue while
+  the column is filtered.
+- A new **is any of** condition in **Filters** (Keep or Hide), with a button that opens
+  the same value list.
+- **Filter ‹column› by Values…** in the right-click menu.
+
 ## 0.5.0
 
 **Added**

@@ -20,6 +20,11 @@
 // that's merely queued behind an earlier one, or a slow sort *after*
 // filtering, can never falsely trip it.
 //
+// `distinct` answers the "filter by values" picker with a column's distinct
+// values and row counts over the whole parsed file (never the filtered
+// view). The result is cached per column name — see `distinctCache` — until
+// the next `init`.
+//
 // Sort keys per column (kind/num/collator rank) are cached here — see
 // `sortKeyCache` — and reused across every subsequent query until the next
 // `init`, since they're a pure function of the column's values, which
@@ -35,6 +40,7 @@
 
 import { profileColumns } from "../core/columns";
 import { parseCsv } from "../core/csvParse";
+import { distinctValues, type DistinctResult } from "../core/distinct";
 import { applyFilters } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
@@ -63,6 +69,11 @@ let currentView: number[] | null = null;
  * name. See core/sort.ts's buildColumnSortKeys doc comment for why keys
  * built over the full dataset still correctly order any filtered subset. */
 let sortKeyCache = new Map<string, ResolvedCellSortKey[]>();
+/** Per-column distinct values (see core/distinct.ts), keyed by column name
+ * and reused when the picker is reopened; cleared by `init` since a fresh
+ * parse changes the data. Counts cover every row, so no filter or sort
+ * change can invalidate an entry. */
+let distinctCache = new Map<string, DistinctResult>();
 
 function post(message: WorkerResponse): void {
   (self as unknown as Worker).postMessage(message);
@@ -76,6 +87,7 @@ function onInit(requestId: number, text: string, options: { delimiter?: string; 
   rawRows.forEach((cells, id) => idByRowRef.set(cells, id));
   currentView = null;
   sortKeyCache = new Map();
+  distinctCache = new Map();
 
   post({
     type: "initResult",
@@ -123,6 +135,16 @@ function onQuery(requestId: number, quickSearch: string, filterRules: FilterRule
   post({ type: "queryResult", requestId, filteredCount: sortedIds.length });
 }
 
+function onDistinct(requestId: number, column: string): void {
+  let result = distinctCache.get(column);
+  if (!result) {
+    const columnIndex = headers.indexOf(column);
+    result = columnIndex === -1 ? { values: [], truncated: false } : distinctValues(rawRows, columnIndex);
+    distinctCache.set(column, result);
+  }
+  post({ type: "distinctResult", requestId, column, values: result.values, truncated: result.truncated });
+}
+
 function onPage(requestId: number, page: number, pageSize: number): void {
   const view = currentView ?? rawRows.map((_, id) => id);
   const { start, end } = pageSlice(view.length, page, pageSize);
@@ -146,6 +168,9 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
         break;
       case "page":
         onPage(msg.requestId, msg.page, msg.pageSize);
+        break;
+      case "distinct":
+        onDistinct(msg.requestId, msg.column);
         break;
     }
   } catch (err) {

@@ -109,6 +109,7 @@ test("right-clicking the evil cell opens the quick-add context menu without exec
     "Copy Value",
     new RegExp(`^Show only rows where ${escapedHeader} = "`),
     new RegExp(`^Hide rows where ${escapedHeader} = "`),
+    new RegExp(`^Filter ${escapedHeader} by Values…$`),
     "Copy Row as CSV",
     "Copy Row as JSON",
   ]);

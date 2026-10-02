@@ -460,6 +460,145 @@ body.vscode-reduce-motion .working-indicator::before {
   gap: 2px;
 }
 
+/* The Filters panel's "is any of" value control: looks like a select, shows
+ * the chosen values, opens the values picker. */
+.values-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 140px;
+  max-width: 260px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-settings-textInputBorder, var(--vscode-dropdown-border)));
+  padding: 3px 6px;
+}
+
+.values-btn:hover:not(:disabled) {
+  background: var(--vscode-input-background);
+  border-color: var(--vscode-focusBorder);
+}
+
+.values-btn:disabled:hover {
+  background: var(--vscode-input-background);
+}
+
+.values-btn-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.values-btn .muted {
+  color: var(--vscode-descriptionForeground);
+}
+
+.values-btn .codicon {
+  flex: 0 0 auto;
+}
+
+/* The shared "filter by values" picker (header funnels, the Filters panel's
+ * values button, the cell context menu). */
+.values-popover {
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.values-popover .vp-title {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.values-popover input[type="search"] {
+  width: 100%;
+}
+
+.values-popover .vp-links {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.values-popover .vp-links .link-btn {
+  text-decoration: none;
+}
+
+.values-popover .vp-links .link-btn:disabled {
+  opacity: 0.5;
+}
+
+.values-popover .vp-count {
+  margin-left: auto;
+}
+
+.values-popover .vp-list {
+  max-height: 220px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 2px;
+}
+
+.values-popover .vp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+
+.values-popover .vp-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.values-popover .vp-row .v {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.values-popover .vp-row .n {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.values-popover .vp-row.blank .v {
+  font-style: italic;
+  color: var(--vscode-descriptionForeground);
+}
+
+.values-popover .vp-empty {
+  margin: 0;
+  padding: 6px 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.values-popover .vp-note {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.values-popover .vp-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .table-scroll {
   flex: 1;
   overflow: auto;
@@ -506,6 +645,76 @@ th.sortable {
 
 th.sortable:hover {
   background: var(--vscode-list-hoverBackground);
+}
+
+/* A header cell's content: the sort button takes the remaining width (a
+ * long column name ellipsizes inside it) and the "filter by values" funnel
+ * after it never shrinks or gets clipped. */
+.th-inner {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.th-inner .col-header-btn {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.col-header-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-header-btn .sort-indicator {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Always visible but dim, so it's discoverable without cluttering the
+ * header; full strength on hover/keyboard focus, while its picker is open,
+ * when active, and always in high-contrast themes. */
+.col-filter-btn {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  padding: 1px 2px;
+  line-height: 1;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.col-filter-btn .codicon {
+  font-size: 13px;
+}
+
+.col-filter-btn:hover,
+.col-filter-btn:focus-visible,
+.col-filter-btn[aria-expanded="true"] {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.col-filter-btn.active {
+  opacity: 1;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+body.vscode-high-contrast .col-filter-btn,
+body.vscode-high-contrast-light .col-filter-btn {
+  opacity: 1;
+}
+
+@media (forced-colors: active) {
+  .col-filter-btn {
+    opacity: 1;
+  }
 }
 
 /* Fills the whole <th> (table-layout: auto stretches columns to the

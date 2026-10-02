@@ -13,6 +13,7 @@
 // without pulling either into the other.
 
 import type { ColumnProfile } from "../core/columns";
+import type { DistinctValue } from "../core/distinct";
 import type { FilterRule, SortKey } from "../core/types";
 
 export interface ParseOptionsMsg {
@@ -24,7 +25,13 @@ export interface ParseOptionsMsg {
 export type WorkerRequest =
   | { type: "init"; requestId: number; text: string; options: ParseOptionsMsg }
   | { type: "query"; requestId: number; quickSearch: string; filterRules: FilterRule[]; sortKeys: SortKey[] }
-  | { type: "page"; requestId: number; page: number; pageSize: number };
+  | { type: "page"; requestId: number; page: number; pageSize: number }
+  /** Distinct values (with row counts) of one column, for the "filter by
+   * values" picker. Counted over every parsed row, NOT the currently
+   * filtered view — the picker lists what the file contains, so a value
+   * hidden by another filter can still be ticked. An unknown column answers
+   * with an empty list. */
+  | { type: "distinct"; requestId: number; column: string };
 
 export interface WorkerRow {
   id: number;
@@ -62,6 +69,7 @@ export type WorkerResponse =
   | { type: "filterDone"; requestId: number }
   | { type: "queryResult"; requestId: number; filteredCount: number }
   | { type: "pageResult"; requestId: number; rows: WorkerRow[] }
+  | { type: "distinctResult"; requestId: number; column: string; values: DistinctValue[]; truncated: boolean }
   | { type: "workerError"; requestId: number; message: string };
 
 /** How long the main thread waits, after a `query` request containing an

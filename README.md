@@ -24,7 +24,8 @@ back to the text editor to make edits.
 - **Reads long values properly.** Row details wrap prose, pretty-print JSON, clamp long
   values with **More**, and have a copy button per field.
 - **Find rows fast.** Search all columns, or add filter rules ("Keep rows where status
-  equals open"). Right-click any value to filter by it or copy it.
+  equals open"). Click the funnel in a column header to pick several values from that
+  column at once, like a spreadsheet. Right-click any value to filter by it or copy it.
 - **Sort** by clicking a header; Shift+click adds a second key.
 - **Handles messy exports.** Detects comma, semicolon, tab or pipe; warns and offers a
   one-click fix when quotes are malformed; reloads when the file changes on disk.
@@ -60,6 +61,14 @@ can't apply — its column is gone, or it has no value yet — is skipped with a
 rather than hiding everything, and a regex that takes more than 2 seconds is skipped
 instead of freezing the view. The button shows how many rules are active
 (**Filters • 2**).
+
+To keep or hide several exact values of one column, click the funnel next to its name
+in the header (or right-click a cell and choose **Filter ‹column› by Values…**). A list
+shows each distinct value with how many rows have it, with a search box and **Select
+all** / **Clear** for the values you've searched to; nothing changes until you press
+**OK**. The funnel turns blue while that column is filtered. The result is an *is any
+of* rule in **Filters**, where you can switch it to **Hide** or edit its values. The
+list always counts the whole file, not just the rows currently showing.
 
 Click a column header to sort ascending, then descending, then not at all; Shift+click
 adds another key. **Sort** lists every sort key, lets you flip or remove each one, and

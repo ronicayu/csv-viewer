@@ -26,7 +26,8 @@ export type FilterOperator =
   | "gt"
   | "lt"
   | "gte"
-  | "lte";
+  | "lte"
+  | "in";
 
 export type FilterMode = "include" | "exclude";
 
@@ -36,6 +37,14 @@ export interface FilterRule {
   column: string | null;
   operator: FilterOperator;
   value: string;
+  /**
+   * Used only by the `in` ("is any of") operator: the exact cell strings to
+   * match (`""` matches empty cells). Optional because state saved before
+   * this operator existed lacks it — a missing `values` is treated as `[]`.
+   * `in` ignores `value` and `caseSensitive`, which stay on the rule untouched
+   * so switching the condition back and forth doesn't lose them.
+   */
+  values?: string[];
   mode: FilterMode;
   caseSensitive: boolean;
   enabled: boolean;

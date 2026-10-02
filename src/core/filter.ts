@@ -34,7 +34,8 @@ export function regexErrorMessage(value: string): string | null {
  * Whether a rule can actually apply right now, independent of its
  * `enabled` checkbox: its regex (if any) parses, its column (if any) still
  * exists in `headers`, and — for every operator except `isEmpty`, which
- * takes no value — it has a non-empty value. `applyFilters` uses this (in
+ * takes no value — it has a non-empty value (`in` takes a non-empty
+ * `values` list on a specific column instead). `applyFilters` uses this (in
  * combination with `enabled`) to decide which rules take part; the UI uses
  * it to decide whether to show a "column not found" / "enter a value"
  * hint on a rule row, so the two always agree on what "active" means.
@@ -50,12 +51,22 @@ export function regexErrorMessage(value: string): string | null {
 export function isRuleActive(rule: FilterRule, headers: string[]): boolean {
   if (!isValidRule(rule)) return false;
   if (rule.column !== null && headers.indexOf(rule.column) === -1) return false;
+  if (rule.operator === "in") {
+    // "Is any of" takes a list, not `value`, and only makes sense against one
+    // specific column (the picker lists that column's values): "Any column"
+    // is inactive, as is an empty list (which would otherwise match nothing).
+    return rule.column !== null && Array.isArray(rule.values) && rule.values.length > 0;
+  }
   if (rule.operator !== "isEmpty" && rule.value === "") return false;
   return true;
 }
 
-function cellMatches(cell: string, rule: FilterRule, re: RegExp | null): boolean {
+function cellMatches(cell: string, rule: FilterRule, re: RegExp | null, valueSet: Set<string> | null): boolean {
   switch (rule.operator) {
+    case "in":
+      // Exact, case-sensitive, untrimmed — these are the literal strings the
+      // picker listed, not a user-typed pattern.
+      return valueSet !== null && valueSet.has(cell);
     case "isEmpty":
       return cell.trim() === "";
     case "contains":
@@ -105,17 +116,21 @@ interface CompiledRule {
   rule: FilterRule;
   columnIndex: number | null;
   re: RegExp | null;
+  /** The `in` operator's values as a Set, built once per rule here rather
+   * than per row. */
+  valueSet: Set<string> | null;
 }
 
 function compileRule(rule: FilterRule, headers: string[]): CompiledRule {
   const re = rule.operator === "regex" ? new RegExp(rule.value, rule.caseSensitive ? "" : "i") : null;
-  return { rule, columnIndex: rule.column === null ? null : headers.indexOf(rule.column), re };
+  const valueSet = rule.operator === "in" ? new Set(rule.values ?? []) : null;
+  return { rule, columnIndex: rule.column === null ? null : headers.indexOf(rule.column), re, valueSet };
 }
 
 function ruleMatchesRow(row: string[], c: CompiledRule): boolean {
-  if (c.columnIndex === null) return row.some((cell) => cellMatches(cell, c.rule, c.re));
+  if (c.columnIndex === null) return row.some((cell) => cellMatches(cell, c.rule, c.re, c.valueSet));
   if (c.columnIndex === -1) return false;
-  return cellMatches(row[c.columnIndex] ?? "", c.rule, c.re);
+  return cellMatches(row[c.columnIndex] ?? "", c.rule, c.re, c.valueSet);
 }
 
 export function applyFilters(

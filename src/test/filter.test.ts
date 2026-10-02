@@ -199,3 +199,122 @@ describe("isRuleActive: the single source of truth applyFilters and the UI both 
     }
   });
 });
+
+describe("operator: in (is any of)", () => {
+  // Two blanks (an empty cell and an absent one), padded/cased variants, a
+  // literal "__proto__" — everything the exact-match contract must not blur.
+  const inHeaders = ["name", "tag"];
+  const inRows: string[][] = [
+    ["r1", "red"],
+    ["r2", "Red"],
+    ["r3", " red"],
+    ["r4", "blue"],
+    ["r5", ""],
+    ["r6"], // ragged: missing cell reads as ""
+    ["r7", "__proto__"],
+  ];
+  const names = (out: string[][]): string[] => out.map((r) => r[0]);
+  const inRule = (values: string[] | undefined, overrides: Partial<FilterRule> = {}): FilterRule =>
+    rule({ column: "tag", operator: "in", values, ...overrides });
+
+  it("include (Keep) keeps only rows whose cell is exactly one of the values", () => {
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["red", "blue"])]))).toEqual(["r1", "r4"]);
+  });
+
+  it("exclude (Hide) drops those rows and keeps the rest", () => {
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["red", "blue"], { mode: "exclude" })]))).toEqual([
+      "r2",
+      "r3",
+      "r5",
+      "r6",
+      "r7",
+    ]);
+  });
+
+  it("is case-exact: 'red' does not match 'Red', whatever caseSensitive says", () => {
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["Red"], { caseSensitive: false })]))).toEqual(["r2"]);
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["Red"], { caseSensitive: true })]))).toEqual(["r2"]);
+  });
+
+  it("does not trim: ' red' and 'red' are different values", () => {
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule([" red"])]))).toEqual(["r3"]);
+  });
+
+  it("'' in values matches empty cells, including a missing cell in a ragged row", () => {
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule([""])]))).toEqual(["r5", "r6"]);
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["", "blue"], { mode: "exclude" })]))).toEqual([
+      "r1",
+      "r2",
+      "r3",
+      "r7",
+    ]);
+  });
+
+  it("matches Object.prototype-ish values like any other string", () => {
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["__proto__"])]))).toEqual(["r7"]);
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["constructor", "toString"])]))).toEqual([]);
+  });
+
+  it("ignores `value` (a stale value from another condition has no effect)", () => {
+    expect(names(applyFilters(inHeaders, inRows, "", [inRule(["blue"], { value: "red" })]))).toEqual(["r4"]);
+  });
+
+  it("combines with other rules and quick search by AND", () => {
+    const rules = [inRule(["red", "Red", "blue"]), rule({ column: "name", operator: "equals", value: "r2", mode: "exclude" })];
+    expect(names(applyFilters(inHeaders, inRows, "", rules))).toEqual(["r1", "r4"]);
+    expect(names(applyFilters(inHeaders, inRows, "blue", [inRule(["red", "blue"])]))).toEqual(["r4"]);
+  });
+
+  it("a missing or undefined `values` (state saved before this operator) is inactive and filters nothing", () => {
+    for (const r of [inRule(undefined), inRule(undefined, { mode: "exclude" })]) {
+      expect(isRuleActive(r, inHeaders)).toBe(false);
+      expect(applyFilters(inHeaders, inRows, "", [r])).toEqual(inRows);
+    }
+  });
+
+  it("builds its lookup once per call and tolerates a large values list", () => {
+    const many = Array.from({ length: 5000 }, (_, i) => `v${i}`);
+    const rowsMany = many.map((v) => [v, v]);
+    expect(applyFilters(inHeaders, rowsMany, "", [inRule(many.slice(0, 10))])).toHaveLength(10);
+  });
+});
+
+describe("isRuleActive for the in operator", () => {
+  const inRule = (overrides: Partial<FilterRule>): FilterRule =>
+    rule({ column: "city", operator: "in", value: "", values: ["NYC"], ...overrides });
+
+  it("is true for a specific, existing column with a non-empty values list (an empty `value` does not matter)", () => {
+    expect(isRuleActive(inRule({}), headers)).toBe(true);
+    expect(isRuleActive(inRule({ values: [""] }), headers)).toBe(true);
+  });
+
+  it("is false for an empty or missing values list", () => {
+    expect(isRuleActive(inRule({ values: [] }), headers)).toBe(false);
+    expect(isRuleActive(inRule({ values: undefined }), headers)).toBe(false);
+  });
+
+  it("is false for 'Any column', even with values", () => {
+    expect(isRuleActive(inRule({ column: null }), headers)).toBe(false);
+  });
+
+  it("is false when the column is not in the file", () => {
+    expect(isRuleActive(inRule({ column: "ghost" }), headers)).toBe(false);
+  });
+
+  it("agrees with applyFilters: every inactive in rule has zero effect, in both modes", () => {
+    const inactive: Partial<FilterRule>[] = [{ values: [] }, { values: undefined }, { column: null }, { column: "ghost" }];
+    for (const overrides of inactive) {
+      for (const mode of ["include", "exclude"] as const) {
+        const r = inRule({ ...overrides, mode });
+        expect(isRuleActive(r, headers)).toBe(false);
+        expect(applyFilters(headers, rows, "", [r])).toEqual(rows);
+      }
+    }
+  });
+
+  it("agrees with applyFilters: an active in rule changes the result", () => {
+    const r = inRule({ column: "city", values: ["NYC"] });
+    expect(isRuleActive(r, headers)).toBe(true);
+    expect(applyFilters(headers, rows, "", [r])).toEqual([["Alice", "30", "NYC"]]);
+  });
+});
