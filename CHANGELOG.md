@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+**Changed**
+- Published under the `markdown-collab` publisher, so the extension id is now
+  `markdown-collab.csv-viewer`. No functional changes.
+
 ## 0.6.0
 
 **Added**
