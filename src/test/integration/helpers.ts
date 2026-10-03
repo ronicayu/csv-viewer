@@ -4,7 +4,7 @@
 import * as vscode from "vscode";
 import type { HostToWebviewMessage, SaveStateMessage, WebviewToHostMessage } from "../../core/types";
 
-export const EXTENSION_ID = "markdown-collab.csv-viewer";
+export const EXTENSION_ID = "ronica.csv-row-details";
 
 /** Mirrors extension.ts's `CsvViewerTestApi` shape. Declared locally
  * (rather than imported) so this file — and everything under

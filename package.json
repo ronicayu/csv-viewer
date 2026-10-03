@@ -1,9 +1,9 @@
 {
-  "name": "csv-viewer",
+  "name": "csv-row-details",
   "displayName": "CSV Viewer: Table + Row Details",
   "description": "Read wide CSV/TSV files without scrolling sideways: keep key columns in the table, expand any row to read long text and JSON. Filter, sort, live reload.",
-  "version": "0.7.0",
-  "publisher": "markdown-collab",
+  "version": "0.7.1",
+  "publisher": "ronica",
   "license": "MIT",
   "icon": "media/icon.png",
   "pricing": "Free",

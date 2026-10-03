@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       vsix_name: ${{ steps.package.outputs.vsix_name }}
+      publisher: ${{ steps.package.outputs.publisher }}
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +35,7 @@ jobs:
           npm run package
           vsix=$(ls -1 *.vsix | head -n 1)
           echo "vsix_name=$vsix" >> "$GITHUB_OUTPUT"
+          echo "publisher=$(node -p "require('./package.json').publisher")" >> "$GITHUB_OUTPUT"
 
       - name: Upload .vsix artifact
         uses: actions/upload-artifact@v4
@@ -96,7 +98,12 @@ jobs:
         if: ${{ env.OVSX_PAT != '' }}
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: npx ovsx publish "${{ needs.build.outputs.vsix_name }}" -p "$OVSX_PAT"
+        # Open VSX refuses to publish into a namespace that doesn't exist yet,
+        # and never creates one on publish. create-namespace fails once it
+        # exists, so that failure is ignored; publish itself is not.
+        run: |
+          npx ovsx create-namespace "${{ needs.build.outputs.publisher }}" -p "$OVSX_PAT" || echo "namespace already exists"
+          npx ovsx publish "${{ needs.build.outputs.vsix_name }}" -p "$OVSX_PAT"
 
       - name: Skip (no OVSX_PAT secret configured)
         if: ${{ env.OVSX_PAT == '' }}

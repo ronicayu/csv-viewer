@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1
+
+**Changed**
+- Extension id is now `ronica.csv-row-details` (the Marketplace requires a globally
+  unique `name`, and `csv-viewer` is taken). Earlier ids (`ronica.csv-viewer`,
+  `markdown-collab.csv-viewer`) are separate extensions: uninstall them first. No
+  functional changes.
+
 ## 0.7.0
 
 **Added**

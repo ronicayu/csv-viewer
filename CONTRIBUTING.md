@@ -57,13 +57,13 @@ safety fix, the regex-timeout watchdog, the Web Worker architecture — live in
 
 ## Installing from a `.vsix`
 
-Build the package with `npm run package`, which produces `csv-viewer-<version>.vsix`.
+Build the package with `npm run package`, which produces `csv-row-details-<version>.vsix`.
 
 **VS Code:** Extensions view → `···` menu → **Install from VSIX…** → select the file.
-Or from the command line: `code --install-extension csv-viewer-<version>.vsix`.
+Or from the command line: `code --install-extension csv-row-details-<version>.vsix`.
 
 **Cursor / Windsurf:** Extensions view → `···` menu → **Install from VSIX…** → select
-the file. Or from the command line: `cursor --install-extension csv-viewer-<version>.vsix`
+the file. Or from the command line: `cursor --install-extension csv-row-details-<version>.vsix`
 (or `windsurf --install-extension ...`).
 
 ## Publishing
@@ -73,8 +73,8 @@ Package once and publish the same file to both registries:
 ```sh
 npm run compile
 npx vsce package --no-dependencies
-npx vsce publish --no-dependencies --packagePath csv-viewer-<version>.vsix
-npx ovsx publish csv-viewer-<version>.vsix -p $OVSX_PAT
+npx vsce publish --no-dependencies --packagePath csv-row-details-<version>.vsix
+npx ovsx publish csv-row-details-<version>.vsix -p $OVSX_PAT
 ```
 
 `--no-dependencies` is correct because `papaparse` and `markdown-it` are bundled into
