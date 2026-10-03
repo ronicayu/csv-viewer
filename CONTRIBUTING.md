@@ -77,7 +77,7 @@ npx vsce publish --no-dependencies --packagePath csv-viewer-<version>.vsix
 npx ovsx publish csv-viewer-<version>.vsix -p $OVSX_PAT
 ```
 
-`--no-dependencies` is correct because `papaparse` is bundled into
+`--no-dependencies` is correct because `papaparse` and `markdown-it` are bundled into
 `out/webview/*.js` by esbuild — the packaged extension never needs `node_modules` at
 runtime. Verify the package contents with `npx vsce ls --no-dependencies` before
 publishing; it should list exactly the runtime files (`package.json`, `README.md`,

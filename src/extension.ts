@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { normalizeColumnFlags } from "./core/columns";
 import { normalizePageSize } from "./core/paging";
 import {
   createDefaultViewState,
@@ -596,6 +597,7 @@ class CsvEditorProvider implements vscode.CustomReadonlyEditorProvider<CsvDocume
       stored.pageSize = normalizePageSize(stored.pageSize);
       stored.delimiter = typeof stored.delimiter === "string" ? stored.delimiter : "";
       stored.quotes = typeof stored.quotes === "boolean" ? stored.quotes : true;
+      stored.markdownColumns = normalizeColumnFlags(stored.markdownColumns);
       return stored;
     }
 

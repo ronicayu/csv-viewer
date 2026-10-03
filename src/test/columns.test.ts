@@ -4,10 +4,14 @@ import {
   defaultVisibility,
   detailFieldsFor,
   detailOnlyColumns,
+  getColumnFlag,
   getVisibility,
+  isAutoMarkdownColumn,
   isNumericColumn,
+  normalizeColumnFlags,
   profileColumns,
   reconcileVisibility,
+  setColumnFlag,
   visibleColumns,
 } from "../core/columns";
 
@@ -96,7 +100,7 @@ describe("profileColumns", () => {
     const headers = ["a"];
     const rows = [[""], [""], [""]];
     const profile = profileColumns(headers, rows)[0];
-    expect(profile).toEqual({ medianLength: 0, multilineShare: 0, jsonShare: 0, numericShare: 0 });
+    expect(profile).toEqual({ medianLength: 0, multilineShare: 0, jsonShare: 0, numericShare: 0, markdownShare: 0 });
   });
 
   it("multilineShare counts values containing a line break", () => {
@@ -123,6 +127,25 @@ describe("profileColumns", () => {
     expect(profileColumns(headers, rows, 2)[0].jsonShare).toBe(0);
   });
 
+  it("markdownShare counts non-empty values that look like Markdown, ignoring empties", () => {
+    const headers = ["a"];
+    const rows = [["# Title\nbody"], ["plain text"], [""], ["[docs](https://example.com)"], ["more plain"]];
+    // 2 of the 4 non-empty values look like Markdown.
+    expect(profileColumns(headers, rows)[0].markdownShare).toBe(0.5);
+  });
+
+  it("markdownShare is 0 for plain prose, numbers and JSON", () => {
+    const headers = ["a"];
+    const rows = [["just words"], ["42"], ['{"a":"# not markdown"}'], ["see item #1 or 1. maybe * here"]];
+    expect(profileColumns(headers, rows)[0].markdownShare).toBe(0);
+  });
+
+  it("markdownShare only samples the first sampleSize rows", () => {
+    const headers = ["a"];
+    const rows = [["x"], ["x"], ["# heading"]]; // the Markdown row is outside a sample of 2
+    expect(profileColumns(headers, rows, 2)[0].markdownShare).toBe(0);
+  });
+
   it("a ragged row (fewer cells than headers) contributes nothing for the missing column", () => {
     const headers = ["a", "b"];
     const rows = [["x"], ["x", "y"]]; // row 0 has no value for "b"
@@ -134,12 +157,12 @@ describe("profileColumns", () => {
 
 describe("isNumericColumn", () => {
   it("true at or above the 90% numeric threshold", () => {
-    const profile: ColumnProfile = { medianLength: 2, multilineShare: 0, jsonShare: 0, numericShare: 0.9 };
+    const profile: ColumnProfile = { medianLength: 2, multilineShare: 0, jsonShare: 0, numericShare: 0.9, markdownShare: 0 };
     expect(isNumericColumn(profile)).toBe(true);
   });
 
   it("false below the threshold", () => {
-    const profile: ColumnProfile = { medianLength: 2, multilineShare: 0, jsonShare: 0, numericShare: 0.89 };
+    const profile: ColumnProfile = { medianLength: 2, multilineShare: 0, jsonShare: 0, numericShare: 0.89, markdownShare: 0 };
     expect(isNumericColumn(profile)).toBe(false);
   });
 
@@ -148,10 +171,45 @@ describe("isNumericColumn", () => {
   });
 });
 
+describe("isAutoMarkdownColumn", () => {
+  it("true at or above the 10% threshold, false below", () => {
+    const base: ColumnProfile = { medianLength: 5, multilineShare: 0, jsonShare: 0, numericShare: 0, markdownShare: 0.1 };
+    expect(isAutoMarkdownColumn(base)).toBe(true);
+    expect(isAutoMarkdownColumn({ ...base, markdownShare: 0.09 })).toBe(false);
+  });
+
+  it("false for an undefined profile", () => {
+    expect(isAutoMarkdownColumn(undefined)).toBe(false);
+  });
+});
+
+describe("column flag maps (markdownColumns)", () => {
+  it("round-trips __proto__ and constructor as ordinary column names", () => {
+    const map = {};
+    setColumnFlag(map, "__proto__", true);
+    setColumnFlag(map, "constructor", false);
+    expect(getColumnFlag(map, "__proto__")).toBe(true);
+    expect(getColumnFlag(map, "constructor")).toBe(false);
+    expect(getColumnFlag(map, "toString")).toBeUndefined();
+    expect(getColumnFlag(map, "other")).toBeUndefined();
+    const restored = normalizeColumnFlags(JSON.parse(JSON.stringify(map)));
+    expect(getColumnFlag(restored, "__proto__")).toBe(true);
+    expect(getColumnFlag(restored, "constructor")).toBe(false);
+  });
+
+  it("normalizeColumnFlags returns {} for missing or malformed input and drops non-boolean entries", () => {
+    expect(normalizeColumnFlags(undefined)).toEqual({});
+    expect(normalizeColumnFlags(null)).toEqual({});
+    expect(normalizeColumnFlags([true])).toEqual({});
+    expect(normalizeColumnFlags("x")).toEqual({});
+    expect(normalizeColumnFlags({ a: true, b: "yes", c: false })).toEqual({ a: true, c: false });
+  });
+});
+
 // ---- reconcileVisibility with profiles (the smart default split itself) ---
 
 function profile(overrides: Partial<ColumnProfile> = {}): ColumnProfile {
-  return { medianLength: 10, multilineShare: 0, jsonShare: 0, numericShare: 0, ...overrides };
+  return { medianLength: 10, multilineShare: 0, jsonShare: 0, numericShare: 0, markdownShare: 0, ...overrides };
 }
 
 describe("reconcileVisibility with profiles", () => {

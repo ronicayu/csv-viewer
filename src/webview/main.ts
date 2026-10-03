@@ -21,8 +21,21 @@ import { foldCase } from "../core/caseFold";
 import type { DistinctValue } from "../core/distinct";
 import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
-import { detailOnlyColumns, getVisibility, isNumericColumn, reconcileVisibility, setVisibility, visibleColumns } from "../core/columns";
+import {
+  detailOnlyColumns,
+  getColumnFlag,
+  getVisibility,
+  isAutoMarkdownColumn,
+  isNumericColumn,
+  normalizeColumnFlags,
+  reconcileVisibility,
+  setColumnFlag,
+  setVisibility,
+  visibleColumns,
+} from "../core/columns";
 import { formatJsonText, tryParseJsonValue } from "../core/json";
+import { MARKDOWN_MAX_CHARS, looksLikeMarkdown } from "../core/markdownDetect";
+import { renderMarkdown } from "../core/markdownRender";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
 import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
 import type {
@@ -85,6 +98,10 @@ interface AppState {
    * body. Exposed here (not just used internally) so a future header
    * treatment (owned elsewhere — see AGENTS notes) can read it too. */
   numericColumns: Set<string>;
+  /** Columns the worker's last profile classified as auto-Markdown (see
+   * src/core/columns.ts's isAutoMarkdownColumn). The user's explicit choice
+   * in `view.markdownColumns` overrides it — see isMarkdownColumn. */
+  autoMarkdownColumns: Set<string>;
   /** Roving-tabindex target for the row keyboard model: the one row (by
    * stable id) currently in the Tab order. Reset to null on a fresh
    * load/reparse (old ids are meaningless), then set to the first row of
@@ -563,6 +580,7 @@ async function onLoad(message: LoadMessage): Promise<void> {
   view.pageSize = normalizePageSize(view.pageSize);
   view.delimiter = typeof view.delimiter === "string" ? view.delimiter : "";
   view.quotes = typeof view.quotes === "boolean" ? view.quotes : true;
+  view.markdownColumns = normalizeColumnFlags(view.markdownColumns);
 
   // A `load` for the same file the webview is already showing is a live
   // reload (the document changed on disk) — keep the current page instead
@@ -585,6 +603,7 @@ async function onLoad(message: LoadMessage): Promise<void> {
     defaultTableColumns: message.defaultTableColumns,
     expanded: new Set<number>(),
     numericColumns: new Set<string>(),
+    autoMarkdownColumns: new Set<string>(),
     focusedRowId: null,
     filteredCount: 0,
     page: previousPage,
@@ -863,6 +882,7 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   const visibilityChanged = !sameColumnVisibility(previousVisibility, reconciled);
   state.view.columnVisibility = reconciled;
   state.numericColumns = new Set(msg.headers.filter((_h, i) => isNumericColumn(msg.columnProfiles[i])));
+  state.autoMarkdownColumns = new Set(msg.headers.filter((_h, i) => isAutoMarkdownColumn(msg.columnProfiles[i])));
 
   renderColumnsPopover();
   renderColumnsButton();
@@ -1469,7 +1489,7 @@ function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, co
   // measures line-clamp overflow via scrollHeight, which only works once
   // its element has real layout, i.e. is attached, not while the <dl> is
   // still being built as a detached tree.
-  const pending: { dd: HTMLElement; value: string }[] = [];
+  const pending: PendingDetailValue[] = [];
 
   if (detailOnly.length === 0 && alsoInTable.length === 0) {
     wrap.appendChild(buildDetailFieldList(row, state.headers, indexByHeader, pending));
@@ -1484,14 +1504,25 @@ function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, co
     }
   }
 
-  for (const { dd, value } of pending) populateDetailValue(dd, value);
+  for (const { dd, column, value } of pending) populateDetailValue(dd, column, value);
 }
+
+interface PendingDetailValue {
+  dd: HTMLElement;
+  column: string;
+  value: string;
+}
+
+/** What each live detail <dd> shows, so a column-wide Raw/Markdown switch can
+ * re-populate every visible field of that column without a full re-render
+ * (which would reset unrelated fields' More/Less and Show all state). */
+const detailFieldInfo = new WeakMap<HTMLElement, { column: string; value: string }>();
 
 function buildDetailFieldList(
   row: WorkerRow,
   fields: string[],
   indexByHeader: Map<string, number>,
-  pending: { dd: HTMLElement; value: string }[],
+  pending: PendingDetailValue[],
 ): HTMLDListElement {
   const dl = document.createElement("dl");
   dl.className = "detail-fields";
@@ -1507,7 +1538,8 @@ function buildDetailFieldList(
     dt.appendChild(buildFieldCopyButton(field, value));
 
     const dd = document.createElement("dd");
-    pending.push({ dd, value });
+    pending.push({ dd, column: field, value });
+    detailFieldInfo.set(dd, { column: field, value });
     dd.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, field, value, row));
 
     dl.appendChild(dt);
@@ -1549,23 +1581,64 @@ function emptyValueNode(): HTMLSpanElement {
   return span;
 }
 
+/** Whether `column` is currently shown as Markdown in row details: the
+ * user's explicit choice if there is one, else the profile's auto-detection. */
+function isMarkdownColumn(column: string): boolean {
+  if (!state) return false;
+  const explicit = getColumnFlag(state.view.markdownColumns, column);
+  return explicit !== undefined ? explicit : state.autoMarkdownColumns.has(column);
+}
+
+/** A Raw-mode field only gets a "Markdown" link when rendering could change
+ * how it reads, so short plain fields don't all grow one. */
+const MARKDOWN_LINK_MIN_CHARS = 60;
+
+/**
+ * Switches `column` between Markdown and Raw (an explicit, persisted choice)
+ * and re-populates every currently visible detail field of that column, in
+ * every expanded row, straight from the values already on the page — no
+ * worker round-trip, rows stay expanded, other columns' fields untouched.
+ * `sourceDd` is the field whose toggle was clicked: its toggle is kept
+ * visible and re-focused (the link it was clicked on is rebuilt).
+ */
+function setColumnMarkdown(column: string, markdown: boolean, sourceDd: HTMLElement): void {
+  if (!state) return;
+  setColumnFlag(state.view.markdownColumns, column, markdown);
+  for (const dd of tableBody.querySelectorAll<HTMLElement>("tr.detail-row:not([hidden]) dd")) {
+    const info = detailFieldInfo.get(dd);
+    if (!info || info.column !== column) continue;
+    populateDetailValue(dd, info.column, info.value, dd === sourceDd);
+  }
+  sourceDd.querySelector<HTMLButtonElement>(".format-toggle-btn:not([hidden])")?.focus();
+  saveState();
+}
+
 /**
  * Fills in one detail field's <dd>: a dimmed "—" for an empty value;
- * otherwise the value (or, for a value that parses as JSON — see
- * src/core/json.ts — its pretty-printed form, with a Raw/Formatted
- * toggle), clamped to 6 lines with a More/Less link, composed with the
- * existing 10,000-character cap's Show all/Show less (see
- * docs/reviews/pm-review.md §4 and docs/reviews/ux-review.md P1-10).
+ * otherwise the value, clamped to 6 lines with a More/Less link, composed
+ * with the existing 10,000-character cap's Show all/Show less (see
+ * docs/reviews/pm-review.md §4 and docs/reviews/ux-review.md P1-10). Three
+ * kinds of value:
+ *  - JSON (src/core/json.ts): pretty-printed, with a local Raw/Formatted
+ *    toggle. Never Markdown.
+ *  - Markdown-capable (not JSON, at most MARKDOWN_MAX_CHARS): rendered via
+ *    renderMarkdown when its column is in Markdown mode (toggle reads
+ *    "Raw"), else shown as text with a "Markdown" link where that could
+ *    matter. The toggle flips the whole COLUMN (setColumnMarkdown).
+ *  - Anything longer: always raw text, no Markdown link.
  *
- * The three controls (format, height, char-cap) mutate this closure's
+ * The controls (format, height, char-cap) mutate this closure's
  * `formatMode`/`heightExpanded`/`charExpanded` and re-run `render()`
  * directly, rather than calling back into populateDetailContent — so
  * toggling one doesn't reset the others, and an unrelated full
  * repopulate (a sort/filter/page re-render while the row stays expanded)
  * is the only thing that resets a field back to its initial view, same
  * as the pre-existing "Show all" behavior already did.
+ *
+ * `keepMarkdownLink` makes a Raw-mode field show its "Markdown" link even
+ * if it wouldn't otherwise (see setColumnMarkdown).
  */
-function populateDetailValue(dd: HTMLElement, rawValue: string): void {
+function populateDetailValue(dd: HTMLElement, column: string, rawValue: string, keepMarkdownLink = false): void {
   dd.innerHTML = "";
   if (rawValue === "") {
     dd.appendChild(emptyValueNode());
@@ -1575,6 +1648,10 @@ function populateDetailValue(dd: HTMLElement, rawValue: string): void {
   const parsedJson = tryParseJsonValue(rawValue);
   const isJson = parsedJson !== null;
   const formatted = isJson ? formatJsonText(rawValue) : "";
+  const markdownCapable = !isJson && rawValue.length <= MARKDOWN_MAX_CHARS;
+  const markdownMode = markdownCapable && isMarkdownColumn(column);
+  const showMarkdownLink =
+    markdownCapable && !markdownMode && (keepMarkdownLink || rawValue.includes("\n") || rawValue.length > MARKDOWN_LINK_MIN_CHARS || looksLikeMarkdown(rawValue));
 
   let formatMode: "raw" | "formatted" = isJson ? "formatted" : "raw";
   let charExpanded = false;
@@ -1582,7 +1659,15 @@ function populateDetailValue(dd: HTMLElement, rawValue: string): void {
 
   const valueText = document.createElement("span");
   valueText.className = "detail-value-text";
+  valueText.hidden = markdownMode;
   dd.appendChild(valueText);
+
+  // Block-level HTML can't live inside the span above, so rendered Markdown
+  // gets its own block. Only one of the two is ever visible and non-empty.
+  const markdownBlock = document.createElement("div");
+  markdownBlock.className = "detail-value-md";
+  markdownBlock.hidden = !markdownMode;
+  dd.appendChild(markdownBlock);
 
   const controls = document.createElement("div");
   controls.className = "detail-value-controls";
@@ -1591,7 +1676,8 @@ function populateDetailValue(dd: HTMLElement, rawValue: string): void {
   const formatToggle = document.createElement("button");
   formatToggle.type = "button";
   formatToggle.className = "link-btn format-toggle-btn";
-  formatToggle.hidden = !isJson;
+  formatToggle.classList.toggle("md-toggle-btn", !isJson);
+  formatToggle.hidden = !(isJson || markdownMode || showMarkdownLink);
   controls.appendChild(formatToggle);
 
   const heightToggle = document.createElement("button");
@@ -1613,30 +1699,45 @@ function populateDetailValue(dd: HTMLElement, rawValue: string): void {
   function render(): void {
     const source = currentSource();
     const { text, truncated, fullLength } = truncateForDetail(source);
-    valueText.textContent = charExpanded ? source : text;
-    valueText.classList.toggle("detail-value-json", isJson && formatMode === "formatted");
+    const shown = charExpanded ? source : text;
+    let clampEl: HTMLElement;
+    let clampClass: string;
+    if (markdownMode) {
+      // The only innerHTML fed from cell content: renderMarkdown's output.
+      markdownBlock.innerHTML = renderMarkdown(shown);
+      valueText.textContent = "";
+      clampEl = markdownBlock;
+      clampClass = "detail-value-md-clamped";
+    } else {
+      valueText.textContent = shown;
+      valueText.classList.toggle("detail-value-json", isJson && formatMode === "formatted");
+      clampEl = valueText;
+      clampClass = "detail-value-clamped";
+    }
 
     // Overflow detection always happens against the UNCLAMPED natural
-    // height, never interleaved with applying `-webkit-line-clamp` —
-    // reading scrollHeight in the same synchronous pass as adding that
-    // class is unreliable (it can still report the pre-clamp height,
-    // since the clamp is a legacy -webkit-box layout mode some engines
-    // don't re-flow synchronously on the same tick). Comparing against
-    // 6 line-heights instead sidesteps that entirely; the clamp class
-    // below is applied purely as a RESULT of heightExpanded, never as
-    // part of the measurement itself.
-    valueText.classList.remove("detail-value-clamped");
-    const lineHeight = parseFloat(getComputedStyle(valueText).lineHeight) || parseFloat(getComputedStyle(valueText).fontSize) * 1.2 || 16;
-    const overflowing = valueText.scrollHeight > lineHeight * 6 + 1;
-    valueText.classList.toggle("detail-value-clamped", !heightExpanded);
+    // height, never interleaved with applying `-webkit-line-clamp` (or the
+    // Markdown block's max-height) — reading scrollHeight in the same
+    // synchronous pass as adding that class is unreliable (it can still
+    // report the pre-clamp height, since the clamp is a legacy -webkit-box
+    // layout mode some engines don't re-flow synchronously on the same
+    // tick). Comparing against 6 line-heights instead sidesteps that
+    // entirely; the clamp class below is applied purely as a RESULT of
+    // heightExpanded, never as part of the measurement itself.
+    clampEl.classList.remove(clampClass);
+    const lineHeight = parseFloat(getComputedStyle(clampEl).lineHeight) || parseFloat(getComputedStyle(clampEl).fontSize) * 1.2 || 16;
+    const overflowing = clampEl.scrollHeight > lineHeight * 6 + 1;
+    clampEl.classList.toggle(clampClass, !heightExpanded);
 
     // `hidden` (via main.css's `[hidden]{display:none!important}`) only
     // keeps a control out of the LAYOUT — its textContent still exists
     // and would otherwise leak into any test (or screen reader text
     // resolution) that reads the <dd>'s combined text. Every hidden
     // control here is cleared to "" for exactly that reason; the field's
-    // displayed value is always valueText's own text, never these.
-    formatToggle.textContent = isJson ? (formatMode === "formatted" ? "Raw" : "Formatted") : "";
+    // displayed value is always valueText's own text (or the Markdown
+    // block's), never these.
+    if (isJson) formatToggle.textContent = formatMode === "formatted" ? "Raw" : "Formatted";
+    else formatToggle.textContent = markdownMode ? "Raw" : showMarkdownLink ? "Markdown" : "";
 
     charToggle.hidden = !truncated;
     if (truncated) {
@@ -1656,6 +1757,10 @@ function populateDetailValue(dd: HTMLElement, rawValue: string): void {
   }
 
   formatToggle.addEventListener("click", () => {
+    if (!isJson) {
+      setColumnMarkdown(column, !markdownMode, dd);
+      return;
+    }
     formatMode = formatMode === "formatted" ? "raw" : "formatted";
     charExpanded = false;
     heightExpanded = false;

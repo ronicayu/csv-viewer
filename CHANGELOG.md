@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+
+**Added**
+- Markdown in row details: a column that looks like Markdown is rendered (headings,
+  lists, tables, code, links, quotes) and shows a **Raw** link; **Markdown** appears on
+  long, multi-line or Markdown-looking values in other columns. The Raw / Markdown
+  switch applies to the whole column and is remembered per file. Raw HTML in a cell is
+  shown as text and remote images are not loaded.
+
 ## 0.6.1
 
 **Changed**

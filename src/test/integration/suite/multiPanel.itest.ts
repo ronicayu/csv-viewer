@@ -129,7 +129,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
       type: "load",
       fileKey: keyA,
       text: textA,
-      state: { columnVisibility: {}, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: ";", quotes: true },
+      state: { columnVisibility: {}, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: ";", quotes: true, markdownColumns: {} },
       defaultTableColumns: 8,
       defaultDelimiter: "",
       hintsSeen: [],

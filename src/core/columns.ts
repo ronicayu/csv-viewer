@@ -19,24 +19,45 @@
 // object that's the no-op trap.
 
 import { looksLikeJsonObjectOrArray } from "./json";
+import { looksLikeMarkdown } from "./markdownDetect";
 import { parseNumber } from "./number";
-import type { ColumnVisibilityMap } from "./types";
+import type { ColumnFlagMap, ColumnVisibilityMap } from "./types";
 
 export function createVisibilityMap(): ColumnVisibilityMap {
   return {};
 }
 
-export function hasVisibility(map: ColumnVisibilityMap, header: string): boolean {
+// The same safe accessors serve every `{ [column]: boolean }` map — column
+// visibility and the per-column Markdown choice (ViewState.markdownColumns).
+export function hasColumnFlag(map: ColumnFlagMap, header: string): boolean {
   return Object.prototype.hasOwnProperty.call(map, header);
 }
 
-export function getVisibility(map: ColumnVisibilityMap, header: string): boolean | undefined {
-  return hasVisibility(map, header) ? (map[header] as boolean) : undefined;
+export function getColumnFlag(map: ColumnFlagMap, header: string): boolean | undefined {
+  return hasColumnFlag(map, header) ? (map[header] as boolean) : undefined;
 }
 
-export function setVisibility(map: ColumnVisibilityMap, header: string, value: boolean): void {
+export function setColumnFlag(map: ColumnFlagMap, header: string, value: boolean): void {
   Object.defineProperty(map, header, { value, enumerable: true, writable: true, configurable: true });
 }
+
+/** Copies the own boolean entries of a stored `{ [column]: boolean }` value
+ * into a fresh map; anything else (missing, null, an array, a non-object,
+ * non-boolean entries) yields `{}` / is dropped. Used for state saved before
+ * a map existed or damaged since. */
+export function normalizeColumnFlags(raw: unknown): ColumnFlagMap {
+  const map: ColumnFlagMap = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return map;
+  for (const key of Object.keys(raw)) {
+    const value = Object.getOwnPropertyDescriptor(raw, key)?.value;
+    if (typeof value === "boolean") setColumnFlag(map, key, value);
+  }
+  return map;
+}
+
+export const hasVisibility = hasColumnFlag;
+export const getVisibility = getColumnFlag;
+export const setVisibility = setColumnFlag;
 
 export function defaultVisibility(headers: string[], defaultTableColumns: number): ColumnVisibilityMap {
   const map = createVisibilityMap();
@@ -71,6 +92,10 @@ const SHORT_JSON_SHARE_MAX = 0.5;
 /** A column is treated as numeric (for right-alignment) when at least
  * this fraction of its non-empty sampled values parse via parseNumber. */
 export const NUMERIC_SHARE_THRESHOLD = 0.9;
+/** A column is auto-Markdown (rendered as Markdown in row details unless the
+ * user chose otherwise) when at least this fraction of its non-empty
+ * sampled values look like Markdown (src/core/markdownDetect.ts). */
+export const MARKDOWN_SHARE_THRESHOLD = 0.1;
 
 export interface ColumnProfile {
   /** Median of `value.trim().length` over the sampled non-empty values. 0
@@ -84,6 +109,9 @@ export interface ColumnProfile {
   /** Fraction (0–1) of sampled non-empty values that parse via
    * src/core/number.ts's parseNumber. */
   numericShare: number;
+  /** Fraction (0–1) of sampled non-empty values for which
+   * src/core/markdownDetect.ts's looksLikeMarkdown is true. */
+  markdownShare: number;
 }
 
 function median(sortedAscendingLengths: number[]): number {
@@ -109,6 +137,7 @@ export function profileColumns(headers: string[], rows: string[][], sampleSize: 
     let multiline = 0;
     let json = 0;
     let numeric = 0;
+    let markdown = 0;
     for (const row of sample) {
       const value = row[columnIndex];
       if (value === undefined || value === "") continue;
@@ -117,6 +146,7 @@ export function profileColumns(headers: string[], rows: string[][], sampleSize: 
       if (value.includes("\n")) multiline++;
       if (looksLikeJsonObjectOrArray(value)) json++;
       if (parseNumber(value) !== null) numeric++;
+      if (looksLikeMarkdown(value)) markdown++;
     }
     lengths.sort((a, b) => a - b);
     return {
@@ -124,6 +154,7 @@ export function profileColumns(headers: string[], rows: string[][], sampleSize: 
       multilineShare: nonEmpty > 0 ? multiline / nonEmpty : 0,
       jsonShare: nonEmpty > 0 ? json / nonEmpty : 0,
       numericShare: nonEmpty > 0 ? numeric / nonEmpty : 0,
+      markdownShare: nonEmpty > 0 ? markdown / nonEmpty : 0,
     };
   });
 }
@@ -144,6 +175,12 @@ function isShortColumn(profile: ColumnProfile | undefined): boolean {
  * src/webview/main.ts's per-cell `numeric-cell` class). */
 export function isNumericColumn(profile: ColumnProfile | undefined): boolean {
   return (profile?.numericShare ?? 0) >= NUMERIC_SHARE_THRESHOLD;
+}
+
+/** Whether row details render this column as Markdown by default (the user's
+ * explicit choice in ViewState.markdownColumns, when present, overrides). */
+export function isAutoMarkdownColumn(profile: ColumnProfile | undefined): boolean {
+  return (profile?.markdownShare ?? 0) >= MARKDOWN_SHARE_THRESHOLD;
 }
 
 /**

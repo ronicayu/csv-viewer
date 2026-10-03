@@ -144,7 +144,9 @@ test("multi-line cell values preserve their newlines in the detail panel (CSS pr
 
   await page.locator("tr.data-row").first().click();
   const dd = page.locator("tr.detail-row").first().locator("dd").first();
-  const raw = await dd.evaluate((el) => el.textContent ?? "");
+  // The displayed value only — a multi-line value now also carries a
+  // "Markdown" link in the <dd>, which is a control, not content.
+  const raw = await dd.locator(".detail-value-text").evaluate((el) => el.textContent ?? "");
   expect(raw).toBe(multiline);
 
   // The CSS actually renders it on 3 visual lines (white-space: pre-wrap),

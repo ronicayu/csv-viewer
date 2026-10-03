@@ -22,7 +22,8 @@ back to the text editor to make edits.
 - **Table + row details.** Short columns go in the table; long text, multi-line and
   JSON columns start in each row's details. Change the split any time with **Columns**.
 - **Reads long values properly.** Row details wrap prose, pretty-print JSON, clamp long
-  values with **More**, and have a copy button per field.
+  values with **More**, and have a copy button per field. Columns that hold Markdown
+  (headings, lists, tables, code, links) are shown rendered.
 - **Find rows fast.** Search all columns, or add filter rules ("Keep rows where status
   equals open"). Click the funnel in a column header to pick several values from that
   column at once, like a spreadsheet. Right-click any value to filter by it or copy it.
@@ -44,6 +45,13 @@ aren't in the table, followed by any table column whose value was cut off. In th
 details:
 
 - JSON objects and arrays are formatted, with a **Raw** / **Formatted** switch.
+- Markdown is rendered when a column looks like it (headings, fenced code, links,
+  tables, or a mix of lists, bold, quotes and inline code in at least 1 in 10 sampled
+  values). Click **Raw** to see the source; click **Markdown** on any long, multi-line
+  or Markdown-looking value in another column to render it. The choice applies to the
+  whole column and is remembered per file. Raw HTML in a cell is shown as text, images
+  are never loaded (they appear as a link), and only `http`, `https` and `mailto` links
+  are clickable. Table cells always show the raw text.
 - Long values show six lines with **More** / **Less**; very large values (over 10,000
   characters) add **Show all**.
 - Each field has a copy button, and empty fields show a dash.

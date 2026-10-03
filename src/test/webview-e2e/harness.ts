@@ -120,6 +120,7 @@ export function defaultViewState(overrides: Partial<ViewState> = {}): ViewState 
     pageSize: 100,
     delimiter: "",
     quotes: true,
+    markdownColumns: {},
     ...overrides,
   };
 }

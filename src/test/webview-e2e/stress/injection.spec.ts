@@ -83,8 +83,8 @@ test("the evil cell renders literally in the table row and in the detail panel",
   await firstRow.click();
   const detail = page.locator("tr.detail-row").first();
   await expect(detail).toBeVisible();
-  const dd = detail.locator("dd").first();
-  await expect(dd).toHaveText(EVIL_CELL);
+  // The value itself (a long value also carries a "Markdown" link in the <dd>).
+  await expect(detail.locator("dd").first().locator(".detail-value-text")).toHaveText(EVIL_CELL);
 });
 
 test("the evil cell renders literally as a table cell when its column is visible", async ({ page }) => {

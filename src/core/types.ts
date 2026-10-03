@@ -57,9 +57,13 @@ export interface SortKey {
   direction: SortDirection;
 }
 
-export interface ColumnVisibilityMap {
+/** A `{ [column]: boolean }` map keyed by header name. Read and write it only
+ * through the `__proto__`-safe helpers in columns.ts, never `map[header]`. */
+export interface ColumnFlagMap {
   [column: string]: boolean;
 }
+
+export type ColumnVisibilityMap = ColumnFlagMap;
 
 export interface ViewState {
   columnVisibility: ColumnVisibilityMap;
@@ -85,6 +89,15 @@ export interface ViewState {
    * ParseResult.quoteProblems and the "Quoted fields" toolbar checkbox).
    */
   quotes: boolean;
+  /**
+   * The user's explicit Markdown / Raw choice per column for row details
+   * (`true` = Markdown, `false` = Raw). Only explicit choices are stored; a
+   * column without an entry follows the profile's auto-detection (see
+   * columns.ts's isAutoMarkdownColumn). Entries for columns no longer in the
+   * header list are kept, like columnVisibility. State saved before this
+   * field existed lacks it — normalized to `{}` on load.
+   */
+  markdownColumns: ColumnFlagMap;
 }
 
 export function createDefaultViewState(): ViewState {
@@ -97,6 +110,7 @@ export function createDefaultViewState(): ViewState {
     pageSize: 100,
     delimiter: "",
     quotes: true,
+    markdownColumns: {},
   };
 }
 
