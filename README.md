@@ -4,7 +4,7 @@ Read wide CSV and TSV files in VS Code, Cursor, and Windsurf without scrolling s
 The columns you scan stay in the table; expand any row to read everything else — long
 notes, descriptions, JSON — in full.
 
-![A support-ticket export: short columns in the table, and one row expanded to show its description, formatted JSON payload and notes](media/hero.png)
+![Filtering a column to two values from its header funnel, then expanding a row whose description is rendered as Markdown](media/demo.gif)
 
 ## Open a file
 

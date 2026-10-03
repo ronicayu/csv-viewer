@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.2
+
+**Changed**
+- README shows an animated demo of the header value filter and Markdown row details,
+  recorded in VS Code. No functional changes.
+
 ## 0.7.1
 
 **Changed**
