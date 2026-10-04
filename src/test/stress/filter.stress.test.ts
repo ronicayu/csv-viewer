@@ -1,9 +1,3 @@
-// Adversarial tests for src/core/filter.ts. Bugs found are documented with
-// test.fails(...) plus a comment stating the expected correct behavior, so
-// the suite stays green while the gap is visible. Everything else here is a
-// real (passing) assertion about current behavior — either confirming a
-// design decision is safe, or documenting a surprising-but-arguably-OK edge
-// case that a product owner should be aware of but that isn't a bug per se.
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -27,16 +21,6 @@ describe("empty rule value", () => {
   const headers = ["name"];
   const rows = [["Alice"], [""], ["  "]];
 
-  // Changed behavior (bug fix, decision #10, not a regression): a
-  // value-taking rule (every operator except isEmpty, which takes no
-  // value) with an empty value is now IGNORED — as if disabled — rather
-  // than applied with whatever incidental behavior its operator happens
-  // to have on "". For contains/startsWith/endsWith in include mode, that
-  // incidental behavior (match-everything, via JS String semantics) was
-  // already indistinguishable from "ignored", so nothing here changes.
-  // But the SAME incidental behavior in exclude mode used to be
-  // "drop everything", which is now, correctly, "ignored" (drop nothing) —
-  // see isRuleActive in src/core/filter.ts.
   it("contains '' is ignored (ties to isRuleActive's 'needs a value' check) — has no effect in either include or exclude mode", () => {
     expect(applyFilters(headers, rows, "", [rule({ operator: "contains", value: "", mode: "include" })])).toEqual(rows);
     expect(applyFilters(headers, rows, "", [rule({ operator: "contains", value: "", mode: "exclude" })])).toEqual(rows);
@@ -80,28 +64,17 @@ describe("leading/trailing whitespace is significant for string operators (no im
 
 describe("Unicode case folding via toLowerCase()", () => {
   it("Greek final-sigma casing is handled correctly by JS toLowerCase (not a bug — documenting it works)", () => {
-    // ΟΔΟΣ (all-caps "street") lowercases to οδος using final sigma ς, matching
-    // a rule value typed in ordinary lowercase Greek.
     const headers = ["word"];
     const rows = [["ΟΔΟΣ"]];
     expect(applyFilters(headers, rows, "", [rule({ column: "word", operator: "equals", value: "οδος" })])).toEqual(rows);
   });
 
-  // Changed behavior (bug fix, decision #8, not a regression): case-
-  // insensitive matching now goes through a shared `foldCase` (src/core/
-  // caseFold.ts) instead of plain `toLowerCase()`. foldCase explicitly
-  // folds "ß" to "ss", so this test's original "expected" (that ß case-
-  // folding was out of scope) now conflicts with that decision — updated
-  // to assert the fix instead.
   it("German ß now case-folds to 'ss' via the shared foldCase, so STRASSE matches straße case-insensitively", () => {
     const headers = ["word"];
     const rows = [["straße"]];
     expect(applyFilters(headers, rows, "", [rule({ column: "word", operator: "equals", value: "STRASSE" })])).toEqual(rows);
   });
 
-  // FIXED: foldCase (src/core/caseFold.ts) drops the combining dot above
-  // (U+0307) that toLowerCase("İ") leaves behind, so a case-insensitive
-  // rule value containing Turkish İ matches ordinary lowercase "i" text.
   it("case-insensitive 'contains' matches plain 'i' against Turkish İ (U+0130) via the shared foldCase", () => {
     const headers = ["city"];
     const rows = [["istanbul"]];
@@ -126,9 +99,6 @@ describe("regex: anchors and flags", () => {
 
   it("^ and $ anchor to the whole string, not per-line (no 'm' flag ever applied)", () => {
     const rows = [["abc\ndef"]];
-    // Without the 'm' flag, ^ only matches the very start, $ the very end
-    // (or just before a trailing \n) — "def" in the middle of the string
-    // does not match ^def$.
     expect(applyFilters(headers, rows, "", [rule({ column: "v", operator: "regex", value: "^def$" })])).toEqual([]);
   });
 
@@ -155,9 +125,6 @@ describe("regex: anchors and flags", () => {
     const rules = [rule({ column: "v", operator: "regex", value: "match" })];
     const first = applyFilters(headers, rows, "", rules);
     const second = applyFilters(headers, rows, "", rules);
-    // Idempotent: every row matches every time, both within one call across
-    // multiple rows sharing the same compiled RegExp object, and across
-    // repeated calls with the same rule object.
     expect(first).toEqual(rows);
     expect(second).toEqual(rows);
   });
@@ -165,9 +132,6 @@ describe("regex: anchors and flags", () => {
   it("demonstrates the 'g'-flag lastIndex trap directly on RegExp.test (illustrative — not reachable through this codebase's public API, since compileRule never adds 'g', but documents why that omission matters)", () => {
     const g = /a/g;
     const results = [g.test("a"), g.test("a"), g.test("a")];
-    // A stateful global regex alternates match/no-match because lastIndex
-    // persists on the RegExp object between calls to test(). This is why
-    // src/core/filter.ts must never compile rule regexes with 'g'.
     expect(results).toEqual([true, false, true]);
   });
 
@@ -183,8 +147,6 @@ describe("regex: anchors and flags", () => {
       try {
         execFileSync(process.execPath, ["-e", script], { timeout: 2000, stdio: "pipe" });
       } catch (err) {
-        // ETIMEDOUT / SIGTERM confirms the regex engine was still
-        // backtracking after 2 full seconds on a 31-character cell.
         timedOut = true;
       }
       expect(timedOut).toBe(true);
@@ -224,10 +186,6 @@ describe("numeric operators: what Number() actually accepts", () => {
     ]);
   });
 
-  // FIXED: the shared parseNumber (src/core/number.ts) only accepts a
-  // strict decimal-number pattern, so '0x10' is no longer silently parsed
-  // as hex (16) the way plain Number('0x10') === 16 would — it's treated
-  // as non-numeric, same as '12abc'.
   it("'0x10' is treated as non-numeric (rejected by the strict decimal pattern), not silently parsed as hex", () => {
     const result = applyFilters(headers, [["0x10"]], "", [rule({ column: "v", operator: "gt", value: "15" })]);
     expect(result).toEqual([]);
@@ -291,13 +249,6 @@ describe("rule referencing a column that no longer exists", () => {
     ["3", "4"],
   ];
 
-  // Changed behavior (bug fix, decision #10, not a regression): a rule
-  // whose column no longer exists is now IGNORED (isRuleActive returns
-  // false), not applied as a rule that matches nothing. For an include
-  // rule those are very different outcomes — "ignored" leaves every row
-  // as-is, "matches nothing" used to drop every row in the file, which is
-  // what this test's original "documented pre-existing behavior" comment
-  // called out as intentional. It no longer is.
   it("an include rule on a missing column is ignored, not applied as 'matches nothing' (which used to drop every row)", () => {
     const result = applyFilters(headers, rows, "", [rule({ column: "ghost", operator: "equals", value: "1" })]);
     expect(result).toEqual(rows);
@@ -346,7 +297,7 @@ describe("combinations: several include + several exclude rules, disabled rules,
   it("two include rules AND two exclude rules all combine", () => {
     const rules: FilterRule[] = [
       rule({ column: "age", operator: "gte", value: "20", mode: "include" }),
-      rule({ column: "city", operator: "contains", value: "", mode: "include" }), // no-op include
+      rule({ column: "city", operator: "contains", value: "", mode: "include" }),
       rule({ column: "city", operator: "equals", value: "SF", mode: "exclude" }),
       rule({ column: "name", operator: "equals", value: "Bob", mode: "exclude" }),
     ];

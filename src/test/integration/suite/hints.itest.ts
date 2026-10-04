@@ -1,12 +1,3 @@
-// Covers the per-user hint flag round trip (core/types.ts's HintSeenMessage
-// and LoadMessage.hintsSeen, from globalState key `csvViewer.hintsSeen`).
-// The real webview doesn't have a UI that sends `hintSeen` yet (that's the
-// other half of this feature, owned by the webview team), so this
-// exercises the host side directly via the test hook's
-// simulateWebviewMessage — it runs the exact same onDidReceiveMessage
-// handler a real webview message would, just without needing a webview
-// control to click.
-
 import * as assert from "assert";
 import * as fsp from "fs/promises";
 import * as path from "path";
@@ -15,10 +6,6 @@ import { WORKSPACE_ROOT } from "../fixtures";
 import { closeAllEditors, fileKeyFor, getTestApi, openInViewer, waitFor, waitForRender } from "../helpers";
 
 let fixtureCounter = 0;
-/** A fresh, uniquely-named file each time, so its webview panel is
- * guaranteed to be newly created (and so actually sends `load`) rather
- * than potentially reusing an already-open panel some other suite left
- * behind for a shared fixture name. */
 async function freshCsv(): Promise<vscode.Uri> {
   fixtureCounter += 1;
   const filePath = path.join(WORKSPACE_ROOT, `hints-itest-${fixtureCounter}.csv`);
@@ -57,8 +44,6 @@ suite("Per-user hint flags (hintSeen / load.hintsSeen)", () => {
 
     await waitFor(() => api.getHintsSeen().includes(id), { message: `expected "${id}" to be recorded in globalState's hintsSeen` });
 
-    // A completely different, never-before-opened file's FIRST load also
-    // carries it — the flag is per-user, not per-file.
     const uriB = await freshCsv();
     await openInViewer(uriB);
     const keyB = fileKeyFor(uriB);

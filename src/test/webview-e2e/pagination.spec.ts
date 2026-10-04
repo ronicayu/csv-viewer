@@ -2,8 +2,6 @@ import { expect, test } from "@playwright/test";
 import { awaitPosted, bootAndLoad, clearPosted, defaultViewState, pushLoad } from "./harness";
 import { largeFixture } from "./fixtures";
 
-// 250 rows @ the default page size of 100 -> 3 pages (100, 100, 50). Enough
-// room to move off page 1 and check what resets the page vs. what doesn't.
 const fixture = largeFixture(250);
 
 test.beforeEach(async ({ page }) => {
@@ -74,7 +72,7 @@ test("zero matching rows shows a message and disables every nav button", async (
 });
 
 test("Alt+ArrowRight / Alt+ArrowLeft change pages", async ({ page }) => {
-  await page.locator("#pager-row-range").click(); // move focus out of any input
+  await page.locator("#pager-row-range").click();
   await page.keyboard.press("Alt+ArrowRight");
   await expect(page.locator("#pager-page-input")).toHaveValue("2");
 
@@ -110,10 +108,8 @@ test("loading with state.pageSize = 50 shows 50 rows per page", async ({ page })
 
 test("a reload `load` for the same fileKey keeps the page, clamped to the new page count", async ({ page }) => {
   await page.locator("#pager-last-btn").click();
-  await expect(page.locator("#pager-page-input")).toHaveValue("3"); // last page of 250 rows
+  await expect(page.locator("#pager-page-input")).toHaveValue("3");
 
-  // Same fileKey, but now only 120 rows (2 pages at size 100) -> page 3 no
-  // longer exists, so this must clamp down to page 2 rather than reset to 1.
   const smaller = largeFixture(120);
   await pushLoad(page, {
     fileKey: "file:///medium.csv",

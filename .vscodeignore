@@ -3,18 +3,10 @@
 .claude/**
 src/**
 node_modules/**
-# tsc emits one .js per source file into out/ as a side effect of type
-# checking; only the two esbuild bundles (out/extension.js, out/webview/*)
-# are ever loaded at runtime.
+# tsc also emits per-file .js into out/; only the esbuild bundles are loaded at runtime
 out/core/**
 out/test/**
-# Source maps aren't loaded at runtime and roughly double out/'s size in
-# the packaged vsix for no benefit to an installed extension.
 out/**/*.map
-# The real-VS-Code integration suite's compiled output (a separate
-# tsconfig/outDir from the runtime bundle — see tsconfig.integration.json)
-# and every project tsconfig — none of these are ever loaded at runtime,
-# only out/extension.js and out/webview/* are.
 out-integration/**
 tsconfig*.json
 vitest.config.ts
@@ -27,15 +19,9 @@ docs/**
 .github/**
 CONTRIBUTING.md
 package-lock.json
-# Manual-testing fixture referenced from CONTRIBUTING.md's Development
-# section only — not needed at runtime.
 samples/**
-# Render script for media/icon.png (see CONTRIBUTING.md) — a build-time
-# tool, not a runtime file.
 scripts/**
-# The Marketplace/Open VSX README renders its images straight from GitHub
-# (relative paths rewritten against `repository`), so nothing under media/
-# needs to ship in the vsix except the extension icon itself.
+# README images are served from GitHub, so only the icon ships in the vsix
 media/**
 !media/icon.png
 **/*.vsix

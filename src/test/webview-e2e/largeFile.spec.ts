@@ -2,10 +2,6 @@ import { expect, test } from "@playwright/test";
 import { bootAndLoad, defaultViewState } from "./harness";
 import { largeFixture } from "./fixtures";
 
-// Pagination replaced infinite scroll: a 20k-row fixture must render exactly
-// one page of rows at a time, never grow past that on scroll, and support
-// jumping around via the pager bar's controls.
-
 test.describe("pagination with a 20k-row fixture", () => {
   test.beforeEach(async ({ page }) => {
     const fixture = largeFixture(20_000);
@@ -50,7 +46,7 @@ test.describe("pagination with a 20k-row fixture", () => {
   });
 
   test("changing the page size to 500 keeps the first visible row on screen and shows 'of 40'", async ({ page }) => {
-    await page.locator("#pager-next-btn").click(); // page 2: rows 101-200 (index 100-199)
+    await page.locator("#pager-next-btn").click();
     await page.locator("#pager-page-size-select").selectOption("500");
 
     await expect(page.locator("#pager-page-count")).toHaveText("40");

@@ -1,16 +1,7 @@
-// New coverage for the toolbar/chrome redesign (docs/reviews/ux-review.md
-// §2/§4/§7, docs/reviews/pm-review.md §4/§7): the one-row toolbar at every
-// required width (and its height staying fixed across sort/filter/error
-// states), the File format popover, the slim "filtered" summary row, the
-// progress-bar working indicator + aria-busy, and the deleted-file / hint
-// banners.
-
 import { expect, test } from "@playwright/test";
 import { bootAndLoad, bootAndLoadText, defaultViewState } from "./harness";
 import { smallFixture } from "./fixtures";
 import { toCsvText, wideFixture } from "./stress/stressHelpers";
-
-// ---- Toolbar: one row, stable height --------------------------------------
 
 test.describe("toolbar is a single row and its height never changes", () => {
   for (const width of [1280, 900, 700]) {
@@ -26,10 +17,7 @@ test.describe("toolbar is a single row and its height never changes", () => {
 
       const toolbar = page.locator(".toolbar");
       const baseline = (await toolbar.boundingBox())!;
-      // Clusters children into visual "lines" by vertical overlap (not by
-      // exact top equality) — controls of slightly different heights that
-      // share the same row (vertically centered via align-items: center)
-      // must not be miscounted as separate lines.
+      // Group children by vertical overlap, not exact top: controls of different heights share a row.
       const lineCount = async (): Promise<number> => {
         const rects = await toolbar.evaluate((el) =>
           Array.from(el.children)
@@ -50,12 +38,10 @@ test.describe("toolbar is a single row and its height never changes", () => {
       };
       expect(await lineCount()).toBe(1);
 
-      // Set a sort.
       await page.locator("th", { hasText: "age" }).click();
       expect((await toolbar.boundingBox())!.height).toBe(baseline.height);
       expect(await lineCount()).toBe(1);
 
-      // Add a filter rule.
       await page.locator("#filters-btn").click();
       await page.locator("#add-rule-btn").click();
       const rule = page.locator(".rule-row").first();
@@ -66,7 +52,6 @@ test.describe("toolbar is a single row and its height never changes", () => {
       expect((await toolbar.boundingBox())!.height).toBe(baseline.height);
       expect(await lineCount()).toBe(1);
 
-      // Trigger the separator-error state.
       await page.locator("#format-btn").click();
       await page.locator("#separator-select").selectOption("custom");
       await page.locator("#separator-custom").fill('"');
@@ -77,8 +62,6 @@ test.describe("toolbar is a single row and its height never changes", () => {
     });
   }
 });
-
-// ---- Badges -----------------------------------------------------------------
 
 test("Columns button shows 'in table / total' and updates live", async ({ page }) => {
   await bootAndLoad(page, {
@@ -94,8 +77,6 @@ test("Columns button shows 'in table / total' and updates live", async ({ page }
   await page.locator(".column-row", { hasText: "age" }).locator('input[type="checkbox"]').uncheck();
   await expect(page.locator("#columns-btn")).toHaveText("Columns 3/4");
 });
-
-// ---- File format popover ---------------------------------------------------
 
 test.describe("File format popover", () => {
   test.beforeEach(async ({ page }) => {
@@ -114,10 +95,6 @@ test.describe("File format popover", () => {
     await page.locator("#format-btn").click();
     const popoverBox = (await page.locator("#format-popover").boundingBox())!;
     const viewport = page.viewportSize()!;
-    // format-btn sits near the right end of the toolbar, so (like the
-    // Columns popover at narrow widths) anchoring clamps it inside the
-    // viewport rather than letting it overflow — the popover must still
-    // fit fully on screen.
     expect(popoverBox.x).toBeGreaterThanOrEqual(0);
     expect(popoverBox.x + popoverBox.width).toBeLessThanOrEqual(viewport.width);
     await expect(page.locator("#separator-select")).toBeVisible();
@@ -132,8 +109,6 @@ test.describe("File format popover", () => {
     expect(options.slice(1)).toEqual(["Comma (,)", "Semicolon (;)", "Tab", "Pipe (|)", "Custom…"]);
   });
 });
-
-// ---- Filtered summary row ---------------------------------------------------
 
 test.describe("the slim 'Filtered' row under the toolbar", () => {
   test.beforeEach(async ({ page }) => {
@@ -185,15 +160,10 @@ test.describe("the slim 'Filtered' row under the toolbar", () => {
   });
 });
 
-// ---- Working indicator (progress bar) + aria-busy ---------------------------
-
 test("the progress bar shows after ~150ms on a slow query, sets aria-busy on the table, and clears both when it answers", async ({
   page,
 }) => {
-  // A catastrophic regex is a reliable way to force a multi-hundred-ms (but
-  // bounded) filter phase without a huge fixture — see
-  // stress/regexTimeout.spec.ts for the same technique and its timing
-  // rationale.
+  // A catastrophic regex forces a slow filter phase without needing a huge fixture.
   const pathological = "a".repeat(30) + "b";
   const rows: string[][] = [["0", pathological]];
   for (let i = 1; i < 50; i++) rows.push([String(i), `normal-${i}`]);
@@ -232,8 +202,6 @@ test("the progress bar is static (no animation) under body.vscode-reduce-motion"
   expect(animationName).toBe("none");
 });
 
-// ---- Banners: deleted file --------------------------------------------------
-
 test.describe("deleted-file banner", () => {
   test.beforeEach(async ({ page }) => {
     await bootAndLoad(page, {
@@ -271,8 +239,6 @@ test.describe("deleted-file banner", () => {
   });
 });
 
-// ---- Row-details hint --------------------------------------------------------
-
 test.describe("the one-time 'rowDetails' hint", () => {
   test("shows once at least one column is detail-only, hides on dismiss, and posts hintSeen", async ({ page }) => {
     await bootAndLoad(page, {
@@ -280,7 +246,7 @@ test.describe("the one-time 'rowDetails' hint", () => {
       headers: smallFixture.headers,
       rows: smallFixture.rows,
       state: defaultViewState(),
-      defaultTableColumns: 2, // age, city start detail-only
+      defaultTableColumns: 2,
     });
     await expect(page.locator("#hint-rowdetails-banner")).toBeVisible();
     await expect(page.locator("#hint-rowdetails-text")).toHaveText(
@@ -307,7 +273,6 @@ test.describe("the one-time 'rowDetails' hint", () => {
     await page.locator("tr.data-row").first().click();
     await expect(page.locator("#hint-rowdetails-banner")).toBeHidden();
 
-    // Expanding a second row must not post hintSeen again.
     await page.locator("tr.data-row").nth(1).click();
     const seenMessages = await page.evaluate(() => (window as unknown as { __posted: Array<Record<string, unknown>> }).__posted);
     expect(seenMessages.filter((m) => m.type === "hintSeen").length).toBe(1);
@@ -337,8 +302,6 @@ test.describe("the one-time 'rowDetails' hint", () => {
   });
 });
 
-// ---- Quote banner copy -------------------------------------------------------
-
 test("the quote banner uses the updated copy and action label", async ({ page }) => {
   const text = ["id,name,comment", "1,Alice,fine", '2,Bob,"starts quoted but never closes', "3,Cara,ok"].join("\n");
   await bootAndLoadText(page, {
@@ -352,8 +315,6 @@ test("the quote banner uses the updated copy and action label", async ({ page })
   await expect(page.locator("#quote-warning-fix-btn")).toHaveText("Read Quotes as Plain Text");
 });
 
-// ---- Numbers/pager text, including the "(filtered from N)" suffix ----------
-
 test("the pager range shows '(filtered from N)' only once search/filters actually reduce the set", async ({ page }) => {
   const fixture = wideFixture(240, 4);
   await bootAndLoad(page, {
@@ -365,7 +326,7 @@ test("the pager range shows '(filtered from N)' only once search/filters actuall
   });
   await expect(page.locator("#pager-row-range")).toHaveText("1–100 of 240 rows");
 
-  await page.locator("#quick-search").fill("v1_2"); // matches exactly one row
+  await page.locator("#quick-search").fill("v1_2");
   await expect(page.locator("#pager-row-range")).toHaveText("1–1 of 1 rows (filtered from 240)");
 
   await page.locator("#quick-search").fill("zzz-nothing-zzz");

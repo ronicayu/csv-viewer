@@ -1,6 +1,3 @@
-// Columns popover edge cases: hiding every column, showing 300 columns at
-// once, and a search that matches nothing.
-
 import { expect, test } from "@playwright/test";
 import { bootAndLoad, defaultViewState } from "../harness";
 import { smallFixture } from "../fixtures";
@@ -26,12 +23,9 @@ test.describe("Hide all", () => {
 
     await expect(page.locator("th.sortable")).toHaveCount(0);
     await expect(page.locator("th.chevron-col")).toHaveCount(1);
-    // Rows still render (as chevron-only rows) and are still clickable.
     await expect(page.locator("tr.data-row")).toHaveCount(smallFixture.rows.length);
 
-    // Close the popover before interacting with a row — a click while a
-    // popover is open closes the popover instead of also toggling the
-    // row underneath it (see docs/reviews/ux-review.md §3, "click-through").
+    // Close the popover first: a row click while one is open only dismisses it.
     await page.keyboard.press("Escape");
     await expect(page.locator("#columns-popover")).toBeHidden();
 
@@ -39,14 +33,10 @@ test.describe("Hide all", () => {
     await firstRow.click();
     const detail = page.locator("tr.detail-row").first();
     await expect(detail).toBeVisible();
-    // detailFieldsFor falls back to "every column" when nothing is
-    // hidden... wait, here everything IS hidden, so detail-only columns
-    // ARE all columns; every header should appear as a dt.
     for (const h of smallFixture.headers) {
       await expect(detail.locator("dt", { hasText: h })).toHaveCount(1);
     }
 
-    // Recovery: Show all brings the table back.
     await page.locator("#columns-btn").click();
     await expect(page.locator("#columns-popover")).toBeVisible();
     await page.locator("#columns-show-all").click();
@@ -63,8 +53,6 @@ test.describe("Hide all", () => {
 
     await page.locator("#sort-btn").click();
     await page.locator("#sort-add-select").selectOption("age");
-    // No visible <th> to read the sort indicator from, but the popover
-    // itself and the button badge should reflect the active sort.
     await expect(page.locator(".sort-key-row")).toHaveCount(1);
     await expect(page.locator(".sort-key-row").first().locator(".sort-key-column")).toHaveText("age");
     await expect(page.locator("#sort-btn")).toHaveText("Sort • 1");
@@ -81,24 +69,19 @@ test.describe("300 columns, Show all", () => {
       headers: fixture.headers,
       rows: fixture.rows,
       state: defaultViewState(),
-      defaultTableColumns: 8, // most columns start detail-only
+      defaultTableColumns: 8,
     });
 
     await page.locator("#columns-btn").click();
     await page.locator("#columns-show-all").click();
     await expect(page.locator("th.sortable")).toHaveCount(300);
 
-    // Horizontal scroll exists (content wider than the viewport).
     const { scrollWidth, clientWidth } = await page.locator("#table-scroll").evaluate((el) => ({
       scrollWidth: el.scrollWidth,
       clientWidth: el.clientWidth,
     }));
     expect(scrollWidth).toBeGreaterThan(clientWidth);
 
-    // Scroll partway and confirm the sticky header tracks the same
-    // horizontal offset as the body (thead is `position: sticky; top: 0`,
-    // which only pins the vertical axis — it scrolls horizontally with its
-    // parent, so header/body columns should stay visually aligned).
     await page.locator("#table-scroll").evaluate((el) => {
       el.scrollLeft = 500;
     });
@@ -127,8 +110,6 @@ test.describe("300 columns, Show all", () => {
     const viewport = page.viewportSize();
     expect(popoverBox).not.toBeNull();
     expect(viewport).not.toBeNull();
-    // The popover's own CSS caps it at max-height: 60vh with overflow:
-    // auto, so it must never grow taller than the viewport.
     expect(popoverBox!.height).toBeLessThanOrEqual(viewport!.height);
     expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(viewport!.height + 1);
   });
@@ -150,13 +131,10 @@ test("a columns search that matches nothing leaves an empty list without errors,
   await page.locator("#columns-search").fill("zzz-no-such-column-zzz");
   await expect(page.locator("#columns-list .column-row")).toHaveCount(0);
 
-  // Hide all is not scoped to the filtered (empty) list — it still hides
-  // every real column, per the spec's "Show all"/"Hide all" being
-  // unconditional bulk actions.
   await page.locator("#columns-hide-all").click();
   await expect(page.locator("th.sortable")).toHaveCount(0);
 
-  await page.locator("#columns-search").fill(""); // clear the filter to see the (still-empty-looking) list again
+  await page.locator("#columns-search").fill("");
   await expect(page.locator("#columns-list .column-row")).toHaveCount(smallFixture.headers.length);
   for (const row of await page.locator("#columns-list .column-row input").all()) await expect(row).not.toBeChecked();
 

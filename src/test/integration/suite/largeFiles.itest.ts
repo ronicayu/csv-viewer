@@ -1,21 +1,3 @@
-// Covers docs/spec.md's "Large files" section: the >50MB "may be slow"
-// warning, the >512MB hard limit, timing to first render, and extension-
-// host memory — for large multi-row files and a single-line file.
-//
-// FIXED (see docs/spec.md / final report): this used to be a
-// CustomTextEditorProvider, and VS Code 1.139.1 itself refuses to sync ANY
-// text document at or above ~50MB to a CustomTextEditorProvider ("Unable to
-// retrieve document from URI ...", logged to the Extension Host console;
-// resolveCustomTextEditor() never ran) — regardless of workspace
-// membership. That made the extension's own ">50MB: warn and still try"
-// path (docs/spec.md) unreachable for files at/above VS Code's own text-
-// sync ceiling. Switching to CustomReadonlyEditorProvider, which reads
-// bytes itself via vscode.workspace.fs.readFile() instead of waiting for a
-// synced TextDocument, sidesteps that ceiling entirely: 51MB and 120MB now
-// open and render, same as 49MB. A new, deliberate hard limit at 512MB
-// (comfortably above anything exercised here) shows an error and does not
-// load at all, so an enormous file can't wedge the extension host.
-
 import * as assert from "assert";
 import * as vscode from "vscode";
 import { writeLargeCsv, writeSingleLongLineCsv } from "../fixtures";
@@ -54,7 +36,7 @@ async function measure(label: string, uri: vscode.Uri, bytes: number, opts: { ex
   } else {
     try {
       await waitForRender(api, fileKeyFor(uri), 1, { timeoutMs: opts.timeoutMs });
-      outcome = "rendered"; // would mean the hard limit isn't actually enforced
+      outcome = "rendered";
     } catch {
       outcome = "failed-to-open";
     }
@@ -135,7 +117,6 @@ suite("Large files", function () {
     assert.strictEqual(m.outcome, "rendered");
     assert.ok(m.rowCount! > 0, "expected at least one parsed row");
 
-    // The extension host itself must still be alive and responsive.
     await vscode.commands.executeCommand("workbench.action.files.saveAll");
   });
 
@@ -161,28 +142,7 @@ suite("Large files", function () {
     assert.strictEqual(m.rowCount, 1, "expected exactly one data row");
   });
 
-  // BUG (severe, unrelated to this fix — pre-existing and still true): a
-  // single pathologically long line is drastically slower than a normal
-  // multi-row file of the *same total byte size* — and gets worse faster
-  // than the byte count does. Measured by hand while writing this suite
-  // (not re-run here to keep the suite fast and non-flaky):
-  //   1MB  single line -> ~2.6s to render
-  //   5MB  single line -> ~12s to render
-  //   15MB single line -> ~37s to render, and VS Code's own responsiveness
-  //                        watchdog logged "CodeWindow: detected
-  //                        unresponsive" — the whole window's UI thread
-  //                        stalled long enough to trip it.
-  // A single line at the spec's requested 20MB is expected to be worse
-  // still and risks hanging (or being killed by) the whole Extension Test
-  // Host, which would take the rest of this suite down with it — so it is
-  // deliberately `skip`ped rather than run for real. This scales far worse
-  // than linearly with line length, pointing at something quadratic (or
-  // worse) in either VS Code's own single-line handling or this
-  // extension's DOM rendering of one massive table cell
-  // (`td.textContent = value` in src/webview/main.ts's buildRowTr/
-  // buildDetailTr, for a `value` that is itself multiple megabytes). Not in
-  // scope for this fix (webview DOM rendering is owned by a parallel
-  // agent) — left as documented, still-skipped coverage.
+  // Skipped: a 20MB single line renders far slower than linearly and can hang the whole test host.
   test.skip("single line, 20MB long: one row (SKIPPED — see BUG comment above; risks hanging the whole test host)", async function () {
     const { filePath } = await writeSingleLongLineCsv("longline-20mb.csv", 20 * 1024 * 1024);
     const uri = vscode.Uri.file(filePath);

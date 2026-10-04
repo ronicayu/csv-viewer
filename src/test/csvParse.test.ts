@@ -38,10 +38,6 @@ describe("parseCsv basics", () => {
   });
 
   it("skips a fully blank line in the middle of the file rather than producing an empty row", () => {
-    // Documented behavior: skipEmptyLines drops lines with no characters at
-    // all, anywhere in the file (trailing or interior). A line that has
-    // content but only delimiters (e.g. ",,,") is a real row of empty
-    // fields and is NOT dropped — only a line with nothing on it at all is.
     const result = parseCsv("a,b\n1,2\n\n3,4\n");
     expect(result.rows).toEqual([
       ["1", "2"],
@@ -67,13 +63,6 @@ describe("quoted fields", () => {
   });
 
   it("normalizes an embedded CRLF inside a quoted field to LF", () => {
-    // Updated expectation: csvParse.ts now normalizes every line-ending
-    // style to LF *before* Papa ever sees the text, so a file mixing CRLF/
-    // LF/CR line endings parses one row per physical line instead of
-    // merging rows (see the "line endings" describe block in
-    // src/test/stress/parser.stress.test.ts for the bug this fixes). That
-    // normalization necessarily also applies inside quoted fields — a
-    // deliberate, documented tradeoff, not a regression.
     const result = parseCsv('a,b\n"line1\r\nline2",x');
     expect(result.rows).toEqual([["line1\nline2", "x"]]);
   });
@@ -85,10 +74,6 @@ describe("quoted fields", () => {
 });
 
 describe("stray mid-field quote regression (the bug Papa Parse fixes)", () => {
-  // Bug being fixed: a stray `"` inside an *unquoted* field used to flip the
-  // hand-written tokenizer into quoted mode and swallow the rest of the
-  // file into one cell. Papa Parse only treats a `"` as starting a quoted
-  // field when it is the first character of the field.
   it("parses an inch mark inside an unquoted field as literal text, not a quote-open", () => {
     const result = parseCsv('name,size,type\nWidget,5" screen,TV\nGadget,10" screen,Monitor');
     expect(result.headers).toEqual(["name", "size", "type"]);
@@ -171,10 +156,6 @@ describe("headers", () => {
 });
 
 describe("delimiter auto-detection (via parseCsv's returned delimiter)", () => {
-  // detectDelimiter() as a standalone export was removed along with the old
-  // line-based tokenizer — Papa Parse's quote-aware guessing now runs
-  // inside parseCsv itself, and the delimiter it settled on comes back on
-  // the result so the UI can show it (e.g. "Auto (;)").
   it("detects comma", () => {
     expect(parseCsv("a,b,c\n1,2,3\n4,5,6").delimiter).toBe(",");
   });
@@ -196,10 +177,6 @@ describe("delimiter auto-detection (via parseCsv's returned delimiter)", () => {
   });
 
   it("prefers the delimiter with the most consistent count across lines", () => {
-    // Semicolons appear exactly once on every line (fully consistent).
-    // Commas appear inside what would, under a semicolon split, be a single
-    // field on some lines — Papa's quote-unaware sampling here still favors
-    // the delimiter that splits the file most consistently.
     const text = "a;b\n1,1;2\n3;4,4,4\n5;6";
     expect(parseCsv(text).delimiter).toBe(";");
   });

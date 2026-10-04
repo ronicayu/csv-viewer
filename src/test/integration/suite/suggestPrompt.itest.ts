@@ -1,16 +1,3 @@
-// Covers the first-run "View as a table?" suggestion prompt (pm-review.md
-// §3, option C): fires once for a plain-text CSV/TSV/TAB editor, never
-// again afterward regardless of which button was used (or none); each
-// button's effect; csvViewer.suggestOnOpen=false suppresses it; it never
-// fires once the viewer has been opened manually (including via the
-// prompt's own "Open as Table"/"Always" choices, and via "Open as Text").
-//
-// vscode.window.showInformationMessage can't be driven by a click from the
-// Extension Test Host, so the prompt is routed through an injectable
-// function in extension.ts; the test-hook API exposes it as
-// getPendingPrompt()/choosePromptButton() instead (see helpers.ts's
-// waitForPrompt/assertNoPromptAppears).
-
 import * as assert from "assert";
 import * as fsp from "fs/promises";
 import * as path from "path";
@@ -37,8 +24,6 @@ async function setSuggestOnOpen(value: unknown): Promise<void> {
 }
 
 let fixtureCounter = 0;
-/** A fresh, uniquely-named small CSV each time, so no two tests race over
- * the same uri's "is the viewer already open for it" check. */
 async function freshCsv(): Promise<vscode.Uri> {
   fixtureCounter += 1;
   const filePath = path.join(WORKSPACE_ROOT, `suggest-prompt-${fixtureCounter}.csv`);
@@ -58,7 +43,7 @@ suite("First-run 'View as a table?' suggestion prompt", () => {
     associationsBefore.push(await getAssociations());
     const api = await getTestApi();
     api.resetSuggestPromptState();
-    await setSuggestOnOpen(undefined); // back to the schema default (true)
+    await setSuggestOnOpen(undefined);
   });
 
   teardown(async () => {
@@ -66,8 +51,6 @@ suite("First-run 'View as a table?' suggestion prompt", () => {
     const api = await getTestApi();
     api.resetSuggestPromptState();
     await setSuggestOnOpen(undefined);
-    // Restore whatever workbench.editorAssociations held before this test,
-    // undoing anything a "Always for CSV Files" choice wrote.
     const restore = associationsBefore.pop();
     await setAssociations(restore);
   });
@@ -123,10 +106,7 @@ suite("First-run 'View as a table?' suggestion prompt", () => {
     assert.strictEqual(associations?.["*.foo"], "someOtherExt.editor", "expected the pre-existing unrelated association to survive");
 
     const notifications = api.getNotifications();
-    // The follow-up is an information message, not warning/error, so it
-    // isn't in getNotifications() (which only records warnings/errors) —
-    // just confirm nothing on the warning/error path was raised by this
-    // flow.
+    // Only warnings and errors are recorded, so the follow-up information message is not visible here.
     assert.strictEqual(notifications.filter((n) => n.level === "error").length, 0);
   });
 
@@ -166,11 +146,6 @@ suite("First-run 'View as a table?' suggestion prompt", () => {
   });
 
   test("never prompts once the viewer has already been opened manually for an unrelated file", async () => {
-    // Opening the viewer through any path (the command, "Open With", an
-    // association) flips the same "already knows about the viewer" flag
-    // resolveCustomEditor sets — exercise it via the command on one file,
-    // then confirm a completely different, never-before-seen CSV text
-    // editor does not trigger the prompt.
     const viewerUri = await freshCsv();
     await vscode.commands.executeCommand("csvViewer.open", viewerUri);
     const api = await getTestApi();
@@ -186,8 +161,7 @@ suite("First-run 'View as a table?' suggestion prompt", () => {
     await vscode.commands.executeCommand("csvViewer.open", viewerUri);
     const api = await getTestApi();
     await waitForRender(api, fileKeyFor(viewerUri));
-    // resolveCustomEditor already marks the flag; reset it so this test
-    // specifically isolates openAsText's own flag-setting.
+    // resolveCustomEditor already sets the flag; reset it so this test isolates openAsText.
     api.resetSuggestPromptState();
 
     await vscode.commands.executeCommand("csvViewer.openAsText");

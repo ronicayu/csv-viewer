@@ -1,19 +1,3 @@
-// Adversarial stress tests for the CSV parser (src/core/csvParse.ts), the
-// column-visibility maps built on top of it (src/core/columns.ts), and the
-// separator-resolution logic in the webview (resolveDelimiterOption in
-// src/webview/main.ts, exercised here indirectly via parseCsv's `delimiter`
-// option, which is what that function ultimately feeds).
-//
-// Convention (per task): a test that demonstrates a real bug is written as
-// `test.fails(...)` asserting the CORRECT/expected behavior — since the code
-// is buggy, that assertion currently fails, and `.fails` inverts that so the
-// suite stays green while the bug stays documented in the comment above each
-// one. A test asserting today's (correct) behavior is a plain `test`/`it`.
-//
-// All findings below were verified against the actual output of parseCsv /
-// columns.ts in this repo before being written down (see the final report
-// for the full bug list with severities).
-
 import { describe, expect, it, test } from "vitest";
 import { parseCsv } from "../../core/csvParse";
 import { defaultVisibility, detailFieldsFor, reconcileVisibility, visibleColumns } from "../../core/columns";
@@ -33,9 +17,6 @@ describe("empty / degenerate input", () => {
   });
 
   it("whitespace-only file: each whitespace-only line is a real record, not blank", () => {
-    // skipEmptyLines only drops lines with zero characters at all; a line
-    // of spaces has characters, so it is kept — first as header, second as
-    // a one-cell data row.
     const r = parseCsv("   \n   \n");
     expect(r.headers).toEqual(["   "]);
     expect(r.rows).toEqual([["   "]]);
@@ -97,25 +78,11 @@ describe("encoding: BOM, wide chars, emoji, RTL, control chars", () => {
 });
 
 describe("line endings", () => {
-  // FIXED (decision, not a bug): csvParse.ts now normalizes every line
-  // ending style (CRLF, lone CR) to LF before Papa ever sees the text, so
-  // mixed line endings never merge rows (see below). That normalization
-  // necessarily also applies inside quoted fields — there's no way to tell
-  // "a CRLF that's part of quoted content" from "a CRLF that separates
-  // rows" without a full parse pass, and mixed line endings merging rows
-  // is by far the worse failure mode. So an embedded CRLF (or lone CR) in
-  // a quoted field is now normalized to LF too. This test's expectation
-  // was updated to match that documented, deliberate tradeoff — it
-  // previously asserted the CRLF survived intact, which the fix above no
-  // longer preserves.
   it("a quoted field containing an embedded CRLF is preserved, normalized to LF", () => {
     const r = parseCsv('a,b\n"x\r\ny",2');
     expect(r.rows).toEqual([["x\ny", "2"]]);
   });
 
-  // FIXED: csvParse.ts normalizes \r\n and lone \r to \n before parsing, so
-  // a file mixing CRLF/LF/CR line endings parses one row per physical line
-  // instead of merging rows and leaking newline characters into cells.
   it("CRLF header followed by an LF-terminated data line still starts a new row", () => {
     const r = parseCsv("a,b\r\n1,2\n3,4");
     expect(r.rows).toEqual([
@@ -152,9 +119,6 @@ describe("line endings", () => {
   });
 
   it("a lone-CR-only file (no mixing) parses correctly", () => {
-    // Documented, non-buggy baseline: the bug above is specifically about
-    // *mixing* styles, not CR-only files, which already work (and are
-    // already covered in csvParse.test.ts).
     const r = parseCsv("a,b\r1,2\r3,4");
     expect(r.rows).toEqual([
       ["1", "2"],
@@ -165,9 +129,6 @@ describe("line endings", () => {
 
 describe("malformed quoting", () => {
   it("an unclosed quote at EOF consumes the rest of the line as literal text without crashing", () => {
-    // Documented behavior: no closing quote is ever found, so everything
-    // through EOF becomes the field's content (including the delimiter
-    // that would otherwise have ended it); the short row is then padded.
     const r = parseCsv('a,b\n"unterminated,2');
     expect(r.rows).toEqual([["unterminated,2", ""]]);
   });
@@ -183,26 +144,10 @@ describe("malformed quoting", () => {
   });
 
   it("whitespace before the opening quote means it never opens a quoted field", () => {
-    // Matches the documented rule in csvParse.ts's header comment: `"` only
-    // opens a quoted field as the literal first character of the field.
     const r = parseCsv('a,b\n1, "b"');
     expect(r.rows).toEqual([["1", ' "b"']]);
   });
 
-  // FIXED (decision, not by teaching Papa a smarter quote state machine): a
-  // quote that opens right after a delimiter, closes, and is followed by
-  // more text before the next delimiter (e.g. `h,"b"c,d`) still makes Papa
-  // swallow the rest of the row into one field WHEN QUOTING IS ON — that's
-  // inherent to quote-aware CSV parsing and the decision was explicitly to
-  // keep Papa rather than hand-roll different quote handling. What's fixed
-  // instead: `quoteProblems` flags the affected row, and re-parsing with
-  // `quotes: false` (the "Treat quotes as plain text" workaround the
-  // webview offers once quoteProblems is non-empty) recovers the correct
-  // field/row structure, with `"` kept as literal text since quoting is
-  // off. This test's original "expected" assertion — that quoting-ON
-  // parsing itself would produce ["h","bc","d"] — conflicted with that
-  // decision, so it was rewritten to check the actual fix (quoteProblems +
-  // the quotes:false escape hatch) instead.
   it('quote right after a delimiter, with text after the closing quote: unchanged with quoting on (documented), flagged via quoteProblems, and recovered with quotes:false', () => {
     const withQuotes = parseCsv('h,"b"c,d', { firstRowIsHeader: false });
     expect(withQuotes.rows).toEqual([["h", 'b"c,d']]);
@@ -236,20 +181,15 @@ describe('header names colliding with JS object internals ("__proto__" etc.)', (
   });
 
   it('"constructor", "toString", and "hasOwnProperty" round-trip correctly through the columnVisibility map', () => {
-    // These are inherited, ordinary *data* properties/methods (not
-    // accessors like __proto__), so a plain assignment on the map object
-    // shadows them with a real own property, and
-    // Object.prototype.hasOwnProperty.call(...) (used defensively in
-    // reconcileVisibility) still reports them correctly.
     for (const name of ["constructor", "toString", "hasOwnProperty"]) {
       const headers = [name, "b"];
-      const shown = defaultVisibility(headers, 1); // name -> true, b -> false
+      const shown = defaultVisibility(headers, 1);
       expect(Object.prototype.hasOwnProperty.call(shown, name)).toBe(true);
       expect(shown[name]).toBe(true);
       expect(visibleColumns(headers, shown)).toEqual([name]);
       expect(detailFieldsFor(headers, shown)).toEqual(["b"]);
 
-      const hidden = defaultVisibility(headers, 0); // both detail-only
+      const hidden = defaultVisibility(headers, 0);
       expect(hidden[name]).toBe(false);
       expect(visibleColumns(headers, hidden)).toEqual([]);
 
@@ -258,38 +198,20 @@ describe('header names colliding with JS object internals ("__proto__" etc.)', (
     }
   });
 
-  // FIXED: defaultVisibility/reconcileVisibility (src/core/columns.ts) now
-  // write every entry via Object.defineProperty and read only via
-  // Object.prototype.hasOwnProperty.call + the getVisibility helper, so a
-  // header literally named "__proto__" no longer hits the accessor's
-  // silent-no-op-on-write trap.
   it('a column named "__proto__" can be hidden (marked detail-only) like any other column', () => {
     const headers = ["__proto__", "b"];
-    const hidden = defaultVisibility(headers, 0); // both columns should be detail-only
+    const hidden = defaultVisibility(headers, 0);
     expect(Object.prototype.hasOwnProperty.call(hidden, "__proto__")).toBe(true);
     expect(hidden["__proto__"]).toBe(false);
     expect(visibleColumns(headers, hidden)).toEqual([]);
     expect(detailFieldsFor(headers, hidden)).toEqual(["__proto__", "b"]);
   });
 
-  // NOTE: the original version of this test built `previous` as
-  // `{ __proto__: false } as unknown as Record<string, boolean>`. That's
-  // object-LITERAL `__proto__: false` syntax, which the ECMAScript grammar
-  // special-cases identically to the bracket-assignment trap this bug is
-  // about (it tries to set the object's prototype, `false` isn't an object
-  // so the attempt is silently ignored, and — either way — no *own*
-  // "__proto__" property is ever created). So that fixture could never
-  // carry a real own "__proto__" property regardless of whether
-  // reconcileVisibility itself is fixed; it was testing the test's own
-  // setup, not the bug. The realistic source per the task's own framing
-  // ("persisted state is JSON in VS Code workspaceState") is JSON.parse,
-  // which — unlike either literal form — does create a genuine own
-  // "__proto__" property (per the JSON spec's use of CreateDataProperty).
-  // Rebuilt around that so the test actually exercises the fix.
+  // JSON.parse creates an own `__proto__` property; an object literal `{ __proto__: false }` does not.
   it('reconcileVisibility can persist a "false" (hidden) setting for a "__proto__" column across reloads', () => {
     const headers = ["__proto__"];
     const previous = JSON.parse('{"__proto__": false}') as Record<string, boolean>;
-    expect(Object.prototype.hasOwnProperty.call(previous, "__proto__")).toBe(true); // sanity: JSON.parse (unlike a literal/bracket write) really does create an own property
+    expect(Object.prototype.hasOwnProperty.call(previous, "__proto__")).toBe(true);
     const reconciled = reconcileVisibility(headers, previous, 0);
     expect(Object.prototype.hasOwnProperty.call(reconciled, "__proto__")).toBe(true);
     expect(visibleColumns(headers, reconciled)).toEqual([]);
@@ -297,12 +219,6 @@ describe('header names colliding with JS object internals ("__proto__" etc.)', (
 });
 
 describe("duplicate headers", () => {
-  // FIXED: dedupeNames (src/core/csvParse.ts) now checks every generated
-  // `_N` candidate against every literal name in the file (not just names
-  // already assigned so far), so a duplicate never claims a suffix that a
-  // later literal header will also want. "a,a,a_2": the literal "a_2"
-  // (index 2) keeps its name; the duplicate "a" (index 1) skips "a_2"
-  // (reserved for that literal) and becomes "a_3" instead.
   it('"a,a,a_2" produces three distinct header names, not a collision', () => {
     const r = parseCsv("a,a,a_2\n1,2,3");
     expect(new Set(r.headers).size).toBe(3);
@@ -316,13 +232,6 @@ describe("duplicate headers", () => {
   });
 
   it("an empty header interleaved with a literal `column_N` header happens not to collide here", () => {
-    // Documented, non-buggy in this specific arrangement: the empty cell at
-    // index 1 is named "column_2" (positional), and the *third* cell is
-    // already literally "column_2" — but dedupeNames processes left to
-    // right and only renames the *second* occurrence of an exact string, so
-    // here it renames the real "column_2" (not the synthesized one) to
-    // "column_2_2". No collision — but see the __proto__/a_2 cases above
-    // for arrangements where the same mechanism does collide.
     const r = parseCsv("a,,column_2\n1,2,3");
     expect(r.headers).toEqual(["a", "column_2", "column_2_2"]);
     expect(new Set(r.headers).size).toBe(3);
@@ -375,12 +284,7 @@ describe("delimiter auto-detection", () => {
     ]);
   });
 
-  // BUG (medium): Papa's delimiter guess counts raw character frequency
-  // across the sample rows. When `|` appears in the data itself (not as a
-  // delimiter) more often per line than the real delimiter `,` does, Papa
-  // picks `|` as "the" delimiter — splitting literal data apart — even
-  // though a human looking at this file would immediately read it as a
-  // 2-column, comma-delimited file with pipes inside the values.
+  // Known Papa limitation: delimiter guessing counts raw character frequency, so a data `|` can win.
   test.fails("a literal `|` appearing in every row of an otherwise comma-delimited file does not hijack delimiter detection", () => {
     const lines = Array.from({ length: 5 }, (_, i) => `${i}|x,${i}|y`);
     const r = parseCsv(lines.join("\n"), { firstRowIsHeader: false });
@@ -389,12 +293,7 @@ describe("delimiter auto-detection", () => {
     expect(r.rows[0]).toEqual(["0|x", "0|y"]);
   });
 
-  // BUG (low/medium, known Papa limitation worth documenting): delimiter
-  // guessing only samples a prefix of the file. If the first ~10 lines
-  // don't exhibit the real delimiter at all (e.g. single bare tokens with
-  // no delimiter, followed by clearly semicolon-delimited data further
-  // down), Papa never sees evidence for ";" and falls back to its default
-  // of ",", collapsing the whole file into one column.
+  // Known Papa limitation: delimiter guessing samples only a prefix of the file.
   test.fails("delimiter detection still finds the real delimiter when it only shows up after ~10 unrepresentative rows", () => {
     const preamble = Array.from({ length: 9 }, (_, i) => `row${i}`).join("\n");
     const body = "a;b;c\n1;2;3\n4;5;6\n7;8;9\n10;11;12";
@@ -423,27 +322,7 @@ describe("delimiter auto-detection", () => {
     expect(r.rows).toEqual([["1", "2"]]);
   });
 
-  // BUG (medium): the quote character `"` is a valid 1-character value for
-  // the "Custom…" separator input per the spec (any 1–5 char string), but
-  // parseCsv's quoteChar is hard-coded to `"`. Requesting `"` as the
-  // delimiter isn't honored *and isn't rejected either* — it's silently
-  // dropped, and the parser falls all the way back to comma auto-detection
-  // against data that has no commas at all, producing one garbage column
-  // instead of either honoring the delimiter or failing loudly.
-  // FIXED, but only when quoting is off: Papa Parse hardcodes `"` as an
-  // always-bad delimiter (Papa.BAD_DELIMITERS forces a requested delimiter
-  // of `"` back to `,`), unconditionally, regardless of quoteChar — so `"`
-  // can never be handed to Papa's own `delimiter` option directly. The
-  // decision was: with quoting ON, `"` as a delimiter is rejected one
-  // layer up, in the webview, before parseCsv is ever called with this
-  // combination (see the "Separator" custom-input handling in
-  // src/webview/main.ts) — so parseCsv's behavior for that combination is
-  // unchanged and now moot, not "fixed". With quoting OFF, `"` IS a valid
-  // delimiter (there's no quoting to protect it from), and parseCsv works
-  // around Papa's hardcoded restriction (see QUOTE_DELIMITER_PLACEHOLDER).
-  // This test's original "expected" assertion (that quoting-ON parsing
-  // itself would honor `"` as delimiter) conflicted with that decision, so
-  // it was rewritten to cover both cases.
+  // Papa forces a `"` delimiter back to `,`; parseCsv works around it only when quoting is off.
   it('using `"` as the custom delimiter: unchanged (falls back to auto-detected comma) with quoting on — moot, since the webview rejects it before calling parseCsv — and honored with quoting off', () => {
     const withQuotesOn = parseCsv('a"b\n1"2', { delimiter: '"' });
     expect(withQuotesOn.delimiter).toBe(",");
@@ -495,7 +374,6 @@ describe("scale and performance (generous upper bounds; observed timings logged)
     const result = fn();
     const ms = Date.now() - t0;
     const heapDeltaMb = (process.memoryUsage().heapUsed - memBefore) / 1024 / 1024;
-    // Observed on this machine at authoring time: ~0.7s / ~135MB heap delta.
     // eslint-disable-next-line no-console
     console.log(`[perf] ${label}: ${ms}ms, heapUsed delta ${heapDeltaMb.toFixed(1)}MB`);
     return result;
@@ -512,7 +390,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = lines.join("\n");
       const t0 = Date.now();
       const r = timed("500k rows x 10 cols", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(perfBoundMs(15000, 60000)); // observed ~0.7s
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(15000, 60000));
       expect(r.rows.length).toBe(500000);
       expect(r.headers.length).toBe(10);
     },
@@ -530,7 +408,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = lines.join("\n");
       const t0 = Date.now();
       const r = timed("1k cols x 1k rows", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(perfBoundMs(10000, 40000)); // observed ~40ms
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(10000, 40000));
       expect(r.rows.length).toBe(1000);
       expect(r.headers.length).toBe(1000);
     },
@@ -544,7 +422,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = `a,b\n1,"${bigCell}"`;
       const t0 = Date.now();
       const r = timed("single 5MB cell", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(perfBoundMs(5000, 20000)); // observed ~5ms
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(5000, 20000));
       expect(r.rows[0][1].length).toBe(5 * 1024 * 1024);
     },
     15000,
@@ -560,7 +438,7 @@ describe("scale and performance (generous upper bounds; observed timings logged)
       const text = lines.join("\n");
       const t0 = Date.now();
       const r = timed("50k rows, all quoted w/ embedded newlines", () => parseCsv(text));
-      expect(Date.now() - t0).toBeLessThan(perfBoundMs(10000, 40000)); // observed ~50ms
+      expect(Date.now() - t0).toBeLessThan(perfBoundMs(10000, 40000));
       expect(r.rows.length).toBe(50000);
       expect(r.rows[0]).toEqual(["line0\nmore0", "val0\nx", "z0"]);
     },

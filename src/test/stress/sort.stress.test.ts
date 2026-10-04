@@ -1,9 +1,3 @@
-// Adversarial tests for src/core/sort.ts. The headline finding: compareCells
-// picks numeric-vs-string comparison mode PER PAIR (based on whether each
-// side individually parses as a finite number), rather than deriving one
-// consistent sort key per value up front. That makes the comparator a
-// non-transitive relation for certain value sets, which corrupts
-// Array.prototype.sort (whose contract requires a consistent total order).
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { cellSortKey, compareCellSortKeys, cycleSortForColumn, sortRows } from "../../core/sort";
@@ -11,18 +5,8 @@ import type { SortDirection, SortKey } from "../../core/types";
 import { perfBoundMs } from "./perfEnv";
 
 describe("comparator consistency (total order)", () => {
-  // FIXED: sortRows now precomputes one canonical sort key (empty/numeric/
-  // text) per cell, per sort column, up front, instead of re-deriving
-  // numeric-vs-string mode for each pairwise comparison during the sort —
-  // see src/core/sort.ts's module comment. That makes the relation a
-  // genuine total order: numeric and text are separated by a single,
-  // direction-consistent rule instead of being decided pair-by-pair.
   it("places '10' and '1e1' (which tie numerically at 10) consistently relative to '1x' (non-numeric), instead of sorting '1x' between them", () => {
     const headers = ["v"];
-    // Row input order matters here: V8's sort implementation only
-    // surfaces a non-transitive comparator's inconsistency for certain
-    // input orderings, so this exact order is kept from the original
-    // repro that found the bug.
     const rows = [["10"], ["1x"], ["1e1"]];
     const sorted = sortRows(rows, headers, [{ column: "v", direction: "asc" }]);
     const idx10 = sorted.findIndex((r) => r[0] === "10");
@@ -30,7 +14,6 @@ describe("comparator consistency (total order)", () => {
     const idx1x = sorted.findIndex((r) => r[0] === "1x");
     const bothSideOf1x = (idx10 < idx1x) === (idx1e1 < idx1x);
     expect(bothSideOf1x).toBe(true);
-    // Both numeric values sort before the text value in ascending order.
     expect(idx10).toBeLessThan(idx1x);
     expect(idx1e1).toBeLessThan(idx1x);
   });
@@ -40,7 +23,7 @@ describe("comparator consistency (total order)", () => {
     const a = cellSortKey("10");
     const b = cellSortKey("1e1");
     const c = cellSortKey("1x");
-    expect(compareCellSortKeys(a, b, direction)).toBe(0); // numeric tie
+    expect(compareCellSortKeys(a, b, direction)).toBe(0);
     const ac = Math.sign(compareCellSortKeys(a, c, direction));
     const bc = Math.sign(compareCellSortKeys(b, c, direction));
     expect(ac).toBe(bc);
@@ -117,11 +100,9 @@ describe("ascending vs descending are exact reverses (except empties stay last b
           const nonEmptyDesc = desc.filter((v) => v.trim() !== "");
           const emptyCount = values.filter((v) => v.trim() === "").length;
 
-          // Empties are always the trailing `emptyCount` entries, in both directions.
           expect(asc.slice(asc.length - emptyCount).every((v) => v.trim() === "")).toBe(true);
           expect(desc.slice(desc.length - emptyCount).every((v) => v.trim() === "")).toBe(true);
 
-          // The non-empty portions are exact reverses of each other.
           expect(nonEmptyAsc).toEqual(nonEmptyDesc.slice().reverse());
         },
       ),
@@ -180,7 +161,7 @@ describe("cycleSortForColumn: random click / shift-click sequences never produce
           for (const click of clicks) {
             keys = cycleSortForColumn(keys, click.column, click.shift);
             const columns = keys.map((k) => k.column);
-            expect(new Set(columns).size).toBe(columns.length); // no duplicates
+            expect(new Set(columns).size).toBe(columns.length);
             for (const k of keys) {
               expect(["asc", "desc"] as SortDirection[]).toContain(k.direction);
             }
@@ -228,23 +209,6 @@ describe("performance: 500k rows x 20 cols, multi-key sort", () => {
     // eslint-disable-next-line no-console
     console.log(`sortRows: 500k rows x 20 cols, 3 sort keys: ${ms.toFixed(1)}ms${ms > 1200 ? "  <-- OVER the 1.2s perf target" : ""}`);
     expect(sorted.length).toBe(N);
-    // Perf target (decided): precomputing one sort key per cell per sort
-    // key up front, instead of re-parsing numbers inside the comparator,
-    // keeps a 3-key sort of 500k x 20 rows well under 1.2s in isolation
-    // (measured ~0.8s on the machine this was authored on). The hard
-    // assertion below uses a more generous ceiling than 1.2s, same as
-    // every other perf test in this suite (see parser.stress.test.ts /
-    // performance.stress.test.ts) — running the full suite schedules many
-    // of these heavy perf tests concurrently, and CPU contention alone
-    // (not an algorithmic regression) can push any single one well past
-    // its solo-run number. The 1.2s target is still enforced by the
-    // console warning above, which reflects the real, uncontended number.
-    // 15s matches the generous ceiling every other large-scale perf test
-    // in this suite uses (see parser.stress.test.ts, performance.stress.
-    // test.ts) for exactly this reason. PERF_TESTS=1 enforces that 15s
-    // bound; otherwise (CI's default) a looser 60s sanity bound is used
-    // instead, since even 15s was observed to fail on one particularly
-    // slow/throttled shared machine despite no regression — see perfEnv.ts.
     expect(ms).toBeLessThan(perfBoundMs(15_000, 60_000));
   }, 65000);
 });

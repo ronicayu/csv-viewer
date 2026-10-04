@@ -1,14 +1,3 @@
-// Covers: disposing a panel while its 300ms debounced reload timer is
-// still pending (must not throw/error after dispose), and rapid
-// open/close cycling for panel/listener leaks.
-//
-// Leak-check strategy: `panelCount()` mirrors testHookPanels.size, which
-// is populated in resolveCustomTextEditor and deleted inside the SAME
-// onDidDispose callback that disposes changeSub/viewStateSub/messageSub.
-// So panelCount() returning to 0 after every close is a direct proxy for
-// "onDidDispose actually fired and the per-panel listeners were disposed"
-// — not just "the tab visually closed".
-
 import * as assert from "assert";
 import * as fsp from "fs/promises";
 import * as path from "path";
@@ -22,7 +11,7 @@ function fixture(name: string): vscode.Uri {
 
 suite("Disposal and leak checks", () => {
   suiteSetup(async () => {
-    await getTestApi(); // ensures the extension is activated before any test in this file
+    await getTestApi();
   });
 
   teardown(async () => {
@@ -39,20 +28,13 @@ suite("Disposal and leak checks", () => {
     await waitForRender(api, key);
     const notifBefore = api.getNotifications().length;
 
-    // A real write to disk (not a WorkspaceEdit, which only touches the
-    // in-memory document model unless saved) is what the FileSystemWatcher
-    // reacts to — this schedules the extension's 300ms debounce timer for
-    // a reload.
+    // Real disk write: the FileSystemWatcher does not react to an unsaved WorkspaceEdit.
     await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n");
 
-    // Close well before the 300ms debounce fires, exercising
-    // webviewPanel.onDidDispose's `clearTimeout(changeDebounceHandle)`.
     await closeAllEditors();
     await waitFor(() => api.panelCount() === 0, { timeoutMs: 4000, message: "panel never reported disposed" });
 
-    // Let the (should-be-cancelled) timer's original window pass, in case
-    // it wasn't actually cleared and fires a postMessage into a disposed
-    // webview.
+    // Wait past the 300ms debounce so a timer that was not cleared would have fired by now.
     await sleep(800);
 
     assert.strictEqual(

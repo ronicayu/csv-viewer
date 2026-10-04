@@ -1,5 +1,5 @@
 {
-  "//": "Type-checks the webview e2e specs, which mix Node (Playwright, fs paths) with DOM (page.evaluate bodies) — neither tsconfig.json (no DOM lib) nor tsconfig.webview.json (no Node) covers both. Checked by `npm run test:webview`; Playwright itself only transpiles.",
+  "//": "Specs mix Node APIs (Playwright, fs) with DOM APIs (page.evaluate bodies); no other tsconfig includes them.",
   "compilerOptions": {
     "module": "commonjs",
     "moduleResolution": "node",

@@ -1,8 +1,3 @@
-// Markdown rendering of cell values in row details: auto-detection per column,
-// the column-wide Raw / Markdown switch (persisted as ViewState.markdownColumns),
-// the clamp and 10,000-character cap on rendered output, and the safety rules
-// (raw HTML is text, no images, only http/https/mailto links).
-
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { awaitPosted, bootAndLoadText, bootShell, clearPosted, defaultViewState, posted, pushLoadText } from "./harness";
 import { toCsvText } from "./stress/stressHelpers";
@@ -27,7 +22,6 @@ const MD_RICH = [
 
 const MD_SMALL = "## Second\n\n**strong** and `code`\n\n1. x\n2. y";
 
-/** Detail field <dd> for `column` in the nth (0-based) detail row. */
 function field(page: Page, rowIndex: number, column: string): Locator {
   return page.locator("tr.detail-row").nth(rowIndex).locator(`dt:has(> .detail-field-label:text-is("${column}")) + dd`);
 }
@@ -78,7 +72,6 @@ test.describe("auto-detected Markdown column", () => {
     await expect(md.locator("table")).toHaveCount(1);
     await expect(md.locator("pre")).toHaveText(/code here/);
     await expect(field(page, 0, "body").locator(".format-toggle-btn")).toHaveText("Raw");
-    // The raw-text span is empty while rendered.
     await expect(field(page, 0, "body").locator(".detail-value-text")).toBeHidden();
 
     await expect(field(page, 1, "body").locator(".detail-value-md h2")).toHaveText("Second");
@@ -104,16 +97,13 @@ test.describe("auto-detected Markdown column", () => {
     }
     await expect(field(page, 0, "body").locator(".detail-value-text")).toHaveText(MD_RICH);
     await expect(field(page, 1, "body").locator(".detail-value-text")).toHaveText(MD_SMALL);
-    // Both rows stay expanded.
     await expect(page.locator("tr.detail-row:not([hidden])")).toHaveCount(2);
     await expect(page.locator("tr.data-row[aria-expanded='true']")).toHaveCount(2);
-    // The clicked field now offers "Markdown", and focus is on it.
     await expect(field(page, 0, "body").locator(".format-toggle-btn")).toHaveText("Markdown");
     await expect(field(page, 0, "body").locator(".format-toggle-btn")).toBeFocused();
 
     const saved = await awaitPosted(page, "saveState");
     expect((saved.state as ViewState).markdownColumns).toEqual({ body: false });
-    // A different column is untouched.
     await expect(field(page, 0, "plain").locator(".detail-value-text")).toHaveText("short");
 
     await clearPosted(page);
@@ -127,10 +117,9 @@ test.describe("auto-detected Markdown column", () => {
   });
 
   test("a short plain value flipped to Raw keeps its own Markdown link so the user can flip back", async ({ page }) => {
-    // "id"-like short value in a Markdown column: add it via a second load.
     await load(page, ["id", "body"], [["1", "# T"], ["2", "ok"]]);
     await expandAll(page);
-    await field(page, 1, "body").locator(".format-toggle-btn").click(); // "ok" is a plain value in an auto-Markdown column
+    await field(page, 1, "body").locator(".format-toggle-btn").click();
     await expect(field(page, 1, "body").locator(".detail-value-text")).toHaveText("ok");
     await expect(field(page, 1, "body").locator(".format-toggle-btn")).toHaveText("Markdown");
     await expect(field(page, 1, "body").locator(".format-toggle-btn")).toBeFocused();
@@ -175,7 +164,6 @@ test.describe("stored choice and Raw-mode links", () => {
     await expect(page.locator("#table-head th")).not.toHaveCount(0);
     await expandAll(page);
     await expect(field(page, 0, "body").locator(".detail-value-md h1")).toHaveText("Heading One");
-    // First click saves a proper object.
     await clearPosted(page);
     await field(page, 0, "body").locator(".format-toggle-btn").click();
     expect(await lastSavedMarkdownColumns(page)).toEqual({ body: false });
@@ -194,14 +182,12 @@ test.describe("stored choice and Raw-mode links", () => {
     await expect(link("multiline")).toHaveText("Markdown");
     await expect(link("long")).toHaveText("Markdown");
     await expect(link("looksmd")).toHaveText("Markdown");
-    // Over 100,000 characters: always raw, never a Markdown link.
     await expect(link("huge")).toBeHidden();
-    // JSON keeps its own Raw / Formatted toggle, untouched.
     await expect(link("json")).toHaveText("Raw");
   });
 
   test("exactly 60 characters does not earn a link, and a value over 100,000 characters stays raw even in a Markdown column", async ({ page }) => {
-    const huge = "# Title\n" + "x".repeat(100_000); // 100,008 characters
+    const huge = "# Title\n" + "x".repeat(100_000);
     await load(page, ["id", "sixty", "huge"], [["1", "y".repeat(60), huge]], { state: { markdownColumns: { sixty: false, huge: true } } });
     await expandAll(page);
     await expect(field(page, 0, "sixty").locator(".format-toggle-btn")).toBeHidden();
@@ -209,7 +195,6 @@ test.describe("stored choice and Raw-mode links", () => {
     await expect(hugeDd.locator(".detail-value-md")).toBeHidden();
     await expect(hugeDd.locator(".detail-value-text")).toBeVisible();
     await expect(hugeDd.locator(".format-toggle-btn")).toBeHidden();
-    // It still gets the usual 10,000-character cap.
     await expect(hugeDd.locator(".show-all-btn")).toContainText("Show all (100,008 characters)");
   });
 });
@@ -231,7 +216,6 @@ test.describe("JSON is never Markdown", () => {
     await json.locator(".format-toggle-btn").click();
     await expect(json.locator(".detail-value-text")).toHaveText('{"title":"# not a heading","items":[1,2]}');
     await expect(json.locator(".format-toggle-btn")).toHaveText("Formatted");
-    // The other row's Markdown is untouched and nothing was saved.
     await expect(field(page, 1, "mixed").locator(".detail-value-md h1")).toHaveText("A heading");
     expect((await posted(page)).filter((m) => m.type === "saveState")).toHaveLength(0);
   });
@@ -319,10 +303,9 @@ test.describe("raw value is what gets copied or filtered", () => {
     await page.locator("#context-menu button", { hasText: "Copy Value" }).click();
     await expect.poll(copied).toBe(MD_RICH);
 
-    // Quick filter uses the full raw value too.
     await field(page, 0, "body").locator(".detail-value-md strong").click({ button: "right" });
     await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
-    // (The rule's text <input> would strip the newlines, so read the saved rule itself.)
+    // The rule's text input strips newlines, so read the saved rule instead.
     const rule = ((await awaitPosted(page, "saveState")).state as ViewState).filterRules[0];
     expect(rule).toMatchObject({ column: "body", operator: "equals", value: MD_RICH });
   });
@@ -357,7 +340,6 @@ test.describe("safety", () => {
     await expect(md).toContainText('<img src=x onerror="window.__xssFired = 2">');
     await expect(md).toContainText("bad");
     await expect(md).toContainText("rel and anchor");
-    // The image became a link labelled with its alt text.
     await expect(md.locator('a[href="https://example.com/pic.png"]')).toHaveText("pic");
     await expect(md.locator('a[href="https://example.com/ok"]')).toHaveText("ok");
     expect(requests.filter((u) => u.includes("example.com"))).toEqual([]);
@@ -381,7 +363,6 @@ test.describe("column names and persistence", () => {
     });
     expect(savedJson).toBe('{"__proto__":false}');
 
-    // The host would send the saved state back on a live reload.
     await page.evaluate(
       ({ text, savedJson }) => {
         const state = {
@@ -436,7 +417,6 @@ test.describe("where Markdown applies", () => {
     const detail = page.locator("tr.detail-row").first();
     await expect(detail.locator(".detail-group-heading")).toHaveText("Also in table");
     await expect(detail.locator(".detail-value-md h1")).toHaveText("Heading One");
-    // The table cell is still raw afterwards.
     await expect(page.locator("tr.data-row").first().locator("td").nth(2).locator("h1")).toHaveCount(0);
   });
 
@@ -445,7 +425,7 @@ test.describe("where Markdown applies", () => {
     await page.locator("tr.data-row").first().click();
     await page.evaluate(() => {
       document.addEventListener("click", (e) => {
-        if (e.target instanceof Element && e.target.closest("a")) e.preventDefault(); // no real navigation in the test
+        if (e.target instanceof Element && e.target.closest("a")) e.preventDefault();
       });
     });
     await clearPosted(page);
@@ -461,7 +441,7 @@ test.describe("where Markdown applies", () => {
 test.describe("styles", () => {
   test("a Markdown table does not inherit the page table's header, cell or detail-row rules", async ({ page }) => {
     await load(page, ["id", "body"], [["1", MD_RICH]]);
-    // The harness has no host theme; define the two variables the rules use.
+    // The harness has no host theme; define the two variables these rules use.
     await page.addStyleTag({ content: ":root { --vscode-panel-border: rgb(60, 60, 60); --vscode-focusBorder: rgb(0, 127, 212); }" });
     await expandAll(page);
     const md = field(page, 0, "body").locator(".detail-value-md");
@@ -486,7 +466,6 @@ test.describe("styles", () => {
       });
       expect(css).toMatchObject({ whiteSpace: "normal", overflow: "visible", textOverflow: "clip", maxWidth: "none", boxShadow: "none", left: "1px", right: "1px", top: "1px", bottom: "1px" });
     }
-    // The detail row's own cell keeps its accent border; the nested cells don't use its colour.
     const accent = await page.locator("tr.detail-row > td").first().evaluate((el) => getComputedStyle(el).borderLeftColor);
     const nested = await td.evaluate((el) => getComputedStyle(el).borderLeftColor);
     expect(nested).not.toBe(accent);

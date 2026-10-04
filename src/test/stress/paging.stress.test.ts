@@ -1,4 +1,3 @@
-// Adversarial/property tests for src/core/paging.ts.
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
@@ -21,11 +20,10 @@ describe("property: pages tile the row list exactly (no gaps, no overlaps)", () 
         let expectedStart = 0;
         for (let p = 1; p <= count; p++) {
           const { start, end } = pageSlice(total, p, size);
-          expect(start).toBe(expectedStart); // no gap since the last page
-          expect(end).toBeGreaterThanOrEqual(start); // never inverted
+          expect(start).toBe(expectedStart);
+          expect(end).toBeGreaterThanOrEqual(start);
           expectedStart = end;
         }
-        // The last page's end covers every row.
         expect(expectedStart).toBe(Math.max(total, 0) === 0 ? 0 : total);
       }),
       { numRuns: 500 },

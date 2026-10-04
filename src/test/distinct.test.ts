@@ -87,7 +87,6 @@ describe("distinctValues: order", () => {
 
 describe("distinctValues: caps", () => {
   it("stops adding new values at the distinct cap, flags truncated, and keeps counts exact", () => {
-    // v0..v4 are collected first; v5.. are not, but v0..v4 keep counting.
     const rows: string[][] = [];
     for (let i = 0; i < 20; i++) rows.push([`v${i % 10}`]);
     const out = distinctValues(rows, 0, { maxDistinct: 5 });
@@ -109,7 +108,6 @@ describe("distinctValues: caps", () => {
 
   it("stops at the total-characters cap too, and later rows still count toward collected values", () => {
     const rows = [["aaaa"], ["bbbb"], ["cccc"], ["aaaa"], ["dd"], ["bbbb"]];
-    // 4 + 4 = 8 chars fits in 9; "cccc" would make 12 -> truncated from then on, even for the shorter "dd".
     const out = distinctValues(rows, 0, { maxChars: 9 });
     expect(out.truncated).toBe(true);
     expect(out.values).toEqual([

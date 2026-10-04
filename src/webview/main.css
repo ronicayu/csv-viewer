@@ -1,6 +1,3 @@
-/* Uses only VS Code theme variables (--vscode-*), so it renders correctly in
-   light, dark, and high-contrast themes without any custom palette. */
-
 * {
   box-sizing: border-box;
 }
@@ -15,20 +12,12 @@ body {
   font-size: var(--vscode-font-size);
 }
 
-/* VS Code injects `body { padding: 0 20px }` on every webview (see
- * pre/index.html's `@layer vscode-default`). That 40px gutter isn't
- * ours to keep: reclaim it, and add back a smaller, deliberate 8px inner
- * padding only on the toolbar/status/pager bars (see .toolbar,
- * .status-row, .pager-bar below). The harness's base page mirrors the
- * injected rule (see harness.ts) so tests see the same layout. */
+/* VS Code injects 20px of horizontal padding on every webview body; reset it. */
 body {
   padding: 0;
 }
 
-/* Native form controls (checkboxes, the search field's clear button)
- * otherwise render in the light color scheme even in a dark theme,
- * because neither VS Code nor this stylesheet sets `color-scheme` by
- * default. */
+/* Native controls render in the light scheme in dark themes unless color-scheme is set. */
 body.vscode-dark,
 body.vscode-high-contrast:not(.vscode-high-contrast-light) {
   color-scheme: dark;
@@ -65,8 +54,6 @@ button:disabled:hover {
   background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
 }
 
-/* The only button that should still look primary — a strong action the
- * user is nudged toward taking right now. */
 button.primary {
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
@@ -76,8 +63,6 @@ button.primary:hover {
   background: var(--vscode-button-hoverBackground);
 }
 
-/* Toolbar/pager/context-menu/popover actions: transparent icon buttons,
- * sized and colored the way VS Code's own action bar icons are. */
 button.icon-btn {
   background: transparent;
   border-color: transparent;
@@ -98,7 +83,6 @@ button.icon-btn:disabled {
   opacity: 0.4;
 }
 
-/* "Show all (N characters)" reads as prose, not an action — a text link. */
 button.link-btn {
   background: transparent;
   border: none;
@@ -127,8 +111,6 @@ input::placeholder {
   color: var(--vscode-input-placeholderForeground);
 }
 
-/* :focus-visible (not :focus) so a mouse click never leaves a lingering
- * ring — only keyboard focus does. */
 input:focus-visible,
 select:focus-visible,
 button:focus-visible,
@@ -137,14 +119,6 @@ th:focus-visible,
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
 }
-
-/* ============================================================
- * CHROME REDESIGN (toolbar, popovers, status/pager counts,
- * progress bar, banners/hints). Kept in its own delimited
- * section so it merges cleanly against the table-body owner's
- * changes elsewhere in this file. See docs/reviews/ux-review.md
- * §2/§4/§7 and docs/reviews/pm-review.md §4/§7.
- * ============================================================ */
 
 .toolbar {
   display: flex;
@@ -166,10 +140,6 @@ th:focus-visible,
   white-space: nowrap;
 }
 
-/* Uniform 24px-tall controls so the search box, text buttons and icon
- * buttons all sit on one visual baseline instead of a ragged row (see
- * docs/reviews/ux-review.md §5, "make every toolbar control 24px tall" —
- * matches button.icon-btn's existing 24px). */
 .toolbar > input,
 .toolbar > .toolbar-text-btn {
   height: 24px;
@@ -201,10 +171,6 @@ th:focus-visible,
   gap: 8px;
 }
 
-/* 2px indeterminate progress bar directly under the toolbar — VS Code's
- * own idiom for background work, replacing the old "Working…" text (see
- * docs/reviews/ux-review.md §4). Static (no animation) under
- * body.vscode-reduce-motion. */
 .working-indicator {
   height: 2px;
   background: transparent;
@@ -238,8 +204,6 @@ body.vscode-reduce-motion .working-indicator::before {
   width: 100%;
 }
 
-/* Banners (quote warning, deleted-file, row-details hint) — same visual
- * shape, two color treatments. */
 .banner {
   display: flex;
   align-items: center;
@@ -272,8 +236,6 @@ body.vscode-reduce-motion .working-indicator::before {
   color: var(--vscode-descriptionForeground);
 }
 
-/* The slim "Filtered: X of Y rows" row — only shown while search/filters
- * are active (see renderFilteredRow in main.ts). */
 .filtered-row {
   display: flex;
   align-items: center;
@@ -284,7 +246,6 @@ body.vscode-reduce-motion .working-indicator::before {
   border-bottom: 1px solid var(--vscode-panel-border);
 }
 
-/* Sort popover */
 .sort-keys-list {
   display: flex;
   flex-direction: column;
@@ -319,8 +280,6 @@ body.vscode-reduce-motion .working-indicator::before {
   font-size: 0.9em;
 }
 
-/* Filters rule row, sentence order: [enabled] [Keep/Hide] rows where
- * [column] [condition] [value] [Aa] [✕]. */
 .mode-select {
   min-width: 56px;
 }
@@ -349,11 +308,6 @@ body.vscode-reduce-motion .working-indicator::before {
   border-radius: 3px;
 }
 
-/* The Filters panel holds sentence-shaped rule rows — capping its width
- * too tightly forces every rule to wrap to two lines. Wide enough that
- * the sentence layout (checkbox, Keep/Hide select, "rows where", column,
- * condition, value, Aa, ✕) fits on one line down to a 700px editor
- * width — see docs/reviews/ux-review.md §2/§4 and the owner's §5. */
 .panel {
   max-width: none;
   width: min(760px, calc(100vw - 16px));
@@ -383,11 +337,6 @@ body.vscode-reduce-motion .working-indicator::before {
   background: var(--vscode-list-hoverBackground);
 }
 
-/* VS Code's inputValidation pattern, shared by the separator error and
- * the filter rule error (see .rule-row.rule-error above): normal-weight
- * foreground text in a tinted box, with an icon that only needs 3:1 as a
- * non-text element — not a thin under-contrast line of error-colored
- * text. */
 .input-error-box {
   display: inline-flex;
   align-items: center;
@@ -426,9 +375,6 @@ body.vscode-reduce-motion .working-indicator::before {
   border-radius: 2px;
 }
 
-/* VS Code's inputValidation pattern: normal-weight foreground text inside
- * a tinted box, plus an icon (which only needs 3:1 as a non-text
- * element) — not a thin, under-contrast error-colored line. */
 .rule-row.rule-error {
   background: var(--vscode-inputValidation-errorBackground);
   outline: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
@@ -460,8 +406,6 @@ body.vscode-reduce-motion .working-indicator::before {
   gap: 2px;
 }
 
-/* The Filters panel's "is any of" value control: looks like a select, shows
- * the chosen values, opens the values picker. */
 .values-btn {
   display: inline-flex;
   align-items: center;
@@ -499,8 +443,6 @@ body.vscode-reduce-motion .working-indicator::before {
   flex: 0 0 auto;
 }
 
-/* The shared "filter by values" picker (header funnels, the Filters panel's
- * values button, the cell context menu). */
 .values-popover {
   width: 280px;
   display: flex;
@@ -630,9 +572,7 @@ td {
   max-width: 320px;
 }
 
-/* border-collapse makes a <th>'s own border-bottom disappear once content
- * scrolls under the sticky header — an inset box-shadow doesn't collapse,
- * so the divider survives. */
+/* border-collapse drops a th's border-bottom under the sticky header; an inset box-shadow survives. */
 th {
   box-shadow: inset 0 -1px 0 var(--vscode-panel-border);
 }
@@ -647,9 +587,6 @@ th.sortable:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
-/* A header cell's content: the sort button takes the remaining width (a
- * long column name ellipsizes inside it) and the "filter by values" funnel
- * after it never shrinks or gets clipped. */
 .th-inner {
   display: flex;
   align-items: center;
@@ -675,9 +612,6 @@ th.sortable:hover {
   white-space: nowrap;
 }
 
-/* Always visible but dim, so it's discoverable without cluttering the
- * header; full strength on hover/keyboard focus, while its picker is open,
- * when active, and always in high-contrast themes. */
 .col-filter-btn {
   flex: 0 0 auto;
   background: transparent;
@@ -717,10 +651,6 @@ body.vscode-high-contrast-light .col-filter-btn {
   }
 }
 
-/* Fills the whole <th> (table-layout: auto stretches columns to the
- * table's 100% width, so the th is usually much wider than this button's
- * own content) so a click anywhere in the header cell's padded area
- * reaches the button, not just its text. */
 .col-header-btn {
   background: transparent;
   border: none;
@@ -805,27 +735,17 @@ td.clipped-cell {
   cursor: default;
 }
 
-/* Child combinator: this styles the detail row's own colSpan cell, not the
- * cells of a table rendered from Markdown inside it (.detail-value-md). */
+/* Child combinator, so cells of a Markdown table inside .detail-value-md are not affected. */
 tr.detail-row > td {
   white-space: normal;
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   border-bottom: 2px solid var(--vscode-panel-border);
   border-left: 2px solid var(--vscode-focusBorder);
-  /* Undo the generic `td` rule's `overflow: hidden; max-width: 320px` —
-   * besides being wrong for a colSpan cell holding prose, an `overflow:
-   * hidden` ancestor between .detail-wrap and #table-scroll breaks
-   * `position: sticky` (its containing block becomes this td's own,
-   * never-scrolling padding box instead of the real scroll container),
-   * which is exactly what pins .detail-wrap to the visible viewport. */
+  /* An overflow: hidden ancestor breaks position: sticky on .detail-wrap, so undo the generic td rule. */
   overflow: visible;
   max-width: none;
 }
 
-/* Pinned to the visible scroll viewport (not the table's scroll width) so
- * prose wraps inside what's actually on screen in a narrow pane, instead
- * of running off to the right with the table. --detail-viewport-w is kept
- * in sync with #table-scroll's clientWidth by a ResizeObserver. */
 .detail-wrap {
   position: sticky;
   left: 0;
@@ -944,7 +864,6 @@ tr.detail-row > td {
   width: 100%;
 }
 
-/* Empty states rendered as a single full-width row inside the table body. */
 .empty-state-row td {
   text-align: center;
   padding: 24px 12px;
@@ -963,24 +882,11 @@ tr.detail-row > td {
   display: none !important;
 }
 
-/* ============================================================
- * BEGIN "reading" ownership (rows/cells, detail panel content,
- * cell/row context menu, row keyboard nav, numeric alignment).
- * See the "ux-step2-reading" task — keep this section separate
- * from the toolbar/chrome styles above, owned elsewhere.
- * ============================================================ */
-
-/* Item 2: numeric columns right-aligned in the table body only — header
- * cells are untouched (owned elsewhere). */
 td.numeric-cell {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-/* Roving-tabindex focus ring on the focused row — `:focus-visible` so a
- * mouse click never leaves a lingering ring, matching every other control
- * in this file. HC gets the same list-focus treatment VS Code's own lists
- * use; the variable is undefined outside HC, so it's a no-op elsewhere. */
 tr.data-row:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
@@ -991,8 +897,6 @@ tr.data-row:focus-visible {
     outline: 1px solid var(--vscode-list-focusOutline, var(--vscode-focusBorder));
   }
 }
-
-/* Item 3: detail panel values ------------------------------------------- */
 
 .detail-fields dt {
   display: flex;
@@ -1019,11 +923,7 @@ tr.data-row:focus-visible {
   display: block;
 }
 
-/* 6-line height clamp (collapsed state) — removed by the "More"/"Less"
- * toggle, which measures overflow via scrollHeight vs. clientHeight right
- * after this class is applied (see populateDetailValue in main.ts). Works
- * for prose (pre-wrap, inherited from .detail-fields dd) and pretty-printed
- * JSON alike, since both are plain text content of the same element. */
+/* Six lines; main.ts measures overflow against 6 line-heights, so keep the two in sync. */
 .detail-value-clamped {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -1031,17 +931,12 @@ tr.data-row:focus-visible {
   overflow: hidden;
 }
 
-/* JSON pretty-print: the editor's own monospace font, not the UI font —
- * distinguishes formatted JSON from prose at a glance. */
 .detail-value-json {
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: var(--vscode-editor-font-size, 1em);
   white-space: pre-wrap;
 }
 
-/* Markdown view of a detail value (see populateDetailValue/renderMarkdown in
- * main.ts). Theme variables only. The element holds sanitized HTML from
- * markdown-it, so everything below styles plain semantic elements. */
 .detail-fields dd {
   min-width: 0;
 }
@@ -1053,8 +948,7 @@ tr.data-row:focus-visible {
   overflow-wrap: anywhere;
 }
 
-/* Same six-line clamp as raw text, as a max-height: -webkit-line-clamp does
- * not work on block content. 1.5em matches the line-height above. */
+/* max-height clamp, as -webkit-line-clamp fails on block content; 1.5em matches the line-height. */
 .detail-value-md-clamped {
   max-height: calc(6 * 1.5em);
   overflow: hidden;
@@ -1114,7 +1008,6 @@ tr.data-row:focus-visible {
   border-radius: 3px;
 }
 
-/* A code block scrolls sideways inside itself, never the page. */
 .detail-value-md pre {
   padding: 6px 8px;
   border-radius: 3px;
@@ -1137,9 +1030,7 @@ tr.data-row:focus-visible {
   overflow-x: auto;
 }
 
-/* The page-level table rules (th/td nowrap + ellipsis + max-width + bottom
- * border, sticky thead, header box-shadow, width: 100%) are element selectors
- * that also match a table inside a detail value; undo them here. */
+/* Page-level table rules are element selectors that also match tables in a detail value; undo them. */
 .detail-value-md table {
   width: auto;
   border-collapse: collapse;
@@ -1180,17 +1071,6 @@ tr.data-row:focus-visible {
   color: var(--vscode-descriptionForeground);
 }
 
-/* Containment: tint the expanded block relative to the next row (on top
- * of the existing left rule) — the editorWidget-background/editor-
- * background pair is close in Dark Modern but visibly distinct in Light
- * Modern, where the plain editor background would otherwise blend in. Key/
- * value grid starts under the first DATA column, not under the twisty —
- * the chevron column is 24px (see .chevron-col) plus the cell's own 8px
- * padding. */
 .detail-wrap {
   padding-left: 32px;
 }
-
-/* ============================================================
- * END "reading" ownership
- * ============================================================ */
