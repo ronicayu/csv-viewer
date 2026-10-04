@@ -48,13 +48,6 @@ the cached Playwright Chromium:
 node scripts/render-icon.mjs
 ```
 
-### Engineering notes
-
-Implementation details that don't belong in the user-facing README or CHANGELOG —
-quote-handling edge cases, case-folding (Turkish İ, German ß), the `__proto__` header
-safety fix, the regex-timeout watchdog, the Web Worker architecture — live in
-`docs/spec.md` and `docs/engineering-notes-*.md`.
-
 ## Installing from a `.vsix`
 
 Build the package with `npm run package`, which produces `csv-row-details-<version>.vsix`.

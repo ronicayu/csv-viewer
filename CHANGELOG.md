@@ -118,10 +118,6 @@
   search" / "Turn off filters"), or every column is hidden.
 - Filter hints say which column is missing or why a rule was skipped.
 
-
-See [docs/engineering-notes-0.4.0.md](docs/engineering-notes-0.4.0.md) for the full
-implementation-level detail behind this release.
-
 ## 0.3.0
 
 - **Parsing switched to Papa Parse.** Fixes a real bug in the hand-written tokenizer: a stray `"` inside an unquoted field (an inch mark like `1,5" screen,TV`, or `He said "hi"`) used to flip the parser into quoted mode and swallow the rest of the file into one cell. Papa Parse only treats `"` as opening a quoted field when it's the first character of the field.
