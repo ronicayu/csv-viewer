@@ -38,24 +38,15 @@ describe("reconcileVisibility", () => {
   it("applies the default rule to newly appeared columns", () => {
     const previous = { a: false };
     const headers = ["a", "b", "c"];
-    // defaultTableColumns=1: only the first column defaults to visible.
     expect(reconcileVisibility(headers, previous, 1)).toEqual({ a: false, b: false, c: false });
   });
 
   it("merges instead of dropping settings for columns that no longer exist, so a later round trip back to that name restores them — but visibleColumns/detailFieldsFor still only consider the current headers", () => {
-    // Changed behavior (bug fix, not a regression): reconcileVisibility
-    // used to drop any entry not in the current `headers` list, which lost
-    // a user's visibility choice the moment an intermediate header set
-    // (e.g. toggling "first row is header" off, which synthesizes
-    // column_1..N headers) didn't include their name — even though the
-    // *original* name came right back afterward. It now merges, carrying
-    // every previous entry forward regardless of the current header list.
     const previous = { a: true, removed: false };
     const headers = ["a"];
     const reconciled = reconcileVisibility(headers, previous, 8);
     expect(reconciled.a).toBe(true);
-    expect(getVisibility(reconciled, "removed")).toBe(false); // retained, not dropped
-    // "removed" isn't a current header, so it plays no role in rendering.
+    expect(getVisibility(reconciled, "removed")).toBe(false);
     expect(visibleColumns(headers, reconciled)).toEqual(["a"]);
   });
 });
@@ -87,12 +78,10 @@ describe("detailFieldsFor", () => {
   });
 });
 
-// ---- profileColumns (smart default column split — pm-review.md §4) --------
-
 describe("profileColumns", () => {
   it("medianLength is the median trimmed length of non-empty values", () => {
     const headers = ["a"];
-    const rows = [["x"], ["  xxx  "], ["xxxxx"]]; // trimmed lengths 1, 3, 5 -> median 3
+    const rows = [["x"], ["  xxx  "], ["xxxxx"]];
     expect(profileColumns(headers, rows)[0].medianLength).toBe(3);
   });
 
@@ -123,14 +112,13 @@ describe("profileColumns", () => {
 
   it("only samples the first sampleSize rows", () => {
     const headers = ["a"];
-    const rows = [["x"], ["x"], [JSON.stringify({ big: true })]]; // 3rd row is JSON, outside a sample of 2
+    const rows = [["x"], ["x"], [JSON.stringify({ big: true })]];
     expect(profileColumns(headers, rows, 2)[0].jsonShare).toBe(0);
   });
 
   it("markdownShare counts non-empty values that look like Markdown, ignoring empties", () => {
     const headers = ["a"];
     const rows = [["# Title\nbody"], ["plain text"], [""], ["[docs](https://example.com)"], ["more plain"]];
-    // 2 of the 4 non-empty values look like Markdown.
     expect(profileColumns(headers, rows)[0].markdownShare).toBe(0.5);
   });
 
@@ -142,15 +130,14 @@ describe("profileColumns", () => {
 
   it("markdownShare only samples the first sampleSize rows", () => {
     const headers = ["a"];
-    const rows = [["x"], ["x"], ["# heading"]]; // the Markdown row is outside a sample of 2
+    const rows = [["x"], ["x"], ["# heading"]];
     expect(profileColumns(headers, rows, 2)[0].markdownShare).toBe(0);
   });
 
   it("a ragged row (fewer cells than headers) contributes nothing for the missing column", () => {
     const headers = ["a", "b"];
-    const rows = [["x"], ["x", "y"]]; // row 0 has no value for "b"
+    const rows = [["x"], ["x", "y"]];
     const profiles = profileColumns(headers, rows);
-    // "b" only ever saw one non-empty value ("y"), so its median length is 1.
     expect(profiles[1].medianLength).toBe(1);
   });
 });
@@ -206,8 +193,6 @@ describe("column flag maps (markdownColumns)", () => {
   });
 });
 
-// ---- reconcileVisibility with profiles (the smart default split itself) ---
-
 function profile(overrides: Partial<ColumnProfile> = {}): ColumnProfile {
   return { medianLength: 10, multilineShare: 0, jsonShare: 0, numericShare: 0, markdownShare: 0, ...overrides };
 }
@@ -253,9 +238,9 @@ describe("reconcileVisibility with profiles", () => {
     const profiles = [
       profile({ jsonShare: 1 }),
       profile({ medianLength: 2000 }),
-      profile(), // short
+      profile(),
       profile({ multilineShare: 1 }),
-      profile(), // short
+      profile(),
     ];
     expect(reconcileVisibility(headers, {}, 8, profiles)).toEqual({
       json_col: false,
@@ -286,8 +271,6 @@ describe("reconcileVisibility with profiles", () => {
 
   it("a stored per-file choice always wins over the profile, in either direction", () => {
     const headers = ["notes", "id"];
-    // "notes" looks long by its profile, but the user explicitly chose to
-    // show it; "id" looks short, but the user explicitly hid it.
     const previous = { notes: true, id: false };
     const profiles = [profile({ medianLength: 2000 }), profile()];
     expect(reconcileVisibility(headers, previous, 8, profiles)).toEqual({ notes: true, id: false });
@@ -296,14 +279,13 @@ describe("reconcileVisibility with profiles", () => {
   it("stored-visible columns count against the cap for new short columns", () => {
     const headers = ["stored", "a", "b"];
     const previous = { stored: true };
-    const profiles = [profile(), profile(), profile()]; // all short
-    // Cap 2: "stored" already uses one slot, so only one of a/b fits.
+    const profiles = [profile(), profile(), profile()];
     expect(reconcileVisibility(headers, previous, 2, profiles)).toEqual({ stored: true, a: true, b: false });
   });
 
   it("the fresh-file guarantee does not apply once any current header has a stored choice (e.g. 'hide all')", () => {
     const headers = ["a", "b"];
-    const previous = { a: false, b: false }; // user explicitly hid everything
+    const previous = { a: false, b: false };
     const profiles = [profile({ medianLength: 500 }), profile({ medianLength: 500 })];
     expect(reconcileVisibility(headers, previous, 8, profiles)).toEqual({ a: false, b: false });
   });
@@ -311,14 +293,12 @@ describe("reconcileVisibility with profiles", () => {
   it("survives a header-toggle round trip: a stored choice for a name absent from an intermediate header set is retained and reapplied once that name comes back", () => {
     const headers1 = ["id", "notes"];
     const previous = { id: true, notes: false };
-    // "first row is header" toggled off: synthesizes column_1/column_2.
     const syntheticHeaders = ["column_1", "column_2"];
     const syntheticProfiles = [profile(), profile()];
     const afterToggleOff = reconcileVisibility(syntheticHeaders, previous, 8, syntheticProfiles);
-    expect(getVisibility(afterToggleOff, "id")).toBe(true); // retained, even though not a current header
+    expect(getVisibility(afterToggleOff, "id")).toBe(true);
     expect(getVisibility(afterToggleOff, "notes")).toBe(false);
 
-    // Toggled back on: real headers return, and their original choices apply.
     const afterToggleOn = reconcileVisibility(headers1, afterToggleOff, 8, [profile(), profile()]);
     expect(visibleColumns(headers1, afterToggleOn)).toEqual(["id"]);
   });
@@ -330,7 +310,7 @@ describe("reconcileVisibility with profiles", () => {
     expect(getVisibility(result, "__proto__")).toBe(true);
     expect(visibleColumns(headers, result)).toEqual(["__proto__", "id"]);
 
-    const previous = reconcileVisibility(headers, {}, 1, profiles); // __proto__ true, id false
+    const previous = reconcileVisibility(headers, {}, 1, profiles);
     const again = reconcileVisibility(headers, previous, 1, profiles);
     expect(getVisibility(again, "__proto__")).toBe(true);
     expect(getVisibility(again, "id")).toBe(false);

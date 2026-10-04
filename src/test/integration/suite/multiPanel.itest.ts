@@ -1,7 +1,3 @@
-// Covers: same file open in a text editor and the viewer side by side;
-// two different files open in two viewers at once (no state leakage);
-// close/reopen persistence; renaming the open file; csvViewer.openAsText.
-
 import * as assert from "assert";
 import * as fsp from "fs/promises";
 import * as path from "path";
@@ -17,7 +13,7 @@ function fixture(name: string): vscode.Uri {
 
 suite("Side-by-side, multiple viewers, and openAsText", () => {
   suiteSetup(async () => {
-    await getTestApi(); // ensures the extension is activated before any test in this file
+    await getTestApi();
   });
 
   teardown(async () => {
@@ -25,12 +21,6 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
   });
 
   test("same file open in a text editor and the viewer side by side: an unsaved edit in the text editor does NOT reload the viewer, but saving it does", async () => {
-    // FIXED behavior (see docs/spec.md's "Unsaved edits" note): the viewer
-    // is a CustomReadonlyEditorProvider now, so it never gets a synced
-    // TextDocument from the side-by-side text editor — it only reloads
-    // from what's actually on disk, via its FileSystemWatcher. An edit
-    // that hasn't been saved yet has no effect on disk, so it's
-    // deliberately not reflected until the user saves.
     const uri = fixture("sidebyside.csv");
     const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
@@ -47,7 +37,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     edit.insert(uri, endPos, "\n3,c");
     await vscode.workspace.applyEdit(edit);
 
-    await sleep(1000); // give the (deliberately absent) reload a chance to fire if it were going to
+    await sleep(1000);
     assert.strictEqual(renderCount(api, key), countAfterOpen, "an unsaved edit must not reload the side-by-side viewer");
 
     await doc.save();
@@ -65,9 +55,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
   test("two different files open in two viewers at once render independently, with no cross-talk", async () => {
     const uriA = fixture("fileA.csv");
     const uriB = fixture("fileB.csv");
-    // Let A finish loading before B's tab covers it: VS Code holds messages
-    // to a hidden webview until it is visible again, so opening B straight
-    // away can leave A unrendered for as long as it stays in the background.
+    // Render A before opening B: VS Code holds messages to a hidden webview until it is visible again.
     await openInViewer(uriA);
     await waitForRender(await getTestApi(), fileKeyFor(uriA));
     await openInViewer(uriB);
@@ -82,8 +70,6 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     assert.deepStrictEqual(renderB.headers, ["sku", "qty"]);
     assert.ok(api.panelCount() >= 2, `expected at least 2 live panels, got ${api.panelCount()}`);
 
-    // Cross-talk check: every "rendered" message recorded under A's key
-    // reports A's headers, never B's, and vice versa.
     const allA = api.getMessages(keyA).filter((m) => m.type === "rendered") as { headers: string[] }[];
     const allB = api.getMessages(keyB).filter((m) => m.type === "rendered") as { headers: string[] }[];
     assert.ok(allA.every((r) => JSON.stringify(r.headers) === JSON.stringify(["id", "name"])));
@@ -93,9 +79,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
   test("delimiter state is keyed per file, not shared, verified through the real webview via a synthetic load", async () => {
     const uriA = fixture("fileA.csv");
     const uriB = fixture("fileB.csv");
-    // Let A finish loading before B's tab covers it: VS Code holds messages
-    // to a hidden webview until it is visible again, so opening B straight
-    // away can leave A unrendered for as long as it stays in the background.
+    // Render A before opening B: VS Code holds messages to a hidden webview until it is visible again.
     await openInViewer(uriA);
     await waitForRender(await getTestApi(), fileKeyFor(uriA));
     await openInViewer(uriB);
@@ -106,25 +90,11 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     await waitForRender(api, keyB);
 
     const textA = await fsp.readFile(path.join(WORKSPACE_ROOT, "fileA.csv"), "utf8");
-    // TESTING NOTE (not a product bug): `webview.postMessage()` to a
-    // *background* webview went silently undelivered in this harness even
-    // with `retainContextWhenHidden: true` set on webviewPanel.options —
-    // no "rendered" (or anything else) ever arrived for fileA while fileB's
-    // panel was the foreground tab. Bringing fileA back to the foreground
-    // first (reopening an already-open customEditor document just reveals
-    // the existing panel, since supportsMultipleEditorsPerDocument is
-    // false) fixed it. Real users driving the UI wouldn't hit this since
-    // messages always originate from the panel that's currently being
-    // interacted with; it only bit this test hook's postToWebview, which
-    // can target any panel regardless of focus.
+    // Reopen A to bring it to the foreground: postMessage to a background webview is not delivered.
     await openInViewer(uriA);
-    await sleep(500); // let any focus-triggered activity from reopening settle first
+    await sleep(500);
     const before = renderCount(api, keyA);
 
-    // Simulate "a previously-saved per-file state had delimiter: ';'"
-    // (fileA.csv has no semicolons, so this collapses every row to one
-    // column) by posting a synthetic `load` straight into fileA's live
-    // webview — this runs the real onLoad()/parseCsv() code, not a mock.
     const posted = api.postToWebview(keyA, {
       type: "load",
       fileKey: keyA,
@@ -141,16 +111,8 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     const rendersA = api.getMessages(keyA).filter((m) => m.type === "rendered") as { headers: string[] }[];
     assert.strictEqual(rendersA[rendersA.length - 1].headers.length, 1, "forcing delimiter=';' on text with no semicolons should collapse to a single column");
 
-    // fileB must be totally unaffected.
     const rendersB = api.getMessages(keyB).filter((m) => m.type === "rendered") as { headers: string[] }[];
     assert.deepStrictEqual(rendersB[rendersB.length - 1].headers, ["sku", "qty"]);
-    // NOTE ON COVERAGE: column-visibility isolation is not directly
-    // observable this way — RenderedMessage only carries the full header
-    // list and filtered row count, neither of which reflects
-    // table-vs-detail visibility. That dimension is covered by the
-    // Playwright webview-e2e suite (columns.spec.ts) instead; what this
-    // test proves at the *host* level is that two panels never cross-wire
-    // their live webview instances or their parsed data.
   });
 
   test("opening a fresh file triggers an automatic saveState (first-open visibility reconciliation writes to workspaceState)", async () => {
@@ -177,7 +139,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     await sleep(300);
     await openInViewer(uri);
     await waitFor(() => api.getMessages(key).length > countAfterFirstOpen, { message: "expected a new ready/rendered cycle on reopen" });
-    await sleep(1000); // give any (unwanted) reconciliation-driven saveState time to arrive if it were going to
+    await sleep(1000);
 
     const newMessages = api.getMessages(key).slice(countAfterFirstOpen);
     const newSaveStates = newMessages.filter((m) => m.type === "saveState");
@@ -196,7 +158,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     const api = await getTestApi();
     const oldKey = fileKeyFor(oldUri);
     await waitForRender(api, oldKey);
-    await waitForSaveState(api, oldKey); // persisted under oldKey by first-open reconciliation
+    await waitForSaveState(api, oldKey);
 
     const oldStateKey = "csvViewer.state:" + oldKey;
     assert.ok(api.getWorkspaceStateKeys().includes(oldStateKey), "expected persisted state under the old uri's key before renaming");
@@ -214,10 +176,6 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     });
     assert.ok(!api.getWorkspaceStateKeys().includes(oldStateKey), "expected the old uri's key to be gone after migration");
 
-    // Decided behavior (see docs/spec.md): opening the renamed file re-uses
-    // the migrated state, so first-open reconciliation is a no-op (headers
-    // are unchanged) and does NOT fire a fresh saveState — unlike a
-    // genuinely new file (see the "closing and reopening" test above).
     await openInViewer(newUri);
     await waitForRender(api, newKey);
     await sleep(1000);
@@ -275,13 +233,6 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
   });
 
   test("csvViewer.openAsText with no viewer currently active does not throw", async () => {
-    // CsvEditorProvider.activeUri is process-lifetime static state; once
-    // any earlier test in this run has opened a viewer it never resets to
-    // undefined again. So this exercises "no *currently* relevant viewer"
-    // (closeAllEditors just ran) rather than a truly pristine
-    // never-opened-anything host — that pristine case is exercised for
-    // csvViewer.open (not openAsText) in opening.itest.ts. Either way, the
-    // command must not throw.
     await closeAllEditors();
     await vscode.commands.executeCommand("csvViewer.openAsText");
   });

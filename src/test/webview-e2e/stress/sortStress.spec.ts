@@ -1,8 +1,3 @@
-// Sort stress: rapid header clicks, shift-click with 5 keys, the Sort
-// popover's "Add sort column"/direction toggle interacting with
-// header-driven multi-sort, and sort keys surviving (as documented,
-// inert-if-stale) a separator change.
-
 import { expect, test } from "@playwright/test";
 import { bootAndLoad, bootAndLoadText, defaultViewState } from "../harness";
 import { trackConsoleErrors, wideFixture } from "./stressHelpers";
@@ -19,10 +14,7 @@ test("rapid repeated clicks on the same header cycle asc/desc/none without desyn
   });
 
   const header = page.locator("th", { hasText: "col_2" });
-  // 9 rapid clicks, no waiting in between -> 9 mod 3 == 0 -> back to "none".
-  // No `force`: the header row is rebuilt on every render, and a forced
-  // click can target the detached old <th>. Actionability checks still
-  // click as fast as the element is attached, without waiting for renders.
+  // No `force`: headers are rebuilt on each render, and a forced click can hit the detached old <th>.
   for (let i = 0; i < 9; i++) await header.click({ delay: 0 });
 
   await expect(header).toHaveAttribute("aria-sort", "none");
@@ -42,7 +34,7 @@ test("shift-clicking 5 different headers builds a 5-key multi-sort with priority
   });
 
   const columns = ["col_1", "col_2", "col_3", "col_4", "col_5"];
-  await page.locator("th", { hasText: columns[0] }).click(); // primary, no shift
+  await page.locator("th", { hasText: columns[0] }).click();
   for (const col of columns.slice(1)) {
     await page.locator("th", { hasText: col }).click({ modifiers: ["Shift"] });
   }
@@ -76,8 +68,6 @@ test("the Sort popover's 'Add sort column' replaces an existing header-driven mu
   await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "ascending");
   await expect(page.locator("th", { hasText: "col_2" }).locator(".sort-priority")).toHaveText("2");
 
-  // Unlike the old "Sort by…" dropdown, adding col_3 via the popover is a
-  // THIRD key, not a replacement — col_1/col_2 keep their priorities.
   await page.locator("#sort-btn").click();
   await page.locator("#sort-add-select").selectOption("col_3");
   await expect(page.locator("th", { hasText: "col_1" })).toHaveAttribute("aria-sort", "ascending");
@@ -85,7 +75,6 @@ test("the Sort popover's 'Add sort column' replaces an existing header-driven mu
   await expect(page.locator("th", { hasText: "col_3" })).toHaveAttribute("aria-sort", "ascending");
   await expect(page.locator("th", { hasText: "col_3" }).locator(".sort-priority")).toHaveText("3");
 
-  // The popover's direction toggle on col_3's row flips only col_3.
   const col3Row = page.locator(".sort-key-row").nth(2);
   await expect(col3Row.locator(".sort-key-column")).toHaveText("col_3");
   await col3Row.locator(".sort-key-dir-btn").click();
@@ -117,7 +106,6 @@ test("a sort key pointing at a column removed by a separator change is inert (do
   page,
 }) => {
   const consoleErrors = trackConsoleErrors(page);
-  // Comma-delimited, 3 columns; sort by "age" first.
   const text = "id,age,city\n1,30,NYC\n2,20,LA\n3,40,SF";
   await bootAndLoadText(page, {
     fileKey: "file:///sort-then-sep.csv",
@@ -129,14 +117,9 @@ test("a sort key pointing at a column removed by a separator change is inert (do
   await page.locator("th", { hasText: "age" }).click();
   await expect(page.locator("th", { hasText: "age" })).toHaveAttribute("aria-sort", "ascending");
 
-  // Force the separator to "|" — nothing in the text contains "|", so the
-  // whole line becomes a single column, collapsing "id,age,city" into one
-  // header. The stale sort key {column:"age"} now matches no header.
   await page.locator("#format-btn").click();
   await page.locator("#separator-select").selectOption("|");
   await expect(page.locator("th.sortable")).toHaveCount(1);
-  // No crash, no indicator anywhere (nothing named "age" exists anymore),
-  // rows kept in their original relative order (sort silently no-ops).
   await expect(page.locator(".sort-indicator")).toHaveCount(0);
   const firstCellText = await page.locator("tr.data-row").first().locator("td").nth(1).textContent();
   expect(firstCellText).toContain("1,30,NYC");

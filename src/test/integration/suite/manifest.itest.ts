@@ -1,8 +1,3 @@
-// Static sanity checks over package.json's `contributes` and top-level
-// manifest fields. These don't need a live VS Code window to be
-// meaningful, but run inside the Extension Test Host anyway for a single
-// consistent suite/report.
-
 import * as assert from "assert";
 import * as fs from "fs";
 import * as path from "path";
@@ -12,11 +7,6 @@ function readManifest(): Record<string, any> {
   return JSON.parse(fs.readFileSync(p, "utf8"));
 }
 
-/** Converts one of this manifest's simple `filenamePattern` globs (a `*`
- * wildcard plus optional `[xX]` case-insensitivity character classes — no
- * other glob syntax is used here) into a RegExp, so the selector can be
- * exercised directly against sample filenames instead of just eyeballing
- * the pattern string. */
 function globToRegExp(glob: string): RegExp {
   let out = "";
   for (let i = 0; i < glob.length; i++) {
@@ -36,13 +26,6 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${out}$`);
 }
 
-/** Extracts the `/pattern/flags` regex literal out of a `when` clause of
- * the form `resourceExtname =~ /.../i` (optionally followed by more
- * conditions, e.g. `&& activeCustomEditorId != csvViewer.table`) and
- * compiles it, so the clause's actual matching behavior can be exercised,
- * not just its source text. Matches the first `/.../flags` after `=~`
- * rather than anchoring to the end of the string, since a combined `when`
- * clause has more text after the regex literal. */
 function regexFromWhenClause(when: string): RegExp {
   const match = /=~\s*\/(.*?)\/([a-z]*)(?:\s|$)/.exec(when);
   assert.ok(match, `expected a "=~ /pattern/flags" when clause, got: ${when}`);
@@ -98,13 +81,6 @@ suite("package.json manifest sanity", () => {
     assert.deepStrictEqual(manifest.activationEvents, ["onStartupFinished"]);
   });
 
-  // ---- Editor title / Command Palette: viewer-active vs text-active state ----
-  //
-  // While the viewer is the active editor (activeCustomEditorId ==
-  // csvViewer.table): "Open as Text" shows, the table icon command hides.
-  // While a csv/tsv/tab *text* editor is active: the table icon command
-  // shows, "Open as Text" hides. See pm-review.md §3 and the task brief's
-  // "Editor title and palette" section.
   test("editor/title: csvViewer.open is hidden while the viewer is active; csvViewer.openAsText shows only while the viewer is active", () => {
     const manifest = readManifest();
     const entries: { command: string; when: string; group?: string }[] = manifest.contributes.menus["editor/title"];
@@ -116,8 +92,6 @@ suite("package.json manifest sanity", () => {
     assert.strictEqual(openEntry!.when, "resourceExtname =~ /^\\.(csv|tsv|tab)$/i && activeCustomEditorId != csvViewer.table");
     assert.strictEqual(openAsTextEntry!.when, "activeCustomEditorId == csvViewer.table");
 
-    // Table-icon command shows for a csv text editor (viewer NOT active)
-    // and hides once the viewer IS active; openAsText is the mirror image.
     const openWhenMatches = (activeCustomEditorIsTable: boolean, ext: string): boolean => {
       const re = regexFromWhenClause(openEntry!.when);
       return re.test(ext) && !activeCustomEditorIsTable;
@@ -188,8 +162,7 @@ suite("icon file", () => {
     const iconPath = path.resolve(__dirname, "..", "..", "..", "..", "media", "icon.png");
     assert.ok(fs.existsSync(iconPath), `expected ${iconPath} to exist`);
     const buf = fs.readFileSync(iconPath);
-    // PNG signature + IHDR: width/height are the first two 4-byte big-endian
-    // integers in the IHDR chunk, starting at byte 16.
+    // IHDR width and height are big-endian uint32 values at byte offsets 16 and 20.
     assert.strictEqual(buf.readUInt32BE(0), 0x89504e47, "not a PNG file (bad signature)");
     const width = buf.readUInt32BE(16);
     const height = buf.readUInt32BE(20);
@@ -200,15 +173,8 @@ suite("icon file", () => {
 
 suite("packaged vsix contents (vsce ls --no-dependencies)", () => {
   test("contains exactly the expected runtime files, plus whatever out/webview/codicon.* the webview build adds", async function () {
-    // Generous: a directory walk via @vscode/vsce's listFiles has been
-    // observed to take much longer than usual on a contended/shared
-    // machine (same root cause as the perf tests' noise — see
-    // src/test/stress/perfEnv.ts); don't make this test more timeout-
-    // sensitive than the suite's own default.
+    // Generous timeout: vsce's listFiles directory walk can be very slow on a contended machine.
     this.timeout(90000);
-    // Uses @vscode/vsce's programmatic API (same listing `vsce ls` prints)
-    // rather than spawning a CLI subprocess from inside the Extension Test
-    // Host, which is slower and can double-prompt for a publisher login.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { listFiles } = require("@vscode/vsce") as { listFiles: (opts: { cwd: string; dependencies: boolean }) => Promise<string[]> };
     const cwd = path.resolve(__dirname, "..", "..", "..", "..");
@@ -226,8 +192,6 @@ suite("packaged vsix contents (vsce ls --no-dependencies)", () => {
       "out/webview/worker.js",
     ].sort();
 
-    // The webview team may add codicon assets (CSS + font) under
-    // out/webview/ — allow those, but nothing else beyond `expected`.
     const unexpected = files.filter((f) => !expected.includes(f) && !/^out\/webview\/codicon\./.test(f));
     assert.deepStrictEqual(unexpected, [], `unexpected file(s) in the vsix: ${JSON.stringify(unexpected)}`);
 

@@ -1,25 +1,8 @@
-// Weird header names: __proto__, constructor, empty, duplicate (including a
-// dedupe-collision case), a 500-char name, and an emoji name. Each is
-// exercised through visibility toggling, sorting, and filtering.
-//
-// `ColumnVisibilityMap` (src/core/columns.ts, src/core/types.ts) is a plain
-// JS object keyed by header name, not a `Map`. A header literally named
-// `__proto__` turns every write to `visibility["__proto__"]` into a no-op
-// (bracket assignment of a non-object value to `__proto__` is defined by
-// the spec to do nothing), while every *read* returns `Object.prototype`
-// (an object, so always `!== false`) instead of the value that was
-// "written". That produces a real, reproducible bug below.
-
 import { expect, test } from "@playwright/test";
 import { bootAndLoad, bootAndLoadText, defaultViewState } from "../harness";
 import { toCsvText, trackConsoleErrors } from "./stressHelpers";
 
 test.describe("__proto__ as a header name", () => {
-  // FIXED: columnVisibility maps (src/core/columns.ts) now write every
-  // entry via Object.defineProperty (bypassing Object.prototype's
-  // __proto__ accessor, which used to silently no-op the write) and read
-  // only via the safe getVisibility helper, so a column literally named
-  // "__proto__" can be hidden like any other column.
   test("a __proto__ column can be hidden — the checkbox stays unchecked and the column leaves the table", async ({
     page,
   }) => {
@@ -32,7 +15,7 @@ test.describe("__proto__ as a header name", () => {
         ["2", "hidden-value2", "Bob"],
       ],
       state: defaultViewState(),
-      defaultTableColumns: 3, // all visible to start
+      defaultTableColumns: 3,
     });
 
     await page.locator("#columns-btn").click();
@@ -41,8 +24,6 @@ test.describe("__proto__ as a header name", () => {
     await protoCheckbox.uncheck();
 
     await expect(page.locator("th", { hasText: "__proto__" })).toHaveCount(0);
-    // Re-opening the popover still shows the checkbox unchecked (the
-    // setting was really stored, not lost on the next render).
     await page.locator("#columns-btn").click();
     await page.locator("#columns-btn").click();
     await expect(protoCheckbox).not.toBeChecked();
@@ -57,11 +38,9 @@ test.describe("__proto__ as a header name", () => {
       headers: ["a", "b", "c", "__proto__"],
       rows: [["1", "2", "3", "4"]],
       state: defaultViewState(),
-      defaultTableColumns: 2, // only "a" and "b" should start visible
+      defaultTableColumns: 2,
     });
 
-    // Table shows exactly "a" and "b"; "c" and "__proto__" are
-    // detail-only, same default-N rule as every other column.
     await expect(page.locator("th.sortable")).toHaveCount(2);
     await expect(page.locator("th", { hasText: "__proto__" })).toHaveCount(0);
   });
@@ -82,12 +61,9 @@ test.describe("__proto__ as a header name", () => {
     });
 
     await page.locator("th", { hasText: "__proto__" }).click();
-    // Sorting runs in a worker and re-renders asynchronously once it
-    // answers, so poll rather than reading the DOM exactly once right
-    // after the click resolves (same expected order either way).
     await expect
       .poll(() => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? "")))
-      .toEqual(["2", "1", "3"]); // apple, banana, cherry -> ids 2,1,3
+      .toEqual(["2", "1", "3"]);
 
     await page.locator("#filters-btn").click();
     await page.locator("#add-rule-btn").click();
@@ -108,7 +84,7 @@ test("a header literally named 'constructor' behaves like any normal header (no 
       ["2", "y"],
     ],
     state: defaultViewState(),
-    defaultTableColumns: 1, // "constructor" starts detail-only
+    defaultTableColumns: 1,
   });
 
   await page.locator("#columns-btn").click();
@@ -135,7 +111,7 @@ test("an empty header cell is renamed to column_N and behaves normally", async (
   });
 
   await expect(page.locator("th", { hasText: "column_2" })).toHaveCount(1);
-  await page.locator("th", { hasText: "column_2" }).click(); // sort
+  await page.locator("th", { hasText: "column_2" }).click();
   await expect
     .poll(() => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[2]?.textContent ?? "")))
     .toEqual(["x", "y"]);
@@ -157,7 +133,6 @@ test("plain duplicate headers dedupe to name/name_2 and are independently toggle
   await expect(page.locator("th", { hasText: /^dup$/ })).toHaveCount(1);
   await expect(page.locator("th", { hasText: /^dup_2$/ })).toHaveCount(1);
 
-  // Hiding "dup" must not affect "dup_2".
   await page.locator("#columns-btn").click();
   await page.locator(".column-row", { hasText: /^dup$/ }).locator('input[type="checkbox"]').uncheck();
   await expect(page.locator("th", { hasText: /^dup_2$/ })).toHaveCount(1);
@@ -165,12 +140,6 @@ test("plain duplicate headers dedupe to name/name_2 and are independently toggle
 });
 
 test("a header set 'a', 'a', 'a_2' dedupes to three distinct, independently addressable columns", async ({ page }) => {
-  // FIXED: dedupeNames (src/core/csvParse.ts) now checks every generated
-  // `_N` candidate against every literal name in the file (not just names
-  // already assigned so far), so the duplicate "a" at index 1 skips "a_2"
-  // (reserved for the literal at index 2) and becomes "a_3" instead —
-  // three distinct final headers, each showing its own original cell
-  // value.
   const text = toCsvText(["a", "a", "a_2"], [["first", "second", "third"]]);
   await bootAndLoadText(page, {
     fileKey: "file:///dupcollide.csv",
@@ -204,7 +173,7 @@ test("a 500-character header renders, toggles, sorts, and filters normally", asy
   await page.locator("th", { hasText: longHeader }).click();
   await expect
     .poll(() => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.children[1]?.textContent ?? "")))
-    .toEqual(["2", "1"]); // sorted by the long-named column ascending: a, b -> ids 2, 1
+    .toEqual(["2", "1"]);
 
   await page.locator("#columns-btn").click();
   await page.locator(".column-row", { hasText: longHeader.slice(0, 50) }).locator('input[type="checkbox"]').uncheck();

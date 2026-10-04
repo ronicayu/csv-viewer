@@ -1,12 +1,8 @@
-// Pagination stress: every control at its bounds, hostile page-input
-// values, Alt+Arrow with focus on a button vs. an input, a page-size change
-// on the last page, and filtering to 0 rows and back.
-
 import { expect, test } from "@playwright/test";
 import { bootAndLoad, defaultViewState, pushLoad } from "../harness";
 import { trackConsoleErrors, wideFixture } from "./stressHelpers";
 
-const fixture = wideFixture(250, 4); // pageSize 100 -> pages of 100,100,50
+const fixture = wideFixture(250, 4);
 
 test.beforeEach(async ({ page }) => {
   await bootAndLoad(page, {
@@ -49,12 +45,6 @@ test("page input 'abc' can't actually be typed (native type=number input rejects
   await page.locator("#pager-next-btn").click();
   await expect(page.locator("#pager-page-input")).toHaveValue("2");
 
-  // A real keyboard user literally cannot get "abc" into a type=number
-  // input — Playwright's own `.fill()` refuses to try. Prove that, then
-  // exercise the underlying defensive branch (commitPageInput's `!
-  // Number.isFinite(parsed)` check) via the one way non-numeric text can
-  // reach it: the browser itself normalizes an assigned non-numeric value
-  // on a number input down to "".
   await expect(async () => {
     await page.locator("#pager-page-input").fill("abc");
   }).rejects.toThrow();
@@ -64,9 +54,9 @@ test("page input 'abc' can't actually be typed (native type=number input rejects
     el.value = "abc";
     return el.value;
   });
-  expect(normalized).toBe(""); // the browser's own normalization, not our code
+  expect(normalized).toBe("");
   await input.press("Enter");
-  await expect(input).toHaveValue("2"); // same restore-current-page behavior as a blank input
+  await expect(input).toHaveValue("2");
 });
 
 test("page input '2.7' truncates (not rounds) to page 2", async ({ page }) => {
@@ -99,10 +89,9 @@ test("Alt+ArrowRight is ignored when focus is on the page-number input itself", 
 
 test("changing the page size while on the last page keeps the first-visible row in view", async ({ page }) => {
   await page.locator("#pager-last-btn").click();
-  await expect(page.locator("#pager-page-input")).toHaveValue("3"); // rows 201-250
+  await expect(page.locator("#pager-page-input")).toHaveValue("3");
   await page.locator("#pager-page-size-select").selectOption("50");
 
-  // Row 201 (index 200) at size 50 falls on page 5 (the new last page).
   await expect(page.locator("#pager-page-input")).toHaveValue("5");
   await expect(page.locator("#pager-page-count")).toHaveText("5");
   await expect(page.locator("tr.data-row")).toHaveCount(50);
@@ -129,9 +118,7 @@ test("filtering down to 0 rows disables every nav control, and clearing the filt
 });
 
 test("a render landing while the user is typing a page number doesn't overwrite what they typed", async ({ page }) => {
-  // Regression: after clicking Next, the page result could land between
-  // fill() and Enter, resetting the box to the new page so Enter committed
-  // that instead. Deterministic version: type, then force a re-render.
+  // Re-render between fill and Enter to reproduce the race deterministically.
   const input = page.locator("#pager-page-input");
   await input.fill("3");
   await pushLoad(page, {

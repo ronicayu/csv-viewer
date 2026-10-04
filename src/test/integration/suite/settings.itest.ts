@@ -1,9 +1,3 @@
-// Covers csvViewer.defaultTableColumns edge cases: 0, 1, 1000, negative,
-// and a non-number value. Uses the fact that a fresh file's first open
-// triggers an automatic saveState (see multiPanel.itest.ts), whose
-// `state.columnVisibility` is the real, host-observable result of
-// `reconcileVisibility` — not just "did it crash".
-
 import * as assert from "assert";
 import * as fsp from "fs/promises";
 import * as path from "path";
@@ -13,7 +7,7 @@ import { closeAllEditors, fileKeyFor, getTestApi, openInViewer, waitForRender, w
 
 const CONFIG_SECTION = "csvViewer";
 const CONFIG_KEY = "defaultTableColumns";
-const COLUMNS = ["a", "b", "c", "d", "e", "f", "g"]; // columns7.csv
+const COLUMNS = ["a", "b", "c", "d", "e", "f", "g"];
 
 async function setDefaultTableColumns(value: unknown): Promise<void> {
   await vscode.workspace.getConfiguration(CONFIG_SECTION).update(CONFIG_KEY, value, vscode.ConfigurationTarget.Global);
@@ -21,9 +15,6 @@ async function setDefaultTableColumns(value: unknown): Promise<void> {
 
 let fixtureCounter = 0;
 
-/** Writes a brand-new copy of the 7-column fixture under a unique name so
- * each case gets a genuinely fresh fileKey (no prior persisted state to
- * interfere with reconciliation). */
 async function freshColumnsFixture(): Promise<vscode.Uri> {
   fixtureCounter += 1;
   const filePath = path.join(WORKSPACE_ROOT, `columns7-case-${fixtureCounter}.csv`);
@@ -46,7 +37,7 @@ async function visibleCountFor(value: unknown): Promise<{ visibility: Record<str
 
 suite("csvViewer.defaultTableColumns edge cases", () => {
   suiteTeardown(async () => {
-    await setDefaultTableColumns(undefined); // reset to the schema default (8)
+    await setDefaultTableColumns(undefined);
   });
 
   teardown(async () => {
@@ -75,13 +66,6 @@ suite("csvViewer.defaultTableColumns edge cases", () => {
   });
 
   test("non-number ('banana'): does not throw, degrades to 'every column detail-only' (i < NaN-like is always false)", async () => {
-    // package.json declares defaultTableColumns as type:"number", but
-    // `workspace.getConfiguration().update()` and `.get()` don't enforce
-    // that schema at the API level — a malformed value from a hand-edited
-    // settings.json flows straight into defaultVisibility()'s `i < N`
-    // comparison. This documents that it degrades gracefully rather than
-    // throwing, not that it's a *good* user experience (VS Code's Settings
-    // UI would normally stop a user from typing this in directly).
     const { visibleCount } = await visibleCountFor("banana");
     assert.strictEqual(visibleCount, 0);
   });

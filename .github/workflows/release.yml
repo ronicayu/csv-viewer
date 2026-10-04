@@ -1,9 +1,5 @@
 name: Release
 
-# Builds the vsix once, attaches it to a GitHub Release for the tag, and
-# publishes that same file to the Marketplace and Open VSX — but only when
-# the corresponding secret exists, so a fork or a repo that hasn't set up
-# publishing yet can still tag a release without the workflow failing.
 on:
   push:
     tags:
@@ -64,9 +60,6 @@ jobs:
   publish-marketplace:
     needs: build
     runs-on: ubuntu-latest
-    # Each step below checks its own secret and skips cleanly (rather than
-    # failing the run) when it hasn't been configured yet — see
-    # CONTRIBUTING.md's "Publishing" section for how to obtain VSCE_PAT.
     steps:
       - name: Download .vsix artifact
         uses: actions/download-artifact@v4
@@ -98,9 +91,7 @@ jobs:
         if: ${{ env.OVSX_PAT != '' }}
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        # Open VSX refuses to publish into a namespace that doesn't exist yet,
-        # and never creates one on publish. create-namespace fails once it
-        # exists, so that failure is ignored; publish itself is not.
+        # Open VSX needs the namespace to exist; create-namespace errors if it already does
         run: |
           npx ovsx create-namespace "${{ needs.build.outputs.publisher }}" -p "$OVSX_PAT" || echo "namespace already exists"
           npx ovsx publish "${{ needs.build.outputs.vsix_name }}" -p "$OVSX_PAT"

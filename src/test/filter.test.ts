@@ -153,7 +153,6 @@ describe("AND semantics across multiple rules", () => {
       rule({ column: "city", operator: "equals", value: "LA", mode: "exclude" }),
     ];
     const result = applyFilters(headers, rows, "", rules);
-    // "Charlie" fails the numeric include rule (non-numeric age); LA is excluded too.
     expect(result).toEqual([
       ["Alice", "30", "NYC"],
       ["bob", "25", ""],
@@ -201,8 +200,6 @@ describe("isRuleActive: the single source of truth applyFilters and the UI both 
 });
 
 describe("operator: in (is any of)", () => {
-  // Two blanks (an empty cell and an absent one), padded/cased variants, a
-  // literal "__proto__" — everything the exact-match contract must not blur.
   const inHeaders = ["name", "tag"];
   const inRows: string[][] = [
     ["r1", "red"],
@@ -210,7 +207,7 @@ describe("operator: in (is any of)", () => {
     ["r3", " red"],
     ["r4", "blue"],
     ["r5", ""],
-    ["r6"], // ragged: missing cell reads as ""
+    ["r6"],
     ["r7", "__proto__"],
   ];
   const names = (out: string[][]): string[] => out.map((r) => r[0]);

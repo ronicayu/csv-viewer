@@ -1,17 +1,4 @@
-// Cell text -> HTML for the row-details "Markdown" view. Pure (no DOM, no
-// vscode) but depends on markdown-it, so ONLY src/webview/main.ts may import
-// it: pulling it into the worker or extension-host bundles would bloat them
-// for nothing (see docs/spec.md, Architecture). Detection lives separately,
-// dependency-free, in markdownDetect.ts for exactly that reason.
-//
-// The string returned by renderMarkdown is the one and only thing in the
-// webview that may be assigned to innerHTML from cell content, so the
-// guarantees live here:
-//   - raw HTML in a cell is escaped and shown as text (`html: false`);
-//   - only http:, https: and mailto: hrefs become <a>; any other link
-//     (relative, #anchor, javascript:, data:, file:, ...) is its plain text;
-//   - images are never loaded: `![alt](src)` becomes a link to src (same
-//     href rules) labelled with the alt text or the URL, never an <img>.
+// Output goes to innerHTML: raw HTML stays escaped, only http/https/mailto links, images never load.
 
 import MarkdownIt from "markdown-it";
 import type { StateCore, Token } from "markdown-it";
@@ -40,13 +27,10 @@ function linkOpenToken(state: StateCore, href: string): Token {
   return token;
 }
 
-/** Restricts every link to safe schemes and turns every image into a link.
- * Runs after inline parsing, over each inline token's children. */
 function restrictLinksAndImages(state: StateCore): void {
   for (const block of state.tokens) {
     if (block.type !== "inline" || !block.children) continue;
     const out: Token[] = [];
-    // One entry per open link, in nesting order: whether it survived.
     const keptLinks: boolean[] = [];
     for (const child of block.children) {
       if (child.type === "link_open") {
@@ -81,7 +65,6 @@ function restrictLinksAndImages(state: StateCore): void {
 
 md.core.ruler.push("csv_viewer_restrict_links", restrictLinksAndImages);
 
-// A wide table scrolls inside its own wrapper instead of stretching the page.
 md.renderer.rules.table_open = () => '<div class="md-table-wrap"><table>\n';
 md.renderer.rules.table_close = () => "</table></div>\n";
 

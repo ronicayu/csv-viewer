@@ -1,9 +1,5 @@
 name: CI
 
-# Runs on every push and pull request. Kept deliberately conventional
-# (standard actions, no custom runner image) since none of this can be run
-# locally before merging — see CONTRIBUTING.md for the equivalent local
-# commands this mirrors.
 on:
   push:
   pull_request:
@@ -34,17 +30,7 @@ jobs:
       - name: Unit tests (vitest, src/core)
         run: npm test
         env:
-          # Deliberately NOT set to 1 here: the handful of perf-sensitive
-          # stress tests (src/test/stress/{performance,sort,parser}.stress.
-          # test.ts) use a generous sanity bound by default and only the
-          # tight "real regression" bound under PERF_TESTS=1 — a shared
-          # GitHub-hosted runner is noisy enough that the tight bound alone
-          # flakes without a real regression (observed directly while
-          # building this workflow: a sort of 500k rows that normally
-          # takes ~1s took over 25s under contention from a concurrent
-          # heavy test run). The tests still run and print their actual
-          # timings either way, so a real regression is still visible in
-          # the log — see src/test/stress/perfEnv.ts.
+          # The strict timing bounds flake on shared runners without a real regression
           PERF_TESTS: "0"
 
       - name: Install Playwright's Chromium (with OS deps)
@@ -54,23 +40,10 @@ jobs:
         run: npx playwright test --grep-invert "200k rows x 30 columns"
         env:
           CI: "1"
-        # The 200k-row scale spec (src/test/webview-e2e/stress/scale.spec.ts)
-        # is excluded here by its test title, not skipped in the source —
-        # it's owned by a different work stream and this workflow doesn't
-        # touch that file. It has its own CI-doubled bounds and is meant to
-        # be run and watched deliberately (e.g. before a release), not as
-        # a pass/fail gate on every push where normal runner noise could
-        # make it flaky. Run it directly with:
-        #   npx playwright test src/test/webview-e2e/stress/scale.spec.ts
+        # The 200k-row scale spec is a timing benchmark, too noisy to gate every push
 
       - name: Integration tests (real VS Code Extension Host, via xvfb)
         run: xvfb-run -a npm run test:integration
-        # @vscode/test-electron needs a display to launch the real Code.app
-        # Electron window; xvfb-run provides a virtual one on a headless
-        # Linux runner. runTest.ts downloads and caches a stable VS Code
-        # build itself (see its resolveVscodeExecutablePath) when the
-        # hard-coded local dev path it also checks doesn't exist, which is
-        # always the case in CI.
 
       - name: Package the extension (.vsix)
         run: npm run package

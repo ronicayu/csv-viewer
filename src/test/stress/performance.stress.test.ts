@@ -1,7 +1,3 @@
-// Performance smoke tests: applyFilters over a large dataset with a mix of
-// rule types including regex. Prints actual timings for the final report;
-// only hard-fails on truly pathological (10x+) regressions so it stays a
-// useful CI signal without being flaky across machines.
 import { describe, expect, it } from "vitest";
 import { applyFilters } from "../../core/filter";
 import type { FilterRule } from "../../core/types";
@@ -38,10 +34,6 @@ describe("performance: applyFilters over 500k rows x 20 cols, 5 rules incl. rege
     console.log(`applyFilters: 500k rows x 20 cols, 5 rules (incl. regex): ${ms.toFixed(1)}ms${ms > 1000 ? "  <-- OVER 1s, UI-freeze risk" : ""}`);
 
     expect(Array.isArray(result)).toBe(true);
-    // PERF_TESTS=1 enforces the tight 15s ceiling (catches a real
-    // algorithmic regression, e.g. accidental O(n^2)); otherwise (CI's
-    // default) a much looser 60s sanity bound avoids flaking on a noisy
-    // shared runner — see perfEnv.ts.
     expect(ms).toBeLessThan(perfBoundMs(15_000, 60_000));
   }, 65000);
 

@@ -1,11 +1,3 @@
-// Renders media/icon.svg to media/icon.png at exactly 128x128 using the
-// Playwright-managed Chromium that's already cached for the webview e2e
-// suite (no extra browser download needed). Run with:
-//
-//   node scripts/render-icon.mjs
-//
-// This is a build-time tool only (see .vscodeignore's scripts/** entry) —
-// nothing here ships in the extension.
 import { chromium } from "@playwright/test";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
@@ -27,10 +19,7 @@ async function main() {
         svg { display: block; width: 128px; height: 128px; }
       </style></head><body>${svg}</body></html>`,
     );
-    // The outer <rect> fills the full 128x128 viewBox, so no screenshot
-    // clipping is needed beyond the viewport itself. omitBackground keeps
-    // the page's own (transparent) background rather than defaulting to
-    // white, so corners outside the rounded rect stay transparent.
+    // omitBackground keeps the rounded corners transparent instead of white
     await page.screenshot({ path: pngPath, omitBackground: true });
   } finally {
     await browser.close();

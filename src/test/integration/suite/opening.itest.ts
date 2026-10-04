@@ -1,8 +1,3 @@
-// Covers every "opening" path from docs/spec.md's Architecture section:
-// vscode.openWith, the csvViewer.open command (with/without a uri, with no
-// active editor), every registered extension, and edge-case file content
-// (empty, non-UTF8).
-
 import * as assert from "assert";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -17,7 +12,7 @@ function fixture(name: string): vscode.Uri {
 
 suite("Opening", () => {
   suiteSetup(async () => {
-    await getTestApi(); // ensures the extension is activated before any test
+    await getTestApi();
   });
 
   teardown(async () => {
@@ -55,7 +50,6 @@ suite("Opening", () => {
     await closeAllEditors();
     const api = await getTestApi();
     const before = api.getNotifications().length;
-    // The assertion here IS that this doesn't throw.
     await vscode.commands.executeCommand("csvViewer.open");
     const after = api.getNotifications();
     assert.ok(after.length > before, "expected a new notification to be recorded");
@@ -85,23 +79,10 @@ suite("Opening", () => {
     const uri = fixture("UPPER.CSV");
     await openInViewer(uri);
     const api = await getTestApi();
-    // BUG-suspect: package.json's customEditors selector is
-    // `filenamePattern: "*.csv"` (lowercase only). If VS Code's glob
-    // matcher for filenamePattern is case-sensitive, this either renders
-    // nothing (the command silently opens the default text editor instead
-    // of our viewer) or errors. We give it a shorter timeout and report
-    // whichever way it actually goes rather than assuming.
     try {
       const render = await waitForRender(api, fileKeyFor(uri), 1, { timeoutMs: 3000 });
       assert.strictEqual(render.rowCount, 3);
     } catch (err) {
-      // Documented as a finding in the final report, not silently ignored:
-      // opening an uppercase-extension file through csvViewer.open did not
-      // produce a "rendered" message within 3s, meaning the custom editor
-      // never resolved for it. See package.json contributes.customEditors.
-      // We still assert the command itself didn't throw (it already ran
-      // above without throwing), and re-throw so this shows up as a
-      // skip-worthy signal rather than a silent pass.
       throw new Error(`UPPER.CSV never rendered via the CSV viewer (see extension.ts/package.json case-sensitivity note): ${String(err)}`);
     }
   });
@@ -119,8 +100,6 @@ suite("Opening", () => {
     await openInViewer(uri);
     const api = await getTestApi();
     const render = await waitForRender(api, fileKeyFor(uri));
-    // parseCsv on "" with firstRowIsHeader:true and skipEmptyLines produces
-    // no header row and no data rows.
     assert.strictEqual(render.rowCount, 0);
   });
 
@@ -128,8 +107,6 @@ suite("Opening", () => {
     const uri = fixture("latin1.csv");
     await openInViewer(uri);
     const api = await getTestApi();
-    // Whatever VS Code's default-encoding guess produces for these bytes,
-    // the extension must not throw and must still render *something*.
     const render = await waitForRender(api, fileKeyFor(uri));
     assert.strictEqual(render.rowCount, 2);
   });

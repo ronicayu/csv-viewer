@@ -1,10 +1,3 @@
-// Visual regression probes: screenshots of the default, filters-open,
-// columns-open, and expanded-row states at a normal desktop width
-// (1280x800) and a narrow width (480x800), saved to
-// test-results/stress-screens/ for manual review (not asserted on pixel
-// diff — this repo has no baseline images — but captured so a human/agent
-// can look at them and flag layout breakage).
-
 import { test } from "@playwright/test";
 import { bootAndLoad, defaultViewState } from "../harness";
 import { SCREENSHOT_DIR } from "./stressHelpers";
@@ -14,9 +7,6 @@ const VIEWPORTS = [
   { name: "480x800", width: 480, height: 800 },
 ];
 
-// A fixture with some deliberately awkward content: a longish header, a
-// long cell value, and enough rows/columns to make the toolbar and popover
-// interesting at a narrow width.
 const headers = ["id", "first_and_last_name_combined", "email_address", "status", "notes", "created_at", "region"];
 const rows = Array.from({ length: 12 }, (_, i) => [
   String(i + 1),
@@ -39,14 +29,7 @@ for (const vp of VIEWPORTS) {
         state: defaultViewState(),
         defaultTableColumns: 5,
       });
-      // The harness's page has no VS Code host, so none of the
-      // `--vscode-*` custom properties main.css relies on are ever
-      // defined — every `background: var(--vscode-x, var(--vscode-y))`
-      // resolves to nothing (both sides unset) and computes as
-      // transparent, which would make every screenshot below show
-      // content bleeding through popovers/panels regardless of whether
-      // the real extension has a layout bug. Define a plausible light
-      // VS Code theme here so the screenshots reflect real rendering.
+      // Without a VS Code host the --vscode-* variables are unset and popovers render transparent.
       await page.addStyleTag({
         content: `:root {
           --vscode-editor-foreground: #1e1e1e;

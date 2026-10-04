@@ -1,11 +1,3 @@
-// New coverage for the "reading" pass (docs/reviews/pm-review.md §4/§5,
-// docs/reviews/ux-review.md §2/§3/§6, P1-10/P1-13/P2-5/P2-6): the smart
-// default column split, numeric-column right-alignment, JSON pretty-print
-// with a Raw/Formatted toggle, the detail panel's 6-line height clamp and
-// its interplay with the 10,000-character "Show all"/"Show less", the
-// dimmed "—" for empty values, per-field Copy, Copy Row as CSV/JSON, and
-// the full keyboard row model.
-
 import * as fs from "fs";
 import * as path from "path";
 import { expect, test, type Page } from "@playwright/test";
@@ -14,8 +6,6 @@ import { smallFixture } from "./fixtures";
 import { toCsvText, wideFixture } from "./stress/stressHelpers";
 
 const TICKETS_WIDE = fs.readFileSync(path.join(REPO_ROOT, "samples", "tickets-wide.csv"), "utf8");
-
-// ---- A. Smart default column split (src/core/columns.ts) ------------------
 
 test.describe("smart default column split", () => {
   test("samples/tickets-wide.csv opens with its long description/notes/JSON columns in details and the short ones in the table", async ({
@@ -36,16 +26,12 @@ test.describe("smart default column split", () => {
     for (const field of ["description", "payload_json", "internal_notes", "tags", "sla_breached", "updated_at"]) {
       await expect(detail.locator("dt", { hasText: field })).toHaveCount(1);
     }
-    // The long/multiline/JSON columns must not also be in the table.
     for (const field of ["description", "payload_json", "internal_notes"]) {
       await expect(page.locator("#table-head th", { hasText: field })).toHaveCount(0);
     }
   });
 
   test("a stored per-file column choice overrides the smart split", async ({ page }) => {
-    // "description" looks long by its profile and would default to row
-    // details — a stored choice (as a reopened file would have) wins
-    // regardless, same guarantee the pure function's unit tests cover.
     await bootAndLoadText(page, {
       fileKey: "file:///tickets-wide-stored.csv",
       text: TICKETS_WIDE,
@@ -56,20 +42,11 @@ test.describe("smart default column split", () => {
     await expect(page.locator("#table-head th", { hasText: "description" })).toHaveCount(1);
     await expect(page.locator("#table-head th", { hasText: "ticket_id" })).toHaveCount(0);
 
-    // "description" being forced into the table doesn't mean it disappears
-    // from the detail panel entirely: it's long enough to be clipped (or,
-    // for this row, contains a newline), so it legitimately also shows up
-    // under "Also in table" — that's the pre-existing P0-1 behavior, not
-    // something a stored visibility choice should suppress. The point of
-    // this test is the column SPLIT (table vs. detail-only group), which
-    // "ticket_id" still demonstrates correctly.
     await page.locator("tr.data-row").first().click();
     const detail = page.locator("tr.detail-row").first();
     await expect(detail.locator("dt", { hasText: "ticket_id" })).toHaveCount(1);
   });
 });
-
-// ---- B. Numeric column right-alignment -------------------------------------
 
 test("a column whose values are almost all numeric is right-aligned with tabular-nums, while a text column is not", async ({ page }) => {
   const text = toCsvText(
@@ -88,19 +65,14 @@ test("a column whose values are almost all numeric is right-aligned with tabular
     defaultTableColumns: 3,
   });
 
-  const amountCell = page.locator("tr.data-row").first().locator("td").nth(2); // chevron, id, amount
+  const amountCell = page.locator("tr.data-row").first().locator("td").nth(2);
   await expect(amountCell).toHaveClass(/numeric-cell/);
   await expect(amountCell).toHaveCSS("text-align", "right");
 
-  // "id" ("1".."4") is itself ≥90% numeric by the same profile-based rule
-  // — right-aligning it too is correct, not a bug, so it's not asserted
-  // against here. "label" ("a".."d") is the genuinely non-numeric column.
   const labelCell = page.locator("tr.data-row").first().locator("td").nth(3);
   await expect(labelCell).not.toHaveClass(/numeric-cell/);
   await expect(labelCell).toHaveCSS("text-align", "left");
 });
-
-// ---- C/D. Detail panel values: JSON, height clamp, empty -------------------
 
 async function loadSingleField(page: Page, value: string, fileKey: string): Promise<void> {
   const text = toCsvText(["id", "field"], [["1", value]]);
@@ -108,7 +80,7 @@ async function loadSingleField(page: Page, value: string, fileKey: string): Prom
     fileKey,
     text,
     state: defaultViewState(),
-    defaultTableColumns: 1, // "field" is detail-only
+    defaultTableColumns: 1,
   });
   await page.locator("tr.data-row").first().click();
 }
@@ -139,8 +111,7 @@ test.describe("detail panel: JSON pretty-print", () => {
   });
 
   test("formatted JSON shows every literal exactly as written (big integers, trailing zeros, duplicate keys)", async ({ page }) => {
-    // JSON.stringify(JSON.parse(x)) would turn 9007199254740993 into
-    // ...992, 1.10 into 1.1 and drop the first "a": a viewer must not.
+    // Round-tripping through JSON.parse would change 9007199254740993, 1.10 and drop a duplicate key.
     const raw = '{"id":9007199254740993,"price":1.10,"a":1,"a":2}';
     await loadSingleField(page, raw, "file:///json-exact.csv");
     const valueText = page.locator("tr.detail-row").first().locator("dd").first().locator(".detail-value-text");
@@ -172,10 +143,8 @@ test.describe("detail panel: height clamp (More/Less)", () => {
   test("a long prose value clamps to 6 lines with a 'More' link, which expands to 'Less' and composes with 'Show all'/'Show less'", async ({
     page,
   }) => {
-    // Comfortably more than 6 lines AND more than 10,000 characters, so
-    // both the height clamp and the character cap are exercised together.
     const line = "This is one line of prose that is reasonably long for a detail field value.\n";
-    const bigProse = line.repeat(400); // ~30,800 chars, 400 lines
+    const bigProse = line.repeat(400);
     await loadSingleField(page, bigProse, "file:///long-prose.csv");
 
     const dd = page.locator("tr.detail-row").first().locator("dd").first();
@@ -187,21 +156,17 @@ test.describe("detail panel: height clamp (More/Less)", () => {
     const showAllBtn = dd.locator(".show-all-btn");
     await expect(showAllBtn).toContainText("Show all");
 
-    // Expand height first — the char cap still applies underneath it.
     await moreBtn.click();
     await expect(valueText).not.toHaveClass(/detail-value-clamped/);
     await expect(moreBtn).toHaveText("Less");
     const clampedLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
-    expect(clampedLength).toBe(10_001); // still truncated at 10,000 chars + "…"
+    expect(clampedLength).toBe(10_001);
 
-    // Now expand the character cap too.
     await showAllBtn.click();
     const fullLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
     expect(fullLength).toBe(bigProse.length);
     await expect(showAllBtn).toHaveText("Show less");
 
-    // Collapse height back down — the full (uncapped) text is still what's
-    // clamped, just visually limited to 6 lines again.
     await moreBtn.click();
     await expect(valueText).toHaveClass(/detail-value-clamped/);
     await expect(moreBtn).toHaveText("More");
@@ -215,7 +180,7 @@ test.describe("detail panel: height clamp (More/Less)", () => {
 
   test("the line clamp also applies to pretty-printed JSON", async ({ page }) => {
     const obj: Record<string, number> = {};
-    for (let i = 0; i < 60; i++) obj[`field_${i}`] = i; // 60 keys -> way over 6 lines once pretty-printed
+    for (let i = 0; i < 60; i++) obj[`field_${i}`] = i;
     await loadSingleField(page, JSON.stringify(obj), "file:///json-long.csv");
 
     const dd = page.locator("tr.detail-row").first().locator("dd").first();
@@ -231,8 +196,6 @@ test("an empty detail value shows a dimmed em dash instead of nothing", async ({
   await expect(dd.locator(".detail-empty-value")).toHaveText("—");
 });
 
-// ---- F. Per-field copy icon -------------------------------------------------
-
 test("the per-field copy icon copies the full raw value and briefly confirms with a check icon", async ({ page }) => {
   await page.evaluate(() => {
     Object.defineProperty(navigator, "clipboard", {
@@ -245,7 +208,7 @@ test("the per-field copy icon copies the full raw value and briefly confirms wit
       configurable: true,
     });
   });
-  const rawValue = "x".repeat(50_000); // longer than the 10k detail cap — copy must use the full value
+  const rawValue = "x".repeat(50_000);
   await loadSingleField(page, rawValue, "file:///copy-field.csv");
 
   const dt = page.locator("tr.detail-row").first().locator("dt").first();
@@ -259,8 +222,6 @@ test("the per-field copy icon copies the full raw value and briefly confirms wit
   await expect(copyBtn.locator(".codicon")).toHaveClass(/codicon-check/);
   await expect(copyBtn.locator(".codicon")).toHaveClass(/codicon-copy/, { timeout: 2000 });
 });
-
-// ---- G. Copy Row as CSV / JSON ----------------------------------------------
 
 test.describe("Copy Row as CSV / Copy Row as JSON", () => {
   async function stubClipboard(page: Page): Promise<void> {
@@ -321,7 +282,7 @@ test.describe("Copy Row as CSV / Copy Row as JSON", () => {
       headers: smallFixture.headers,
       rows: smallFixture.rows,
       state: defaultViewState(),
-      defaultTableColumns: 2, // age/city detail-only
+      defaultTableColumns: 2,
     });
     await page.locator("tr.data-row").first().locator("td").nth(1).click({ button: "right" });
     await page.locator("#context-menu button", { hasText: "Copy Row as CSV" }).click();
@@ -334,8 +295,6 @@ test.describe("Copy Row as CSV / Copy Row as JSON", () => {
     );
   });
 });
-
-// ---- H. Full keyboard walkthrough ------------------------------------------
 
 test.describe("row keyboard model", () => {
   test.beforeEach(async ({ page }) => {
@@ -354,15 +313,9 @@ test.describe("row keyboard model", () => {
     const rows = page.locator("tr.data-row");
     await expect(rows).toHaveCount(5);
 
-    // The twisty is out of the Tab order — clicking it still works (see
-    // uxFixes.spec.ts), but sequential Tab must land on the row itself.
     await expect(rows.first()).toHaveAttribute("tabindex", "0");
     for (const i of [1, 2, 3, 4]) await expect(rows.nth(i)).toHaveAttribute("tabindex", "-1");
 
-    // Tab from the last toolbar control: it passes through the (sortable)
-    // column header buttons — owned by a parallel agent, so this doesn't
-    // assume how many there are — and should land on a row once it gets
-    // there, never skip past every row.
     await page.locator("#open-as-text-btn").focus();
     let reachedRow = false;
     for (let i = 0; i < 20 && !reachedRow; i++) {
@@ -387,7 +340,6 @@ test.describe("row keyboard model", () => {
     await page.keyboard.press("Home");
     await expect(rows.first()).toBeFocused();
 
-    // →/← expand/collapse; Enter toggles too.
     const detail = page.locator("tr.detail-row").first();
     await expect(detail).toBeHidden();
     await expect(rows.first()).toHaveAttribute("aria-expanded", "false");
@@ -395,7 +347,7 @@ test.describe("row keyboard model", () => {
     await page.keyboard.press("ArrowRight");
     await expect(detail).toBeVisible();
     await expect(rows.first()).toHaveAttribute("aria-expanded", "true");
-    await page.keyboard.press("ArrowRight"); // already expanded — no-op, stays expanded
+    await page.keyboard.press("ArrowRight");
     await expect(detail).toBeVisible();
 
     await page.keyboard.press("ArrowLeft");
@@ -437,14 +389,13 @@ test.describe("row keyboard model", () => {
 
     await page.keyboard.press("ArrowDown");
     await expect(items.nth(1)).toBeFocused();
-    await page.keyboard.press("ArrowDown"); // wraps back to the first item
+    await page.keyboard.press("ArrowDown");
     await expect(items.nth(0)).toBeFocused();
 
     await page.keyboard.press("Escape");
     await expect(menu).toBeHidden();
     await expect(row).toBeFocused();
 
-    // The ContextMenu key does the same thing.
     await page.keyboard.press("ContextMenu");
     await expect(menu).toBeVisible();
     await page.keyboard.press("ArrowDown");
@@ -457,13 +408,7 @@ test.describe("row keyboard model", () => {
   test("focus moves to the first row after a re-render only if a row had focus before; typing in an input never steals focus", async ({
     page,
   }) => {
-    // A dedicated load with pageSize: 25 (the smallest valid preset — see
-    // core/paging.ts's PAGE_SIZES) and 30 rows, so there are two pages —
-    // instead of the shared beforeEach's defaults. Alt+→/← is a
-    // document-level keydown shortcut (see main.ts), not a click, so
-    // it's the one re-render trigger that doesn't focus some OTHER
-    // control first the way clicking a header or the pager legitimately
-    // does.
+    // Alt+Arrow is a document-level shortcut, so no other control takes focus before the re-render.
     const fixture = wideFixture(30, 4);
     await bootAndLoad(page, {
       fileKey: "file:///kbdrows-paged.csv",
@@ -481,12 +426,10 @@ test.describe("row keyboard model", () => {
     await expect(page.locator("tr.data-row").first()).toBeFocused();
     await expect(page.locator("tr.data-row").first()).toHaveAttribute("tabindex", "0");
 
-    // Now focus an input (quick search) and trigger another re-render —
-    // focus must stay in the input, never get pulled to a row.
-    await page.locator("#quick-search").fill("v25"); // matches exactly row 25's cells
+    await page.locator("#quick-search").fill("v25");
     await expect(page.locator("#quick-search")).toBeFocused();
     await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 30 rows");
-    await expect(page.locator("#quick-search")).toBeFocused(); // still, after the re-render
+    await expect(page.locator("#quick-search")).toBeFocused();
   });
 });
 
@@ -503,15 +446,10 @@ test("a 250-row file's roving tabindex and focus survive paging via the pager bu
   });
   const rows = page.locator("tr.data-row");
   await rows.nth(3).focus();
-  // Clicking the pager button focuses the BUTTON (ordinary browser
-  // behavior for any clicked focusable control) — the roving tabindex
-  // still moves to the new page's first row even though focus itself
-  // isn't pulled there, so Tab/Shift+Tab from the button reaches it.
   await page.locator("#pager-next-btn").click();
   await expect(page.locator("tr.data-row").first()).toHaveAttribute("tabindex", "0");
   await expect(page.locator("tr.data-row").nth(1)).toHaveAttribute("tabindex", "-1");
 
-  // Alt+→ instead (no intervening click) DOES keep focus on a row.
   await rows.nth(2).focus();
   await page.keyboard.press("Alt+ArrowRight");
   await expect(page.locator("tr.data-row").first()).toBeFocused();

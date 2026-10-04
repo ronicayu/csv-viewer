@@ -1,12 +1,7 @@
-// Row filtering: a global quick search plus a list of rules that combine
-// with AND semantics (all enabled include rules must match; any enabled
-// exclude rule that matches drops the row). Pure module, no vscode/DOM.
-
 import { foldCase } from "./caseFold";
 import { parseNumber } from "./number";
 import type { FilterRule } from "./types";
 
-/** A rule is invalid only when it's a regex rule with an unparsable pattern. */
 export function isValidRule(rule: FilterRule): boolean {
   if (rule.operator !== "regex") return true;
   try {
@@ -17,10 +12,6 @@ export function isValidRule(rule: FilterRule): boolean {
   }
 }
 
-/** The JS engine's own message for why `value` doesn't parse as a regex,
- * or null if it parses fine. Used only for the filter panel's "Skipped:
- * invalid regex (<message>)" hint (see main.ts) — never affects filtering
- * itself, which still goes through isValidRule/isRuleActive above. */
 export function regexErrorMessage(value: string): string | null {
   try {
     new RegExp(value);
@@ -30,31 +21,11 @@ export function regexErrorMessage(value: string): string | null {
   }
 }
 
-/**
- * Whether a rule can actually apply right now, independent of its
- * `enabled` checkbox: its regex (if any) parses, its column (if any) still
- * exists in `headers`, and — for every operator except `isEmpty`, which
- * takes no value — it has a non-empty value (`in` takes a non-empty
- * `values` list on a specific column instead). `applyFilters` uses this (in
- * combination with `enabled`) to decide which rules take part; the UI uses
- * it to decide whether to show a "column not found" / "enter a value"
- * hint on a rule row, so the two always agree on what "active" means.
- *
- * A rule that fails this check is IGNORED (as if disabled), not applied as
- * a rule that matches nothing — those are very different outcomes for an
- * include rule: "ignored" leaves every row as-is, "matches nothing" drops
- * every row. A stale/incomplete rule doing the latter (the pre-fix
- * behavior) meant one leftover rule — e.g. pointing at a column removed by
- * a header rename or separator change — could silently hide the entire
- * file instead of just not filtering.
- */
+// An inactive rule is ignored rather than matching nothing, so a stale rule cannot hide every row.
 export function isRuleActive(rule: FilterRule, headers: string[]): boolean {
   if (!isValidRule(rule)) return false;
   if (rule.column !== null && headers.indexOf(rule.column) === -1) return false;
   if (rule.operator === "in") {
-    // "Is any of" takes a list, not `value`, and only makes sense against one
-    // specific column (the picker lists that column's values): "Any column"
-    // is inactive, as is an empty list (which would otherwise match nothing).
     return rule.column !== null && Array.isArray(rule.values) && rule.values.length > 0;
   }
   if (rule.operator !== "isEmpty" && rule.value === "") return false;
@@ -64,8 +35,7 @@ export function isRuleActive(rule: FilterRule, headers: string[]): boolean {
 function cellMatches(cell: string, rule: FilterRule, re: RegExp | null, valueSet: Set<string> | null): boolean {
   switch (rule.operator) {
     case "in":
-      // Exact, case-sensitive, untrimmed — these are the literal strings the
-      // picker listed, not a user-typed pattern.
+      // The picker lists literal cell values, so match exactly: case-sensitive and untrimmed.
       return valueSet !== null && valueSet.has(cell);
     case "isEmpty":
       return cell.trim() === "";
@@ -116,8 +86,6 @@ interface CompiledRule {
   rule: FilterRule;
   columnIndex: number | null;
   re: RegExp | null;
-  /** The `in` operator's values as a Set, built once per rule here rather
-   * than per row. */
   valueSet: Set<string> | null;
 }
 

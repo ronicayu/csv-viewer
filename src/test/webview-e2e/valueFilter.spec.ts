@@ -1,8 +1,3 @@
-// "Filter by values" (Google-Sheets style): the header funnel, the shared
-// values picker (#values-popover), the Filters panel's "is any of"
-// condition, and the cell context menu entry. The unit-level semantics of the
-// `in` operator live in src/test/filter.test.ts; these specs cover the UI.
-
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { awaitPosted, bootAndLoad, bootAndLoadText, clearPosted, defaultViewState, posted, pushLoad } from "./harness";
 import { toCsvText, XSS_IMG } from "./stress/stressHelpers";
@@ -56,7 +51,7 @@ function valueRow(page: Page, text: string): Locator {
 async function openPicker(page: Page, column: string): Promise<void> {
   await funnel(page, column).click();
   await expect(picker(page)).toBeVisible();
-  await expect(page.locator("#values-list .vp-empty")).toHaveCount(0); // past "Loading values…"
+  await expect(page.locator("#values-list .vp-empty")).toHaveCount(0);
 }
 
 async function lastSavedRules(page: Page): Promise<FilterRule[]> {
@@ -88,7 +83,6 @@ test.describe("header funnel and values picker", () => {
       await expect(f.locator(".codicon")).toHaveClass(/codicon-filter(?!-)/);
       await expect(f).not.toHaveClass(/active/);
     }
-    // The chevron column header has no funnel.
     await expect(page.locator("#table-head th.chevron-col button")).toHaveCount(0);
   });
 
@@ -114,8 +108,7 @@ test.describe("header funnel and values picker", () => {
   test("a long column name ellipsizes inside the sort button and the funnel is neither shrunk nor clipped", async ({ page }) => {
     const longName = "a_really_long_column_name_that_cannot_possibly_fit_in_this_cell_at_all_ok";
     await boot(page, {}, [["1", "x"]], ["id", longName]);
-    // Force a constrained column (an auto-layout table never shrinks below
-    // its content), so the ellipsis has to come from the cell's own layout.
+    // Force a constrained column; an auto-layout table never shrinks below its content.
     await page.addStyleTag({ content: "#table { table-layout: fixed; width: 240px; } th.sortable { width: 100px; }" });
     const th = page.locator(`#table-head th[data-column="${longName}"]`);
     const f = th.locator(".col-filter-btn");
@@ -142,7 +135,6 @@ test.describe("header funnel and values picker", () => {
 
     await expect(rows(page).locator(".v")).toHaveText(["closed", "open", "pending"]);
     await expect(rows(page).locator(".n")).toHaveText(["2", "3", "1"]);
-    // No rule yet: everything starts ticked.
     await expect(rows(page).locator("input")).toHaveCount(3);
     for (const box of await rows(page).locator("input").all()) await expect(box).toBeChecked();
     await expect(page.locator("#values-select-all")).toHaveText("Select all 3");
@@ -150,12 +142,10 @@ test.describe("header funnel and values picker", () => {
     await expect(page.locator("#values-selected-count")).toHaveText("3 of 3 selected");
     await expect(page.locator("#values-ok")).toBeEnabled();
 
-    // Anchored under the funnel.
     const [fBox, pBox] = await Promise.all([funnel(page, "status").boundingBox(), p.boundingBox()]);
     expect(pBox!.y).toBeGreaterThanOrEqual(fBox!.y + fBox!.height);
     expect(pBox!.y).toBeLessThan(fBox!.y + fBox!.height + 20);
 
-    // Nothing sorted, nothing saved.
     await expect(page.locator('#table-head th[data-column="status"]')).toHaveAttribute("aria-sort", "none");
     expect((await posted(page)).filter((m) => m.type === "saveState")).toEqual([]);
   });
@@ -186,7 +176,6 @@ test.describe("header funnel and values picker", () => {
     await openPicker(page, "status");
     await valueRow(page, "pending").locator("input").uncheck();
     await expect(page.locator("#values-selected-count")).toHaveText("2 of 3 selected");
-    // Nothing changes until OK.
     await expect(statusText(page)).toHaveText("Showing 6 of 6 rows");
     await expect(funnel(page, "status")).not.toHaveClass(/active/);
 
@@ -205,7 +194,7 @@ test.describe("header funnel and values picker", () => {
     expect(rules[0]).toMatchObject({
       column: "status",
       operator: "in",
-      values: ["closed", "open"], // ticked values, in list order
+      values: ["closed", "open"],
       value: "",
       mode: "include",
       caseSensitive: false,
@@ -224,7 +213,6 @@ test.describe("header funnel and values picker", () => {
   });
 
   test("Cancel, Escape, and an outside click each discard the edits and leave the table alone", async ({ page }) => {
-    // Cancel
     await openPicker(page, "status");
     await valueRow(page, "open").locator("input").uncheck();
     await page.locator("#values-cancel").click();
@@ -232,15 +220,13 @@ test.describe("header funnel and values picker", () => {
     await expect(funnel(page, "status")).toBeFocused();
     await expect(statusText(page)).toHaveText("Showing 6 of 6 rows");
 
-    // Escape (and focus goes back to the funnel)
     await openPicker(page, "status");
-    await expect(valueRow(page, "open").locator("input")).toBeChecked(); // edits did not stick
+    await expect(valueRow(page, "open").locator("input")).toBeChecked();
     await valueRow(page, "open").locator("input").uncheck();
     await page.keyboard.press("Escape");
     await expect(picker(page)).toBeHidden();
     await expect(funnel(page, "status")).toBeFocused();
 
-    // Outside click (focus is not yanked back)
     await openPicker(page, "status");
     await valueRow(page, "open").locator("input").uncheck();
     await page.locator("#quick-search").click();
@@ -266,7 +252,6 @@ test.describe("header funnel and values picker", () => {
     await page.locator("#values-search").fill("A");
     await expect(rows(page).locator(".v")).toHaveText(["Alice", "Cara", "Dan", "Fay"]);
     await expect(page.locator("#values-select-all")).toHaveText("Select all 4");
-    // "X of Y" still counts the whole list.
     await expect(page.locator("#values-selected-count")).toHaveText("6 of 6 selected");
 
     await page.locator("#values-clear").click();
@@ -306,7 +291,7 @@ test.describe("header funnel and values picker", () => {
     await expect(rows(page).first().locator(".n")).toHaveText("3");
     expect(await rows(page).first().locator(".v").evaluate((el) => getComputedStyle(el).fontStyle)).toBe("italic");
 
-    await page.locator("#values-clear").click(); // all four
+    await page.locator("#values-clear").click();
     await page.locator("#values-search").fill("blank");
     await expect(rows(page).locator(".v")).toHaveText(["(Blanks)"]);
     await page.locator("#values-select-all").click();
@@ -355,7 +340,6 @@ test.describe("header funnel and values picker", () => {
   });
 
   test("ticking everything again removes the rule (and never creates one)", async ({ page }) => {
-    // Nothing to create: all ticked + OK.
     await clearPosted(page);
     await openPicker(page, "status");
     await page.locator("#values-ok").click();
@@ -363,14 +347,13 @@ test.describe("header funnel and values picker", () => {
     await expect(page.locator("#filters-btn")).toHaveText("Filters");
     expect(await lastSavedRules(page)).toEqual([]);
 
-    // Create one, then tick everything back.
     await openPicker(page, "status");
     await valueRow(page, "pending").locator("input").uncheck();
     await page.locator("#values-ok").click();
     await expect(page.locator("#filters-btn")).toHaveText("Filters • 1");
 
     await openPicker(page, "status");
-    await expect(page.locator("#values-selected-count")).toHaveText("2 of 3 selected"); // pre-ticked from the rule
+    await expect(page.locator("#values-selected-count")).toHaveText("2 of 3 selected");
     await valueRow(page, "pending").locator("input").check();
     await clearPosted(page);
     await page.locator("#values-ok").click();
@@ -394,7 +377,6 @@ test.describe("header funnel and values picker", () => {
     await valueRow(page, "pending").locator("input").check();
     await page.locator("#values-ok").click();
     await expect(statusText(page)).toHaveText("Showing 4 of 6 rows");
-    // Still a single rule, updated in place.
     await expect(page.locator("#filters-btn")).toHaveText("Filters • 1");
   });
 
@@ -463,7 +445,7 @@ test.describe("header funnel and values picker", () => {
   });
 
   test("re-clamps inside the viewport when the window is resized", async ({ page }) => {
-    await openPicker(page, "note"); // the last column: its funnel is at the right edge
+    await openPicker(page, "note");
     await page.setViewportSize({ width: 420, height: 500 });
     const box = await picker(page).boundingBox();
     expect(box!.x).toBeGreaterThanOrEqual(8 - 0.5);
@@ -578,7 +560,7 @@ test.describe("stored rules", () => {
     await openPicker(page, "status");
     await page.locator("#values-select-all").click();
     await page.locator("#values-ok").click();
-    await expect(statusText(page)).toHaveText("Showing 0 of 6 rows"); // Hide everything: kept, not dropped
+    await expect(statusText(page)).toHaveText("Showing 0 of 6 rows");
     await expect(page.locator("#filters-btn")).toHaveText("Filters • 1");
   });
 
@@ -659,13 +641,11 @@ test.describe("Filters panel: is any of", () => {
     const [bBox, pBox] = await Promise.all([btn.boundingBox(), picker(page).boundingBox()]);
     expect(pBox!.y).toBeGreaterThanOrEqual(bBox!.y + bBox!.height);
 
-    // Clicks inside the picker do not close the panel (or the picker).
     await valueRow(page, "closed").locator("input").check();
     await page.locator("#values-search").fill("o");
     await expect(picker(page)).toBeVisible();
     await expect(page.locator("#filter-panel")).toBeVisible();
 
-    // The button toggles the picker shut again, leaving the panel.
     await btn.click();
     await expect(picker(page)).toBeHidden();
     await expect(page.locator("#filter-panel")).toBeVisible();
@@ -679,7 +659,6 @@ test.describe("Filters panel: is any of", () => {
     await expect(picker(page)).toBeHidden();
     await expect(page.locator("#filter-panel")).toBeVisible();
     await expect(page.locator(".rule-row .values-btn")).toBeFocused();
-    // A second Escape closes the panel.
     await page.keyboard.press("Escape");
     await expect(page.locator("#filter-panel")).toBeHidden();
   });
@@ -690,7 +669,7 @@ test.describe("Filters panel: is any of", () => {
     await page.locator("#filter-panel .filter-panel-hint").first().click();
     await expect(picker(page)).toBeHidden();
     await expect(page.locator("#filter-panel")).toBeVisible();
-    await expect(page.locator(".rule-row .values-btn")).toHaveText("open, pending (2)"); // unchanged
+    await expect(page.locator(".rule-row .values-btn")).toHaveText("open, pending (2)");
     await expect(statusText(page)).toHaveText("Showing 4 of 6 rows");
 
     await page.locator(".rule-row .values-btn").click();
@@ -742,7 +721,7 @@ test.describe("Filters panel: is any of", () => {
         hintsSeen: ["rowDetails"],
       });
     await load(["Alice", "Bob", "Cara", "Dan", "Eve"]);
-    await expect(btn).toHaveText("Alice, Bob, Cara, Dan, Eve (5)"); // 28 characters: untouched
+    await expect(btn).toHaveText("Alice, Bob, Cara, Dan, Eve (5)");
     await load(["Alexandria", "Bartholomew", "Christopher", "Dominic"]);
     await expect(btn).toHaveText("Alexandria, Bartholomew, Chris… (4)");
     await load(["", "x"]);
@@ -805,7 +784,6 @@ test.describe("adding `is any of` from the panel", () => {
     await rule.locator(".values-btn").click();
     await expect(picker(page)).toBeVisible();
     await expect(rows(page).locator(".v")).toHaveText(["(Blanks)", "n2", "n4", "n6"]);
-    // The rule exists but has no values: nothing is pre-ticked, OK is off.
     await expect(page.locator("#values-selected-count")).toHaveText("0 of 4 selected");
     await expect(page.locator("#values-ok")).toBeDisabled();
     await valueRow(page, "n2").locator("input").check();
@@ -870,7 +848,6 @@ test.describe("context menu", () => {
       "Copy Row as CSV",
       "Copy Row as JSON",
     ]);
-    // Dividers: after Copy Value and after the Values item.
     const kinds = await page.locator("#context-menu > *").evaluateAll((els) => els.map((e) => e.tagName));
     expect(kinds).toEqual(["BUTTON", "HR", "BUTTON", "BUTTON", "BUTTON", "HR", "BUTTON", "BUTTON"]);
   });
@@ -920,10 +897,9 @@ test.describe("context menu", () => {
     await page.locator("tr.data-row").first().locator("td").nth(2).click({ button: "right" });
     await page.locator("#context-menu button", { hasText: "Filter name by Values…" }).click();
     await expect(page.locator("#values-title")).toHaveText("Filter “name” by values");
-    await expect(page.locator("#values-selected-count")).toHaveText("6 of 6 selected"); // no rule on `name`
+    await expect(page.locator("#values-selected-count")).toHaveText("6 of 6 selected");
 
     await page.keyboard.press("Escape");
-    // Row 1 ("Dan") survives the status rule: its status cell is the 4th <td>.
     await page.locator("tr.data-row").first().locator("td").nth(3).click({ button: "right" });
     await page.locator("#context-menu button", { hasText: "Filter status by Values…" }).click();
     await expect(page.locator("#values-selected-count")).toHaveText("1 of 3 selected");
@@ -932,7 +908,7 @@ test.describe("context menu", () => {
 
   test("from a detail field of a column that isn't in the table, the picker opens at the click position", async ({ page }) => {
     await boot(page, { columnVisibility: { note: false } });
-    await page.locator("tr.data-row").nth(1).click(); // expand "Bob"
+    await page.locator("tr.data-row").nth(1).click();
     const dd = page.locator("tr.detail-row:not([hidden]) dd").first();
     await expect(dd).toBeVisible();
     const box = (await dd.boundingBox())!;
@@ -945,7 +921,6 @@ test.describe("context menu", () => {
     await expect(rows(page).locator(".v")).toHaveText(["(Blanks)", "n2", "n4", "n6"]);
     const pBox = (await picker(page).boundingBox())!;
     expect(Math.abs(pBox.x - x)).toBeLessThan(2);
-    // Inside the viewport.
     const vp = page.viewportSize()!;
     expect(pBox.y + pBox.height).toBeLessThanOrEqual(vp.height);
     expect(pBox.x + pBox.width).toBeLessThanOrEqual(vp.width);
@@ -1012,8 +987,6 @@ test.describe("limits and recovery", () => {
     );
     await expect(page.locator("#values-selected-count")).toHaveText("10000 of 10000 selected");
     await page.locator("#values-ok").click();
-    // Truncated: ticking everything listed is not "everything", so the rule stays
-    // and the 20 unlisted rows are filtered out.
     await expect(statusText(page)).toHaveText("Showing 10,000 of 10,020 rows");
     await expect(page.locator("#filters-btn")).toHaveText("Filters • 1");
   });

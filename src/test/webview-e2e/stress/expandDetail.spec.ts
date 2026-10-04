@@ -1,8 +1,3 @@
-// Expand/detail edge cases: does the right row stay expanded (and its
-// chevron stay in sync) across sort/filter/page changes; does "Expand page"
-// survive a page-size change; and does the detail panel handle a 100 KB
-// cell and multi-line cells without truncation or mangling.
-
 import { expect, test } from "@playwright/test";
 import { bootAndLoad, bootAndLoadText, defaultViewState } from "../harness";
 import { toCsvText, trackConsoleErrors, wideFixture } from "./stressHelpers";
@@ -17,31 +12,24 @@ test("an expanded row stays expanded (and its chevron stays ▼) after sorting, 
     headers: fixture.headers,
     rows: fixture.rows,
     state: defaultViewState(),
-    defaultTableColumns: 3, // col_4/col_5 detail-only
+    defaultTableColumns: 3,
   });
 
-  // Expand the row for id=0 (col_1 value "0"), currently first on page 1.
-  // Rows carry their stable row id as a data attribute, which is a much
-  // more robust selector than matching rendered text.
   const targetRow = page.locator('tr.data-row[data-row-id="0"]');
   await targetRow.click();
   await expect(targetRow.locator(".twisty")).toHaveAttribute("aria-expanded", "true");
   await expect(targetRow.locator("+ tr.detail-row")).toBeVisible();
 
-  // Sort descending by col_1 (a header click cycles asc then desc) — the
-  // id=0 row moves from first to last-in-dataset, likely a different page.
   await page.locator("th", { hasText: "col_1" }).click();
   await page.locator("th", { hasText: "col_1" }).click();
   await page.locator("#pager-last-btn").click();
 
   const rowAfterSort = page.locator("tr.data-row").last();
-  await expect(rowAfterSort).toHaveAttribute("data-row-id", "0"); // the id=0 row, now last
+  await expect(rowAfterSort).toHaveAttribute("data-row-id", "0");
   await expect(rowAfterSort.locator(".twisty")).toHaveAttribute("aria-expanded", "true");
   await expect(rowAfterSort.locator("+ tr.detail-row")).toBeVisible();
 
-  // Filter down to just that row, then back out to everything — still
-  // expanded either way.
-  await page.locator("#quick-search").fill("v0_3"); // col_4 value unique to row 0
+  await page.locator("#quick-search").fill("v0_3");
   await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 250 rows");
   const onlyRow = page.locator("tr.data-row").first();
   await expect(onlyRow.locator(".twisty")).toHaveAttribute("aria-expanded", "true");
@@ -63,23 +51,16 @@ test("Expand page followed by a page-size change keeps the previously-expanded r
     defaultTableColumns: 4,
   });
 
-  await page.locator("#expand-collapse-btn").click(); // expand all on this page — rows 0-99 (ids 0-99)
+  await page.locator("#expand-collapse-btn").click();
   await expect(page.locator("tr.detail-row:visible")).toHaveCount(100);
 
-  // Shrink the page size to 50: page 1 now covers ids 0-49 (still expanded,
-  // since expansion is keyed by row id, not position).
   await page.locator("#pager-page-size-select").selectOption("50");
   await expect(page.locator("tr.data-row")).toHaveCount(50);
   await expect(page.locator("tr.detail-row:visible")).toHaveCount(50);
 
-  // Page 2 (ids 50-99) was also expanded by the original "Expand page" —
-  // confirm it's still expanded even though it was never the active page
-  // when that button was clicked.
   await page.locator("#pager-next-btn").click();
   await expect(page.locator("tr.detail-row:visible")).toHaveCount(50);
 
-  // Page 3 (ids 100-149) was never touched by "Expand page" and must stay
-  // collapsed.
   await page.locator("#pager-next-btn").click();
   await expect(page.locator("tr.detail-row:visible")).toHaveCount(0);
 });
@@ -87,26 +68,13 @@ test("Expand page followed by a page-size change keeps the previously-expanded r
 test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a 'Show all' button, which expands it in place and gains a 'Show less' counterpart", async ({
   page,
 }) => {
-  // Decision: the detail view renders at most 10,000 characters plus a
-  // "Show all (N characters)" button (see docs/spec.md, "Huge cells") —
-  // a 15 MB single-line cell used to be rendered in full and trip VS
-  // Code's unresponsive-webview watchdog. Table cells truncate to 500
-  // characters; the detail view's higher cap is exercised here.
-  //
-  // MIGRATED (docs/reviews/pm-review.md §4 "Detail view: 10k truncation +
-  // Show all"): "Show all" used to remove itself once clicked — it now
-  // becomes a "Show less" toggle instead, so the same button can collapse
-  // back to the truncated view. The value's own text is read from
-  // .detail-value-text specifically (not the whole <dd>), since the <dd>
-  // also holds that control plus the JSON format-toggle and height-clamp
-  // "More"/"Less" controls introduced alongside it.
   const bigValue = "x".repeat(100_000);
   const text = toCsvText(["id", "big", "note"], [["1", bigValue, "n"]]);
   await bootAndLoadText(page, {
     fileKey: "file:///bigcell.csv",
     text,
     state: defaultViewState(),
-    defaultTableColumns: 1, // "big" and "note" are detail-only
+    defaultTableColumns: 1,
   });
 
   await page.locator("tr.data-row").first().click();
@@ -114,7 +82,7 @@ test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a
   const valueText = dd.locator(".detail-value-text");
 
   const initialLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
-  expect(initialLength).toBe(10_001); // 10,000 chars + the "…" marker
+  expect(initialLength).toBe(10_001);
 
   const showAllBtn = dd.locator(".show-all-btn");
   await expect(showAllBtn).toHaveText("Show all (100,000 characters)");
@@ -122,11 +90,11 @@ test("a 100 KB cell in the detail panel is truncated to 10,000 characters with a
   await showAllBtn.click();
   const fullLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
   expect(fullLength).toBe(100_000);
-  await expect(showAllBtn).toHaveText("Show less"); // gains a counterpart instead of disappearing
+  await expect(showAllBtn).toHaveText("Show less");
 
   await showAllBtn.click();
   const collapsedAgainLength = await valueText.evaluate((el) => el.textContent?.length ?? 0);
-  expect(collapsedAgainLength).toBe(10_001); // "Show less" returns to the truncated view
+  expect(collapsedAgainLength).toBe(10_001);
   await expect(showAllBtn).toHaveText("Show all (100,000 characters)");
 });
 
@@ -144,40 +112,27 @@ test("multi-line cell values preserve their newlines in the detail panel (CSS pr
 
   await page.locator("tr.data-row").first().click();
   const dd = page.locator("tr.detail-row").first().locator("dd").first();
-  // The displayed value only — a multi-line value now also carries a
-  // "Markdown" link in the <dd>, which is a control, not content.
   const raw = await dd.locator(".detail-value-text").evaluate((el) => el.textContent ?? "");
   expect(raw).toBe(multiline);
 
-  // The CSS actually renders it on 3 visual lines (white-space: pre-wrap),
-  // not a single collapsed line — sanity check via client rect height
-  // vs. a single-line sibling.
   const box = await dd.boundingBox();
   expect(box).not.toBeNull();
   const lineHeightGuess = await page.locator("tr.detail-row dd").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize) * 1.2);
-  expect(box!.height).toBeGreaterThan(lineHeightGuess * 2); // at least ~3 lines tall
+  expect(box!.height).toBeGreaterThan(lineHeightGuess * 2);
 });
 
 test("a huge table cell renders truncated to 500 characters, but right-click quick-add still uses the full value", async ({ page }) => {
-  // Table cells render at most 500 characters (+ "…") — a 15 MB
-  // single-line cell used to freeze rendering entirely. The worker
-  // always returns the FULL cell value; only rendering into the <td>
-  // truncates, so quick-add (which needs the real value to build an
-  // "equals" rule) is unaffected.
   const bigValue = "y".repeat(5000);
   const text = toCsvText(["id", "big"], [["1", bigValue]]);
   await bootAndLoadText(page, {
     fileKey: "file:///bigtablecell.csv",
     text,
-    // "big"'s median length is far past the smart default split's "short"
-    // threshold, so it would default to row details on its own now (see
-    // src/core/columns.ts) — force it into the table explicitly, since
-    // this test is specifically about table-cell truncation.
+    // Forced into the table; the smart column split would otherwise move 'big' to row details.
     state: defaultViewState({ columnVisibility: { id: true, big: true } }),
-    defaultTableColumns: 2, // "big" visible in the table
+    defaultTableColumns: 2,
   });
 
-  const cell = page.locator("tr.data-row").first().locator("td").nth(2); // chevron, id, big
+  const cell = page.locator("tr.data-row").first().locator("td").nth(2);
   const cellText = await cell.evaluate((el) => el.textContent ?? "");
   expect(cellText).toBe("y".repeat(500) + "…");
   expect(cellText.length).toBe(501);
@@ -185,19 +140,19 @@ test("a huge table cell renders truncated to 500 characters, but right-click qui
   await cell.click({ button: "right" });
   await page.locator("#context-menu button", { hasText: /^Show only rows where/ }).click();
   const rule = page.locator(".rule-row").first();
-  await expect(rule.locator('input[type="text"]')).toHaveValue(bigValue); // full value, not the truncated display text
+  await expect(rule.locator('input[type="text"]')).toHaveValue(bigValue);
   await expect(page.locator("#status-bar")).toHaveText("Showing 1 of 1 rows");
 });
 
 test("the detail view's 'Show all' button warns in its title above 1 MB", async ({ page }) => {
   const hugeValue = "z".repeat(1024 * 1024 + 1);
-  const smallValue = "s".repeat(50_000); // truncated (> 10,000) but well under the 1 MB warn threshold
+  const smallValue = "s".repeat(50_000);
   const text = toCsvText(["id", "huge", "small"], [["1", hugeValue, smallValue]]);
   await bootAndLoadText(page, {
     fileKey: "file:///hugecell.csv",
     text,
     state: defaultViewState(),
-    defaultTableColumns: 1, // "huge"/"small" detail-only
+    defaultTableColumns: 1,
   });
 
   await page.locator("tr.data-row").first().click();

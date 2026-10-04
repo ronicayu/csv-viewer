@@ -21,8 +21,6 @@ describe("numeric vs string comparison", () => {
   it("compares each pair on its own merits: numeric vs numeric compares as numbers, either side non-numeric falls back to string comparison", () => {
     const rows = [["10"], ["abc"], ["2"]];
     const sorted = sortRows(rows, ["v"], [{ column: "v", direction: "asc" }]);
-    // "2" vs "10" are both numeric (2 < 10). Either paired with "abc" falls
-    // back to localeCompare, where "10" and "2" both precede "abc".
     expect(sorted.map((r) => r[0])).toEqual(["2", "10", "abc"]);
   });
 });
@@ -140,14 +138,6 @@ describe("collator ties", () => {
   });
 });
 
-// buildColumnSortKeys/sortRowIdsByCachedKeys are the primitives the worker
-// caches per column to avoid re-deriving a column's sort keys (including
-// the collator-ranking pass) on every query — see worker.ts. sortRows
-// itself is now implemented in terms of them, so any accidental behavior
-// drift between the two would show up as a sortRows regression too; these
-// tests additionally cover the specific reuse the cache depends on:
-// keys built once over the FULL dataset must still order any filtered
-// SUBSET (by id) identically to sorting that subset directly.
 describe("buildColumnSortKeys / sortRowIdsByCachedKeys (worker sort-key cache primitives)", () => {
   it("sorting the full dataset via the cached-key path matches sortRows exactly", () => {
     const rows = [["a", "30"], ["b", "10"], ["c", "20"], ["d", "10"]];
@@ -194,14 +184,11 @@ describe("buildColumnSortKeys / sortRowIdsByCachedKeys (worker sort-key cache pr
 
   it("keys built once over the FULL dataset still order a filtered SUBSET identically to sorting that subset directly — the exact reuse the worker's sort-key cache relies on", () => {
     const rows = [["banana"], ["Apple"], ["cherry"], ["apple"], ["Banana"], ["date"]];
-    // Keep only these ids (in original relative order) — mimics what
-    // applyFilters would hand back for some filter.
     const keptIds = [0, 2, 3, 5];
     const subsetRows = keptIds.map((id) => rows[id]);
     const direction: SortDirection = "asc";
     const expected = sortRows(subsetRows, ["v"], [{ column: "v", direction }]);
 
-    // Cache built over the FULL dataset once, then reused for the subset by id.
     const globalKeys = buildColumnSortKeys(rows, 0);
     const order = sortRowIdsByCachedKeys(keptIds, [{ direction, keys: globalKeys }]);
     expect(order.map((id) => rows[id])).toEqual(expected);
@@ -219,7 +206,7 @@ describe("buildColumnSortKeys / sortRowIdsByCachedKeys (worker sort-key cache pr
           fc.tuple(
             fc.constantFrom("a", "A", "b", "B", "1", "2", "10", "1e1", "", "  ", "xyz"),
             fc.constantFrom("1", "2", "3", "10", "abc", ""),
-            fc.boolean(), // whether this row survives into the "filtered" subset
+            fc.boolean(),
           ),
           { minLength: 1, maxLength: 15 },
         ),
@@ -233,7 +220,7 @@ describe("buildColumnSortKeys / sortRowIdsByCachedKeys (worker sort-key cache pr
           ];
 
           let keptIds = rows.map((_, i) => i).filter((i) => rowTuples[i][2]);
-          if (keptIds.length === 0) keptIds = [0]; // keep the subset non-empty
+          if (keptIds.length === 0) keptIds = [0];
           const subsetRows = keptIds.map((id) => rows[id]);
 
           const expected = sortRows(subsetRows, headers, keys);
@@ -255,16 +242,14 @@ describe("buildColumnSortKeys / sortRowIdsByCachedKeys (worker sort-key cache pr
 });
 
 describe("mostly-unique text columns (index-sort ranking path)", () => {
-  // Above 20,000 distinct text values buildColumnSortKeys ranks by sorting
-  // row indexes instead of hashing strings. It must order exactly like a
-  // plain stable sort with the per-pair comparator.
+  // More than 20,000 distinct values, so ranking takes the index-sort path instead of hashing.
   const rows: string[][] = [];
   for (let i = 0; i < 30_000; i++) {
-    const n = (i * 7919) % 26_000; // > 20k distinct, with repeats
+    const n = (i * 7919) % 26_000;
     let value: string;
     if (i % 97 === 0) value = "";
-    else if (i % 53 === 0) value = String(n); // numeric cells mixed in
-    else value = i % 2 === 0 ? `Name ${n}` : `name ${n}`; // collator-equal case variants
+    else if (i % 53 === 0) value = String(n);
+    else value = i % 2 === 0 ? `Name ${n}` : `name ${n}`;
     rows.push([value, String(i)]);
   }
   rows.push(["Zeta tie", "30000"], ["zeta TIE", "30001"]);

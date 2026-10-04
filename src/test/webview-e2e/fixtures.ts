@@ -1,6 +1,3 @@
-// Small, hand-built fixtures shared across webview e2e specs, plus a
-// generator for the large fixture used to exercise chunked rendering.
-
 export const smallFixture = {
   headers: ["id", "name", "age", "city"],
   rows: [

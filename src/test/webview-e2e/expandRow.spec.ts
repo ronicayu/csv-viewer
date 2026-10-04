@@ -3,8 +3,6 @@ import { bootAndLoad, defaultViewState } from "./harness";
 import { smallFixture } from "./fixtures";
 
 test.beforeEach(async ({ page }) => {
-  // Only the first 2 columns (id, name) are in the table; age and city are
-  // detail-only from the start.
   await bootAndLoad(page, {
     fileKey: "file:///people.csv",
     headers: smallFixture.headers,
@@ -24,8 +22,6 @@ test("clicking a row expands it and shows the detail-only fields", async ({ page
   await expect(firstDetail.locator("dt", { hasText: "age" })).toBeVisible();
   await expect(firstDetail.locator("dd", { hasText: "30" })).toBeVisible();
   await expect(firstDetail.locator("dt", { hasText: "city" })).toBeVisible();
-  // "id" and "name" are already visible in the table, so they should not
-  // be duplicated into the detail panel.
   await expect(firstDetail.locator("dt", { hasText: "id" })).toHaveCount(0);
 
   await firstRow.click();

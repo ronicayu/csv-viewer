@@ -1,11 +1,3 @@
-// Webview e2e suite: the shipped webview bundle (out/webview/main.js) driven by
-// a real pointer in real Chromium, asserting the messages it posts to the
-// extension host and the DOM it renders.
-//
-// Deliberately small: one browser, no dev server. `npm run test:webview`
-// compiles first, because these specs load out/webview/main.js, not the
-// TypeScript source.
-
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
