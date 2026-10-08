@@ -1,7 +1,7 @@
 // Markdown rendering of cell values in row details: auto-detection per column,
 // the column-wide Raw / Markdown switch (persisted as ViewState.markdownColumns),
 // the clamp and 10,000-character cap on rendered output, and the safety rules
-// (raw HTML is text, no images, only http/https/mailto links).
+// (HTML is sanitized, no images, only http/https/mailto links).
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { awaitPosted, bootAndLoadText, bootShell, clearPosted, defaultViewState, posted, pushLoadText } from "./harness";
@@ -332,6 +332,10 @@ test.describe("safety", () => {
   const EVIL = [
     "<script>window.__xssFired = 1</script>",
     '<img src=x onerror="window.__xssFired = 2">',
+    '<a href="javascript:window.__xssFired = 5" onclick="window.__xssFired = 6">evil link</a>',
+    '<b onmouseover="window.__xssFired = 7">kept bold</b> <svg onload="window.__xssFired = 8"></svg>',
+    '<img src="https://example.com/tag.png" alt="tag pic" onerror="window.__xssFired = 9">',
+    '<style>.detail-value-md { display: none }</style><iframe src="https://example.com/frame"></iframe>',
     "[bad](javascript:window.__xssFired=3)",
     "[rel](relative/path) and [anchor](#top)",
     "![pic](https://example.com/pic.png)",
@@ -339,7 +343,7 @@ test.describe("safety", () => {
     "[ok](https://example.com/ok) <https://example.com/auto>",
   ].join("\n\n");
 
-  test("no script runs, no <img> exists, no javascript: href, nothing is fetched, HTML shows as text", async ({ page }) => {
+  test("no script runs, no <img> exists, no javascript: href, nothing is fetched, HTML is sanitized", async ({ page }) => {
     const requests: string[] = [];
     page.on("request", (r) => requests.push(r.url()));
     await load(page, ["id", "body"], [["1", EVIL]], { state: { markdownColumns: { body: true } } });
@@ -353,8 +357,13 @@ test.describe("safety", () => {
     await expect(page.locator('a[href^="javascript" i]')).toHaveCount(0);
     await expect(md.locator("a:not([href^='http'])")).toHaveCount(0);
 
-    await expect(md).toContainText("<script>window.__xssFired = 1</script>");
-    await expect(md).toContainText('<img src=x onerror="window.__xssFired = 2">');
+    // The HTML payloads vanish entirely (the Markdown-link ones below stay as text).
+    for (const n of [1, 2, 5, 6, 7, 8, 9]) await expect(md).not.toContainText(`__xssFired = ${n}`);
+    await expect(md.locator("style, iframe, svg")).toHaveCount(0);
+    await expect(md.locator("[onclick], [onmouseover], [onerror], [onload]")).toHaveCount(0);
+    await expect(md).toContainText("evil link");
+    await expect(md.locator("b")).toHaveText("kept bold");
+    await expect(md.locator('a[href="https://example.com/tag.png"]')).toHaveText("tag pic");
     await expect(md).toContainText("bad");
     await expect(md).toContainText("rel and anchor");
     // The image became a link labelled with its alt text.

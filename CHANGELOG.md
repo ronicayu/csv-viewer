@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+- HTML inside Markdown is rendered in row details: formatting and structure elements
+  (`<b>`, `<u>`, `<sup>`, `<p>`, lists, tables, `<details>`, …) with a few harmless
+  attributes. Scripts, styles, embeds, forms, comments and event handlers are removed;
+  an HTML link or image follows the Markdown rules (only `http`, `https` and `mailto`
+  links, images become links). A value with such an element, or a `<br>`, now counts as
+  Markdown for auto-detection and for the **Markdown** link.
+
 ## 0.7.2
 
 **Changed**

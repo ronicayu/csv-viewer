@@ -49,9 +49,10 @@ details:
   tables, or a mix of lists, bold, quotes and inline code in at least 1 in 10 sampled
   values). Click **Raw** to see the source; click **Markdown** on any long, multi-line
   or Markdown-looking value in another column to render it. The choice applies to the
-  whole column and is remembered per file. Raw HTML in a cell is shown as text, images
-  are never loaded (they appear as a link), and only `http`, `https` and `mailto` links
-  are clickable. Table cells always show the raw text.
+  whole column and is remembered per file. HTML in a cell is rendered too (formatting
+  and structure elements only; scripts, styles, embeds and event handlers are removed),
+  images are never loaded (they appear as a link), and only `http`, `https` and `mailto`
+  links are clickable. Table cells always show the raw text.
 - Long values show six lines with **More** / **Less**; very large values (over 10,000
   characters) add **Show all**.
 - Each field has a copy button, and empty fields show a dash.

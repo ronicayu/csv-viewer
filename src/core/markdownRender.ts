@@ -7,7 +7,11 @@
 // The string returned by renderMarkdown is the one and only thing in the
 // webview that may be assigned to innerHTML from cell content, so the
 // guarantees live here:
-//   - raw HTML in a cell is escaped and shown as text (`html: false`);
+//   - HTML in a cell is rendered (`html: true`) but only after the allowlist
+//     sanitizer in htmlSanitize.ts has rewritten it: formatting and
+//     structure elements with a few harmless attributes survive, everything
+//     else (scripts, styles, event handlers, embeds, forms, comments) does
+//     not, and the HTML's own links and images follow the two rules below;
 //   - only http:, https: and mailto: hrefs become <a>; any other link
 //     (relative, #anchor, javascript:, data:, file:, ...) is its plain text;
 //   - images are never loaded: `![alt](src)` becomes a link to src (same
@@ -15,10 +19,17 @@
 
 import MarkdownIt from "markdown-it";
 import type { StateCore, Token } from "markdown-it";
+import { SAFE_HREF, createHtmlSanitizer, type HtmlSanitizer } from "./htmlSanitize";
 
-const SAFE_HREF = /^(?:https?|mailto):/i;
+const md = new MarkdownIt({ html: true, linkify: false, typographer: false, breaks: true });
 
-const md = new MarkdownIt({ html: false, linkify: false, typographer: false, breaks: true });
+// Set for the duration of each renderMarkdown call (rendering is synchronous).
+let sanitizer: HtmlSanitizer = createHtmlSanitizer();
+
+// Raw HTML never reaches the output as written: both token kinds markdown-it
+// produces for it go through the sanitizer.
+md.renderer.rules.html_block = (tokens, idx) => sanitizer.sanitize(tokens[idx].content);
+md.renderer.rules.html_inline = (tokens, idx) => sanitizer.sanitize(tokens[idx].content);
 
 function attr(token: Token, name: string): string {
   return String(token.attrGet(name) ?? "");
@@ -86,5 +97,10 @@ md.renderer.rules.table_open = () => '<div class="md-table-wrap"><table>\n';
 md.renderer.rules.table_close = () => "</table></div>\n";
 
 export function renderMarkdown(source: string): string {
-  return md.render(source);
+  sanitizer = createHtmlSanitizer();
+  try {
+    return md.render(source);
+  } finally {
+    sanitizer = createHtmlSanitizer();
+  }
 }

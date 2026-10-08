@@ -21,6 +21,11 @@ const HEADING = /^#{1,6} \S/m;
 const FENCE = /^ {0,3}(?:```|~~~)/m;
 const LINK = /\[[^\]\n]+\]\((?:https?:\/\/|mailto:)[^)\s]+\)/i;
 const TABLE_DELIMITER_ROW = /^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$/m;
+// HTML inside Markdown is rendered too (markdownRender.ts): a formatting or
+// structure element with its matching closing tag, or a <br>, is a strong
+// signal. Prose with a stray `<` or an unclosed `<b>` stays plain.
+const HTML_ELEMENT = /<(b|i|u|s|em|strong|p|div|span|a|code|pre|ul|ol|li|h[1-6]|table|tr|td|th|blockquote|sub|sup|mark|del|ins|small|kbd)\b[^<>]*>[\s\S]*?<\/\1\s*>/i;
+const HTML_BR = /<br\s*\/?>/i;
 
 // Weak signals (kinds).
 const BOLD = /\*\*\S(?:[^*\n]*\S)?\*\*|__\S(?:[^_\n]*\S)?__/;
@@ -39,6 +44,7 @@ export function looksLikeMarkdown(value: string): boolean {
   if (looksLikeJsonObjectOrArray(value)) return false;
 
   if (HEADING.test(text) || FENCE.test(text) || LINK.test(text) || TABLE_DELIMITER_ROW.test(text)) return true;
+  if (HTML_ELEMENT.test(text) || HTML_BR.test(text)) return true;
 
   let weak = 0;
   if (BOLD.test(text)) weak++;

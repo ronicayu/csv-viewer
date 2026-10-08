@@ -26,6 +26,26 @@ describe("looksLikeMarkdown: strong signals (any one suffices)", () => {
   });
 });
 
+describe("looksLikeMarkdown: HTML is a strong signal", () => {
+  it("a formatting or structure element with its closing tag, or a <br>", () => {
+    expect(looksLikeMarkdown("some <b>bold</b> text")).toBe(true);
+    expect(looksLikeMarkdown("<p>para</p>")).toBe(true);
+    expect(looksLikeMarkdown('<a href="https://a.io">x</a>')).toBe(true);
+    expect(looksLikeMarkdown("<ul>\n<li>a</li>\n</ul>")).toBe(true);
+    expect(looksLikeMarkdown("line<br>line")).toBe(true);
+    expect(looksLikeMarkdown("line<br/>line")).toBe(true);
+    expect(looksLikeMarkdown("<H2>Title</H2>")).toBe(true);
+  });
+
+  it("an unclosed tag, a comparison, or an element outside the list is not", () => {
+    expect(looksLikeMarkdown("a <b and c> d")).toBe(false);
+    expect(looksLikeMarkdown("<b>unclosed")).toBe(false);
+    expect(looksLikeMarkdown("<script>alert(1)</script>")).toBe(false);
+    expect(looksLikeMarkdown("<foo>bar</foo>")).toBe(false);
+    expect(looksLikeMarkdown("1 < 2 and 3 > 2")).toBe(false);
+  });
+});
+
 describe("looksLikeMarkdown: weak signals (two different kinds needed)", () => {
   const bold = "this is **bold** text";
   const bullets = "- one\n- two";
