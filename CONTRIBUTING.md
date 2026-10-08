@@ -59,14 +59,32 @@ Or from the command line: `code --install-extension csv-row-details-<version>.vs
 the file. Or from the command line: `cursor --install-extension csv-row-details-<version>.vsix`
 (or `windsurf --install-extension ...`).
 
-## Publishing
+## Releasing
 
-Package once and publish the same file to both registries:
+A `v*` tag does everything: `.github/workflows/release.yml` builds the `.vsix`,
+attaches it to a GitHub Release, and publishes to the Marketplace and Open VSX using
+the `VSCE_PAT` / `OVSX_PAT` repository secrets. There is no local publish login.
+
+1. Add a `## <version>` section to `CHANGELOG.md`.
+2. `npm version <version> --no-git-tag-version` (updates `package.json` and the lockfile).
+3. Commit and push `main`.
+4. `git tag v<version> && git push origin v<version>`.
+5. Check the run under Actions → Release. Each publish job has a "Publish to …" step
+   and a "Skip (no … secret configured)" step — a green job only means one of the two
+   ran, so confirm it was the publish step.
+6. The public listings lag the run by ~5–15 minutes (Marketplace verification, Open
+   VSX CDN). Check with:
+
+   ```sh
+   curl -s https://open-vsx.org/api/ronica/csv-row-details | jq '{version, displayName}'
+   ```
+
+Manual fallback, if the workflow is unavailable:
 
 ```sh
 npm run compile
 npx vsce package --no-dependencies
-npx vsce publish --no-dependencies --packagePath csv-row-details-<version>.vsix
+npx vsce publish --no-dependencies --packagePath csv-row-details-<version>.vsix -p $VSCE_PAT
 npx ovsx publish csv-row-details-<version>.vsix -p $OVSX_PAT
 ```
 
@@ -76,6 +94,3 @@ runtime. Verify the package contents with `npx vsce ls --no-dependencies` before
 publishing; it should list exactly the runtime files (`package.json`, `README.md`,
 `CHANGELOG.md`, `LICENSE`, `media/icon.png`, and `out/extension.js` plus
 `out/webview/*`), nothing from `src/`, `docs/`, `scripts/`, or any tsconfig.
-
-The release workflow (`.github/workflows/release.yml`) does this automatically on a
-`v*` tag, when the `VSCE_PAT` / `OVSX_PAT` repository secrets are set.
