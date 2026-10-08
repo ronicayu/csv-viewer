@@ -136,7 +136,7 @@ suite("package.json manifest sanity", () => {
 
   test("listing fields: displayName, description, pricing, qna, galleryBanner, icon, keywords, categories", () => {
     const manifest = readManifest();
-    assert.strictEqual(manifest.displayName, "CSV Viewer: Table + Row Details");
+    assert.strictEqual(manifest.displayName, "Wide CSV");
     assert.ok(manifest.description.length <= 160, `description should fit search results (~160 chars), got ${manifest.description.length}`);
     assert.strictEqual(manifest.pricing, "Free");
     assert.strictEqual(manifest.qna, false);

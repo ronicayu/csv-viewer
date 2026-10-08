@@ -1,4 +1,4 @@
-# CSV Viewer: Table + Row Details
+# Wide CSV
 
 Read wide CSV and TSV files in VS Code, Cursor, and Windsurf without scrolling sideways.
 The columns you scan stay in the table; expand any row to read everything else — long

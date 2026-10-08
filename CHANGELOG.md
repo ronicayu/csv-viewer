@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3
+
+**Changed**
+- Renamed to "Wide CSV". The marketplaces are crowded with "… CSV Viewer" and
+  "CSV Table …" names; this one names the problem instead. Extension id unchanged.
+
 ## 0.7.2
 
 **Changed**
