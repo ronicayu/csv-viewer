@@ -1,6 +1,6 @@
 # Wide CSV
 
-Read wide CSV and TSV files in VS Code, Cursor, and Windsurf without scrolling sideways.
+Read and edit wide CSV and TSV files in VS Code, Cursor, and Windsurf without scrolling sideways.
 The columns you scan stay in the table; expand any row to read everything else — long
 notes, descriptions, JSON — in full.
 
@@ -13,9 +13,11 @@ notes, descriptions, JSON — in full.
 
 The first time you open one of these files as text, CSV Viewer asks once whether to
 view it as a table. Choose **Always for CSV Files** to make the viewer the default (you
-can also do this yourself through **Open With… → Configure default editor**). The
-viewer is read-only; **Open as Text** in its toolbar or the editor title bar takes you
-back to the text editor to make edits.
+can also do this yourself through **Open With… → Configure default editor**).
+Double-click a cell (or press **F2** on a row) to edit it, and **Ctrl/Cmd+S** saves.
+**Open as Text** in the toolbar or the editor title bar takes you to the text editor
+for anything beyond cell values; it asks you to save or revert first if you have
+unsaved edits.
 
 ## What it does
 
@@ -30,8 +32,10 @@ back to the text editor to make edits.
 - **Sort** by clicking a header; Shift+click adds a second key.
 - **Handles messy exports.** Detects comma, semicolon, tab or pipe; warns and offers a
   one-click fix when quotes are malformed; reloads when the file changes on disk.
-- **Read-only and private.** Never modifies your file, no telemetry, no network, works
-  in untrusted and virtual workspaces.
+- **Private, and careful with your file.** Edits change only the cells you touch;
+  everything else is written back byte for byte (quoting, line endings, blank lines,
+  the final newline). No telemetry, no network, works in untrusted and virtual
+  workspaces.
 
 ## Reading wide files
 
@@ -93,14 +97,43 @@ The gear button opens **File format**:
 - **Quoted fields**: on by default. If a stray `"` makes rows run together, a banner
   offers **Read Quotes as Plain Text**, which turns this off.
 
-These choices are remembered per file. `.tsv` and `.tab` files default to Tab.
+These choices are remembered per file. `.tsv` and `.tab` files default to Tab. They
+are locked while there are unsaved edits; save or revert first. The first edit to a
+file set to **Auto** fixes the separator that was detected, so the file reopens the
+way you edited it.
+
+## Editing
+
+Double-click a cell, press **F2** on a focused row (then **Tab** / **Shift+Tab** to
+move across the row), or right-click and choose **Edit Value**. **Enter** commits,
+**Esc** cancels, and clicking elsewhere commits. Multi-line values, JSON, Markdown and
+anything over 500 characters edit in the row details instead, in a text box where
+**Enter** adds a line and **Ctrl/Cmd+Enter** applies; every field in the details also
+has an edit button.
+
+Edited cells get a blue mark until you save, and **Revert Cell** in the right-click menu
+puts the original back. **Ctrl/Cmd+S** saves, and **Ctrl/Cmd+Z** / **Ctrl/Cmd+Shift+Z**
+undo and redo, as in any editor. The tab shows the usual unsaved dot, **Revert File**
+discards your edits, **Save As** works, and unsaved edits survive a restart (hot exit).
+If the file changes on disk while you have unsaved edits, the viewer keeps your edits
+and asks before overwriting.
+
+A save rewrites only the rows you edited, and quotes only the fields that need it, so
+version control sees a minimal diff.
+
+What can't be edited: header names, adding or removing rows or columns, files that
+aren't valid UTF-8 (they open read-only), and values over 1 MB. Use **Open as Text**
+for those. Turn editing off entirely with `csvViewer.editing`.
 
 ## Keyboard
 
 - **Tab** moves through the toolbar, the column headers and into the table.
 - In the table: **↑ / ↓** move between rows, **→ / ←** (or **Enter**) expand and
   collapse, **Home / End** jump to the first and last row, **Shift+F10** opens the row
-  menu.
+  menu, **F2** edits the row's first cell.
+- While editing a cell: **Enter** commits, **Esc** cancels, **Tab** / **Shift+Tab** move
+  to the next or previous cell. In the row details, **Ctrl/Cmd+Enter** applies.
+- **Ctrl/Cmd+Z** and **Ctrl/Cmd+Shift+Z** undo and redo edits.
 - **Cmd/Ctrl+F** focuses the search box. **Alt+← / Alt+→** change page. **Esc** closes
   popovers and menus.
 
@@ -108,9 +141,11 @@ Column headers, sort state, expanded rows and row counts are exposed to screen r
 
 ## Limits
 
-- Read-only: the viewer never modifies the file.
-- It shows what is saved on disk. An unsaved edit in a text editor appears after you
-  save.
+- Only the values of existing cells can be edited: no adding, removing or moving rows
+  or columns, no renaming headers, and no files that aren't valid UTF-8.
+- It shows what is saved on disk plus its own unsaved edits. An unsaved edit in a text
+  editor appears after you save, and the viewer's unsaved edits are not visible to a
+  text editor until you save.
 - Files over 50 MB show a "may be slow" warning; files over 512 MB are not opened.
 - Numbers written with a decimal comma (`12,50`) or a thousands separator (`1,000`)
   are treated as text when sorting and filtering.
@@ -118,13 +153,14 @@ Column headers, sort state, expanded rows and row counts are exposed to screen r
 ## Privacy
 
 No telemetry and no network requests. Files are read through the editor's own file
-API; nothing is written and no processes are started.
+API; nothing is written unless you save and no processes are started.
 
 ## Settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `csvViewer.defaultTableColumns` | `8` | The most columns shown in the table when a file is first opened. Long-text and JSON columns start in the row details regardless. |
+| `csvViewer.editing` | `true` | Allow changing cell values in the table and row details. Nothing is written until you save. |
 | `csvViewer.suggestOnOpen` | `true` | Ask once whether to view a CSV/TSV/TAB file as a table when it is first opened as text. |
 
 ## Works well with
@@ -132,7 +168,7 @@ API; nothing is written and no processes are started.
 - [Rainbow CSV](https://marketplace.visualstudio.com/items?itemName=mechatroner.rainbow-csv) colors the columns of a CSV in the text editor.
 - [Edit CSV](https://marketplace.visualstudio.com/items?itemName=janisdd.vscode-edit-csv) opens an editable grid.
 
-CSV Viewer is for reading; use it alongside either of those for editing.
+Wide CSV edits cell values; Edit CSV is the tool for adding rows and columns.
 
 ## Feedback
 

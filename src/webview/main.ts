@@ -14,21 +14,29 @@ import {
   setVisibility,
   visibleColumns,
 } from "../core/columns";
+import { applyTextPatches } from "../core/csvEdit";
 import { formatJsonText, tryParseJsonValue } from "../core/json";
 import { MARKDOWN_MAX_CHARS, looksLikeMarkdown } from "../core/markdownDetect";
 import { renderMarkdown } from "../core/markdownRender";
 import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSlice } from "../core/paging";
-import { DETAIL_WARN_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
+import { DETAIL_WARN_CHARS, TABLE_CELL_MAX_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
 import type {
+  ApplyEditsMessage,
   ColumnVisibilityMap,
+  FileChangedOnDiskMessage,
+  FileDeletedMessage,
   FilterMode,
   FilterOperator,
   FilterRule,
+  FlushEditsMessage,
   HostToWebviewMessage,
+  LoadMessage,
+  PendingRecordEdit,
+  ReadOnlyReason,
+  SavedMessage,
+  SetEditableMessage,
   ViewState,
   WebviewToHostMessage,
-  LoadMessage,
-  FileDeletedMessage,
 } from "../core/types";
 import { REGEX_TIMEOUT_MS, WORKING_INDICATOR_DELAY_MS } from "./workerProtocol";
 import type { ParseOptionsMsg, WorkerRequest, WorkerResponse, WorkerRow } from "./workerProtocol";
@@ -79,6 +87,16 @@ interface AppState {
   testHooksEnabled: boolean;
   hintsSeen: Set<string>;
   fileDeletedName: string | null;
+  baseVersion: number;
+  readOnlyReason: ReadOnlyReason | undefined;
+  spansOk: boolean;
+  quoting: boolean;
+  // Edited-but-unsaved cells, keyed by row id then column index, so marks survive paging, sorting and filtering.
+  editedCells: Map<number, Map<number, { original: string; current: string }>>;
+  pendingEdits: PendingRecordEdit[];
+  // The host's floors for records whose floor is below their field count; a worker respawn or re-parse hands them back to the worker.
+  recordFloors: Map<number, number>;
+  readOnlyBannerShown: boolean;
 }
 
 let state: AppState | null = null;
@@ -100,6 +118,11 @@ app.innerHTML = `
     <span class="codicon codicon-warning" aria-hidden="true"></span>
     <span id="file-deleted-text" class="banner-text"></span>
   </div>
+  <div id="file-changed-banner" class="banner banner-warning" role="alert" hidden>
+    <span class="codicon codicon-warning" aria-hidden="true"></span>
+    <span id="file-changed-text" class="banner-text"></span>
+    <button id="file-changed-revert-btn" type="button">Discard Edits and Reload</button>
+  </div>
   <div id="quote-warning-banner" class="banner banner-warning" role="alert" hidden>
     <span class="codicon codicon-warning" aria-hidden="true"></span>
     <span id="quote-warning-text" class="banner-text"></span>
@@ -111,12 +134,24 @@ app.innerHTML = `
     <span id="hint-rowdetails-text" class="banner-text"></span>
     <button id="hint-rowdetails-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
   </div>
+  <div id="readonly-banner" class="banner banner-info" hidden>
+    <span class="codicon codicon-info" aria-hidden="true"></span>
+    <span id="readonly-text" class="banner-text"></span>
+    <button id="readonly-open-as-text-btn" type="button">Open as Text</button>
+    <button id="readonly-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
+  </div>
+  <div id="edit-error-banner" class="banner banner-warning" role="alert" hidden>
+    <span class="codicon codicon-warning" aria-hidden="true"></span>
+    <span id="edit-error-text" class="banner-text"></span>
+    <button id="edit-error-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
+  </div>
   <div id="filtered-row" class="filtered-row" hidden>
     <span id="filtered-row-text"></span>
     <button id="filtered-clear-search-btn" type="button" hidden>Clear Search</button>
     <button id="filtered-turn-off-filters-btn" type="button" hidden>Turn Off Filters</button>
   </div>
   <div id="status-bar" class="visually-hidden" role="status"></div>
+  <div id="edit-status" class="visually-hidden" role="status"></div>
   <div id="columns-popover" class="popover" role="dialog" aria-label="Columns" hidden>
     <p class="popover-legend">Unchecked columns appear in row details.</p>
     <input id="columns-search" type="search" placeholder="Filter columns…" aria-label="Filter columns" />
@@ -154,6 +189,7 @@ app.innerHTML = `
       Quoted fields
     </label>
     <p class="quotes-explain">Treat "…" as quoting. Turn off if quotes in your data are literal text.</p>
+    <p id="format-locked-note" class="format-locked-note" hidden>Save or revert your edits to change the file format.</p>
   </div>
   <div id="values-popover" class="popover values-popover" role="dialog" aria-label="Filter by values" hidden>
     <p id="values-title" class="vp-title"></p>
@@ -212,6 +248,18 @@ const quoteWarningFixBtn = document.getElementById("quote-warning-fix-btn") as H
 const quoteWarningDismissBtn = document.getElementById("quote-warning-dismiss-btn") as HTMLButtonElement;
 const fileDeletedBanner = document.getElementById("file-deleted-banner") as HTMLDivElement;
 const fileDeletedText = document.getElementById("file-deleted-text") as HTMLSpanElement;
+const fileChangedBanner = document.getElementById("file-changed-banner") as HTMLDivElement;
+const fileChangedText = document.getElementById("file-changed-text") as HTMLSpanElement;
+const fileChangedRevertBtn = document.getElementById("file-changed-revert-btn") as HTMLButtonElement;
+const readOnlyBanner = document.getElementById("readonly-banner") as HTMLDivElement;
+const readOnlyText = document.getElementById("readonly-text") as HTMLSpanElement;
+const readOnlyOpenAsTextBtn = document.getElementById("readonly-open-as-text-btn") as HTMLButtonElement;
+const readOnlyDismissBtn = document.getElementById("readonly-dismiss-btn") as HTMLButtonElement;
+const editErrorBanner = document.getElementById("edit-error-banner") as HTMLDivElement;
+const editErrorText = document.getElementById("edit-error-text") as HTMLSpanElement;
+const editErrorDismissBtn = document.getElementById("edit-error-dismiss-btn") as HTMLButtonElement;
+const editStatus = document.getElementById("edit-status") as HTMLDivElement;
+const formatLockedNote = document.getElementById("format-locked-note") as HTMLParagraphElement;
 const hintBanner = document.getElementById("hint-rowdetails-banner") as HTMLDivElement;
 const hintText = document.getElementById("hint-rowdetails-text") as HTMLSpanElement;
 const hintDismissBtn = document.getElementById("hint-rowdetails-dismiss-btn") as HTMLButtonElement;
@@ -393,12 +441,42 @@ function endOperation(): void {
   tableEl.removeAttribute("aria-busy");
 }
 
+// A load replaces the document state after awaiting the worker, so whatever the host sent after it describes the new state and waits for it.
+let hostQueue: Promise<void> | null = null;
+
+// A task that fails is logged and the ones behind it still run.
+function enqueueHostTask(task: () => void | Promise<void>): void {
+  const run = (hostQueue ?? Promise.resolve()).then(task).catch((err: unknown) => {
+    console.error("csv-viewer: a host message failed:", err);
+  });
+  hostQueue = run;
+  void run.then(() => {
+    if (hostQueue === run) hostQueue = null;
+  });
+}
+
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => {
   const message = event.data;
-  if (message.type === "load") void onLoad(message);
-  else if (message.type === "fileDeleted") onFileDeleted(message);
-  else if (message.type === "fileRestored") onFileRestored();
+  if (message.type === "load") enqueueHostTask(() => onLoad(message));
+  else if (hostQueue) enqueueHostTask(() => handleHostMessage(message));
+  else handleHostMessage(message);
 });
+
+function handleHostMessage(message: HostToWebviewMessage): void {
+  if (message.type === "fileDeleted") onFileDeleted(message);
+  else if (message.type === "fileRestored") onFileRestored();
+  else if (message.type === "fileChangedOnDisk") onFileChangedOnDisk(message);
+  else if (message.type === "setEditable") onSetEditable(message);
+  else if (message.type === "applyEdits") void onApplyEdits(message);
+  else if (message.type === "saved") void onSaved(message);
+  else if (message.type === "editRefused") showEditError(`Couldn't edit: ${message.message}.`);
+  else if (message.type === "flushEdits") void onFlushEdits(message);
+  else if (state?.testHooksEnabled) {
+    if (message.type === "testEditCell") submitEdit(message.rowId, message.columnIndex, message.value, currentCellValue(message.rowId, message.columnIndex));
+    else if (message.type === "testOpenEditor") startInlineEdit(message.rowId, message.columnIndex);
+    else if (message.type === "testGetCell") postTestCellValue(message.rowId, message.columnIndex);
+  }
+}
 
 function onFileDeleted(message: FileDeletedMessage): void {
   if (!state) return;
@@ -416,8 +494,19 @@ function renderFileDeletedBanner(): void {
   if (!state) return;
   const name = state.fileDeletedName;
   fileDeletedBanner.hidden = name === null;
-  if (name !== null) fileDeletedText.textContent = `"${name}" was deleted from disk. Showing the last loaded copy.`;
+  if (name === null) return;
+  fileDeletedText.textContent = isDirty()
+    ? `"${name}" was deleted from disk. Your unsaved edits are kept; saving will recreate the file.`
+    : `"${name}" was deleted from disk. Showing the last loaded copy.`;
 }
+
+function onFileChangedOnDisk(message: FileChangedOnDiskMessage): void {
+  if (!state) return;
+  fileChangedText.textContent = `"${message.name}" changed on disk. Your unsaved edits are kept; saving will ask before overwriting.`;
+  fileChangedBanner.hidden = false;
+}
+
+fileChangedRevertBtn.addEventListener("click", () => vscode.postMessage({ type: "revert" }));
 
 vscode.postMessage({ type: "ready" });
 
@@ -449,6 +538,8 @@ async function onLoad(message: LoadMessage): Promise<void> {
   view.quotes = typeof view.quotes === "boolean" ? view.quotes : true;
   view.markdownColumns = normalizeColumnFlags(view.markdownColumns);
 
+  cancelOpenEditor();
+  abandonInflightEdits();
   const isReload = state !== null && state.fileKey === message.fileKey;
   const previousPage = isReload ? state!.page : 1;
 
@@ -478,8 +569,20 @@ async function onLoad(message: LoadMessage): Promise<void> {
     testHooksEnabled: message.testHooks === true,
     hintsSeen: new Set<string>(message.hintsSeen ?? []),
     fileDeletedName: null,
+    baseVersion: message.baseVersion ?? 0,
+    readOnlyReason: message.editable === false ? (message.readOnlyReason ?? "setting") : undefined,
+    spansOk: true,
+    quoting: true,
+    editedCells: new Map(),
+    pendingEdits: message.pendingEdits ?? [],
+    recordFloors: new Map((message.recordFloors ?? []).map((f) => [f.recordIndex, f.floor])),
+    readOnlyBannerShown: false,
   };
   renderFileDeletedBanner();
+  fileChangedBanner.hidden = true;
+  readOnlyBanner.hidden = true;
+  hideEditError();
+  renderFormatLock();
   firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
   quotesCheckbox.checked = state.view.quotes;
   quickSearchInput.value = state.view.quickSearch;
@@ -487,6 +590,12 @@ async function onLoad(message: LoadMessage): Promise<void> {
   pendingPageAfterQuery = previousPage;
   const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
   beginInit(message.text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader, quotes: view.quotes }, true);
+  const initDone = new Promise<void>((resolve) => {
+    initWaiter = resolve;
+  });
+  // Lets the host tell a base it merely sent from one this webview actually reached.
+  vscode.postMessage({ type: "synced", baseVersion: message.baseVersion });
+  await initDone;
 }
 
 function reparseFromText(options: { resetPage: boolean }): void {
@@ -496,10 +605,22 @@ function reparseFromText(options: { resetPage: boolean }): void {
   // Row ids are re-tokenized on re-parse, so expanded and focused ids no longer match the same rows.
   state.expanded = new Set<number>();
   state.focusedRowId = null;
+  // Only a clean document re-tokenizes, and the host forgets its records when the format changes.
+  state.recordFloors.clear();
   beginInit(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, true);
 }
 
+// Resolved when the init the last load started has been answered and its edits restored.
+let initWaiter: (() => void) | null = null;
+
+function settleInitWaiter(): void {
+  const waiter = initWaiter;
+  initWaiter = null;
+  waiter?.();
+}
+
 function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean): void {
+  settleInitWaiter();
   const requestId = nextRequestId++;
   pendingInitRequestId = requestId;
   pendingInitIsFreshParse = isFreshParse;
@@ -507,7 +628,8 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   resetRegexWatchdogState();
   // Timeout recovery re-parses identical text, so only a fresh parse discards the values picker.
   if (isFreshParse) discardValuesPicker();
-  postToWorker({ type: "init", requestId, text, options });
+  const floors = state ? [...state.recordFloors].map(([recordIndex, floor]) => ({ recordIndex, floor })) : [];
+  postToWorker({ type: "init", requestId, text, options, floors });
 }
 
 function renderColumnsButton(): void {
@@ -663,6 +785,18 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
     case "distinctResult":
       onDistinctResult(msg);
       break;
+    case "spansReady":
+      onSpansReady(msg);
+      break;
+    case "editResult":
+      onEditResult(msg);
+      break;
+    case "setCellsDone":
+      resolveWorkerCall(msg.requestId, msg);
+      break;
+    case "rebased":
+      resolveWorkerCall(msg.requestId, msg);
+      break;
     case "workerError":
       // eslint-disable-next-line no-console
       console.error("csv-viewer: worker error:", msg.message);
@@ -678,6 +812,8 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   state.detectedDelimiter = msg.detectedDelimiter;
   state.quoteProblems = msg.quoteProblems;
   state.totalRows = msg.totalRows;
+  state.quoting = msg.quoting;
+  state.spansOk = msg.spansOk !== false;
   if (pendingInitIsFreshParse) state.quoteBannerDismissed = false;
 
   const previousVisibility = state.view.columnVisibility;
@@ -701,10 +837,12 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   if (valuesPicker && valuesPicker.items === null) requestDistinct();
 
   continueAfterInit();
+  settleInitWaiter();
 }
 
 function continueAfterInit(): void {
   if (!state) return;
+  restoreEditsAfterInit();
   runQuery();
 }
 
@@ -942,7 +1080,13 @@ function onRowMouseDown(ev: MouseEvent): void {
   rowMouseDownPos = { x: ev.clientX, y: ev.clientY };
 }
 
+// The first click of a double-click expands or collapses; remembered so the dblclick can undo it before editing.
+let lastClickToggle: { rowId: number; at: number } | null = null;
+const DOUBLE_CLICK_TOGGLE_MS = 500;
+
 function onRowClick(ev: MouseEvent, rowId: number): void {
+  if (ev.target instanceof Element && ev.target.closest(".cell-editor, .field-editor")) return;
+  if (ev.detail >= 2 && effectiveReadOnlyReason() !== "setting") return;
   const selection = window.getSelection();
   if (selection && selection.toString() !== "") return;
   if (rowMouseDownPos) {
@@ -951,10 +1095,13 @@ function onRowClick(ev: MouseEvent, rowId: number): void {
     if (Math.hypot(dx, dy) > 4) return;
   }
   toggleExpanded(rowId);
+  lastClickToggle = { rowId, at: performance.now() };
 }
 
 function renderTableBody(): void {
   if (!state) return;
+  commitOpenEditor();
+  cancelOpenEditor();
 
   // Read before innerHTML is cleared below, which would blur the focused element.
   const hadRowFocus = document.activeElement instanceof HTMLElement && document.activeElement.classList.contains("data-row");
@@ -1077,23 +1224,41 @@ function buildRowTr(row: WorkerRow, columns: string[], rovingRowId: number | nul
   for (const column of columns) {
     const td = document.createElement("td");
     if (state!.numericColumns.has(column)) td.classList.add("numeric-cell");
-    const value = row.cells[indexByHeader.get(column)!] ?? "";
-    // Rendered text is capped: a multi-megabyte cell froze the webview. Quick-add uses the full value.
-    td.textContent = truncateForTable(value).text;
+    const columnIndex = indexByHeader.get(column)!;
+    td.dataset.columnIndex = String(columnIndex);
+    fillCell(td, row, columnIndex);
     td.addEventListener("mouseenter", () => {
-      if (td.title) return;
+      if (td.classList.contains("clipped-cell")) return;
       if (td.scrollWidth > td.clientWidth) {
-        td.title = value.slice(0, 500);
+        const clipped = (row.cells[columnIndex] ?? "").slice(0, 500);
+        const entry = editedEntry(row.id, columnIndex);
+        td.title = entry ? `${editedTitle(entry.original)}\n${clipped}` : clipped;
         td.classList.add("clipped-cell");
       }
     });
-    td.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, column, value, row));
+    td.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, column, row.cells[columnIndex] ?? "", row, "cell"));
+    td.addEventListener("dblclick", (ev) => onCellDoubleClick(ev, row.id, columnIndex));
     tr.appendChild(td);
   }
 
   tr.addEventListener("mousedown", onRowMouseDown);
   tr.addEventListener("click", (ev) => onRowClick(ev, row.id));
   return tr;
+}
+
+// Rendered text is capped: a multi-megabyte cell froze the webview. Quick-add uses the full value.
+function fillCell(td: HTMLTableCellElement, row: WorkerRow, columnIndex: number): void {
+  td.textContent = truncateForTable(row.cells[columnIndex] ?? "").text;
+  td.classList.remove("clipped-cell");
+  const entry = editedEntry(row.id, columnIndex);
+  td.classList.toggle("edited-cell", entry !== undefined);
+  if (entry) {
+    td.setAttribute("aria-description", "Edited, not saved");
+    td.title = editedTitle(entry.original);
+  } else {
+    td.removeAttribute("aria-description");
+    td.removeAttribute("title");
+  }
 }
 
 function determineRovingRowId(): number | null {
@@ -1154,7 +1319,8 @@ function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, co
   const alsoInTable = columns.filter((c) => {
     if (clippedColumns.has(c)) return true;
     const value = row.cells[indexByHeader.get(c)!] ?? "";
-    return value.includes("\n");
+    // Over 500 characters the table always draws it truncated, which also keeps editing's redirect to the details deterministic.
+    return value.includes("\n") || value.length > TABLE_CELL_MAX_CHARS;
   });
 
   // Fill <dd> values only once attached: line-clamp overflow is measured via scrollHeight.
@@ -1194,19 +1360,31 @@ function buildDetailFieldList(
   dl.className = "detail-fields";
 
   for (const field of fields) {
-    const value = row.cells[indexByHeader.get(field)!] ?? "";
+    const columnIndex = indexByHeader.get(field)!;
+    const value = row.cells[columnIndex] ?? "";
 
     const dt = document.createElement("dt");
+    dt.dataset.columnIndex = String(columnIndex);
     const label = document.createElement("span");
     label.className = "detail-field-label";
     label.textContent = field;
     dt.appendChild(label);
     dt.appendChild(buildFieldCopyButton(field, value));
+    const editButton = buildFieldEditButton(row.id, field, columnIndex, value);
+    if (editButton) dt.appendChild(editButton);
 
     const dd = document.createElement("dd");
+    dd.dataset.columnIndex = String(columnIndex);
+    if (editedEntry(row.id, columnIndex)) {
+      dd.classList.add("edited-field");
+      dd.setAttribute("aria-description", "Edited, not saved");
+    }
     pending.push({ dd, column: field, value });
     detailFieldInfo.set(dd, { column: field, value });
-    dd.addEventListener("contextmenu", (ev) => onCellContextMenu(ev, field, value, row));
+    dd.addEventListener("contextmenu", (ev) => {
+      if (ev.target instanceof Element && ev.target.closest(".field-editor")) return;
+      onCellContextMenu(ev, field, value, row, "field");
+    });
 
     dl.appendChild(dt);
     dl.appendChild(dd);
@@ -1441,6 +1619,7 @@ function moveRowFocus(delta: number): void {
 
 function onRowKeyDown(ev: KeyboardEvent): void {
   if (!state) return;
+  if (ev.target instanceof Element && ev.target.closest(".cell-editor, .field-editor")) return;
   const tr = (ev.target as HTMLElement).closest<HTMLTableRowElement>("tr.data-row");
   if (!tr) return;
   const rowId = Number(tr.dataset.rowId);
@@ -1475,6 +1654,14 @@ function onRowKeyDown(ev: KeyboardEvent): void {
       ev.preventDefault();
       toggleExpanded(rowId);
       break;
+    case "F2": {
+      ev.preventDefault();
+      const first = visibleColumns(state.headers, state.view.columnVisibility)[0];
+      if (first === undefined) break;
+      const columnIndex = state.headers.indexOf(first);
+      requestEdit(() => startInlineEdit(rowId, columnIndex));
+      break;
+    }
     case "F10":
       if (ev.shiftKey) {
         ev.preventDefault();
@@ -1600,8 +1787,17 @@ quickSearchInput.addEventListener("input", () => {
   }, SEARCH_DEBOUNCE_MS);
 });
 
+// Controls can still fire from a pending debounce or a link that was already on screen when the lock engaged.
+function refuseWhileLocked(): boolean {
+  if (!state || !formatLocked()) return false;
+  firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
+  quotesCheckbox.checked = state.view.quotes;
+  renderSeparatorControl();
+  return true;
+}
+
 firstRowHeaderCheckbox.addEventListener("change", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   state.view.firstRowIsHeader = firstRowHeaderCheckbox.checked;
   reparseFromText({ resetPage: false });
   saveState();
@@ -1664,7 +1860,7 @@ function showSeparatorQuoteConflictError(pendingValue: string): void {
   turnOffBtn.className = "link-btn";
   turnOffBtn.textContent = "Turn Off";
   turnOffBtn.addEventListener("click", () => {
-    if (!state) return;
+    if (!state || refuseWhileLocked()) return;
     quotesCheckbox.checked = false;
     state.view.quotes = false;
     hideSeparatorCustomError();
@@ -1677,7 +1873,7 @@ function showSeparatorQuoteConflictError(pendingValue: string): void {
 }
 
 function applySeparatorChange(delimiter: string): void {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   separatorCustomEditing = false;
   state.view.delimiter = delimiter;
   reparseFromText({ resetPage: true });
@@ -1685,7 +1881,7 @@ function applySeparatorChange(delimiter: string): void {
 }
 
 separatorSelect.addEventListener("change", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   const value = separatorSelect.value;
   if (value === CUSTOM_SENTINEL) {
     separatorCustomEditing = true;
@@ -1702,7 +1898,7 @@ let separatorDebounceHandle: number | undefined;
 separatorCustomInput.addEventListener("input", () => {
   window.clearTimeout(separatorDebounceHandle);
   separatorDebounceHandle = window.setTimeout(() => {
-    if (!state) return;
+    if (!state || refuseWhileLocked()) return;
     // Deliberately not trimmed: a single space or tab is a valid delimiter.
     const value = separatorCustomInput.value;
     if (value === "") {
@@ -1730,14 +1926,14 @@ function renderQuoteWarningBanner(): void {
 }
 
 quotesCheckbox.addEventListener("change", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   state.view.quotes = quotesCheckbox.checked;
   reparseFromText({ resetPage: true });
   saveState();
 });
 
 quoteWarningFixBtn.addEventListener("click", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   state.view.quotes = false;
   quotesCheckbox.checked = false;
   reparseFromText({ resetPage: true });
@@ -1751,6 +1947,10 @@ quoteWarningDismissBtn.addEventListener("click", () => {
 });
 
 openAsTextBtn.addEventListener("click", () => {
+  vscode.postMessage({ type: "openAsText" });
+});
+
+readOnlyOpenAsTextBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "openAsText" });
 });
 
@@ -2626,6 +2826,735 @@ function applyValuesPicker(): void {
   focusPickerOrigin(p);
 }
 
+const TOO_LARGE_SENTENCE = "Too large to edit here (over 1 MB). Use Open as Text to change it.";
+const QUOTES_OFF_SENTENCE = "With Quoted fields off, a value can't contain the separator or a line break.";
+const READ_ONLY_SENTENCES: Record<Exclude<ReadOnlyReason, "setting">, string> = {
+  encoding: "This file isn't valid UTF-8, so Wide CSV opens it read-only. Use Open as Text to edit it.",
+  filesystem: "This file system is read-only.",
+  spans: "Wide CSV couldn't match this file's rows to its text exactly, so it is opened read-only. Use Open as Text to edit it.",
+};
+const EDIT_STATUS_VALUE_CHARS = 100;
+const EDIT_TITLE_ORIGINAL_CHARS = 200;
+const IS_MAC = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
+
+function effectiveReadOnlyReason(): ReadOnlyReason | undefined {
+  if (!state) return "setting";
+  return state.readOnlyReason ?? (state.spansOk ? undefined : "spans");
+}
+
+function readOnlyTitle(reason: ReadOnlyReason | undefined): string {
+  return reason === undefined || reason === "setting" ? "" : READ_ONLY_SENTENCES[reason];
+}
+
+function requestEdit(start: () => void): void {
+  const reason = effectiveReadOnlyReason();
+  if (reason === "setting") return;
+  if (reason !== undefined) {
+    showReadOnlyBanner(reason);
+    return;
+  }
+  start();
+}
+
+function showReadOnlyBanner(reason: Exclude<ReadOnlyReason, "setting">): void {
+  if (!state || state.readOnlyBannerShown) return;
+  state.readOnlyBannerShown = true;
+  readOnlyText.textContent = READ_ONLY_SENTENCES[reason];
+  readOnlyBanner.hidden = false;
+}
+
+readOnlyDismissBtn.addEventListener("click", () => {
+  readOnlyBanner.hidden = true;
+});
+
+function showEditError(message: string): void {
+  editErrorText.textContent = message;
+  editErrorBanner.hidden = false;
+}
+
+function hideEditError(): void {
+  editErrorBanner.hidden = true;
+}
+
+editErrorDismissBtn.addEventListener("click", hideEditError);
+
+function clip(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value;
+}
+
+function announce(message: string): void {
+  editStatus.textContent = message;
+}
+
+function editedTitle(original: string): string {
+  return `Edited (not saved). Original: ${clip(original, EDIT_TITLE_ORIGINAL_CHARS)}`;
+}
+
+function editedEntry(rowId: number, columnIndex: number): { original: string; current: string } | undefined {
+  return state?.editedCells.get(rowId)?.get(columnIndex);
+}
+
+// An entry whose current value equals its original is removed, so reverting a cell clears its mark.
+function setEditedCell(rowId: number, columnIndex: number, original: string, current: string): void {
+  if (!state) return;
+  let row = state.editedCells.get(rowId);
+  if (current === original) {
+    row?.delete(columnIndex);
+    if (row && row.size === 0) state.editedCells.delete(rowId);
+  } else {
+    if (!row) {
+      row = new Map();
+      state.editedCells.set(rowId, row);
+    }
+    row.set(columnIndex, { original, current });
+  }
+  renderFormatLock();
+  renderFileDeletedBanner();
+}
+
+function isDirty(): boolean {
+  return state !== null && state.editedCells.size > 0;
+}
+
+// Edits are addressed by record and field index under one tokenization, so re-tokenizing underneath them is not defined.
+// An edit still in the worker counts: it is about to be addressed under the current one.
+function formatLocked(): boolean {
+  return isDirty() || inflightEdits.size > 0;
+}
+
+function renderFormatLock(): void {
+  const locked = formatLocked();
+  for (const el of [separatorSelect, separatorCustomInput, firstRowHeaderCheckbox, quotesCheckbox, quoteWarningFixBtn]) {
+    el.disabled = locked;
+    if (locked) el.title = "Save or revert your edits to change the file format.";
+    else el.removeAttribute("title");
+  }
+  for (const turnOff of separatorCustomError.querySelectorAll("button")) turnOff.disabled = locked;
+  formatLockedNote.hidden = !locked;
+}
+
+function pageRow(rowId: number): WorkerRow | undefined {
+  return state?.currentPageRows.find((r) => r.id === rowId);
+}
+
+function currentCellValue(rowId: number, columnIndex: number): string | undefined {
+  return pageRow(rowId)?.cells[columnIndex];
+}
+
+function postTestCellValue(rowId: number, columnIndex: number): void {
+  const value = currentCellValue(rowId, columnIndex);
+  vscode.postMessage({ type: "testCellValue", rowId, columnIndex, value: value ?? null, edited: editedEntry(rowId, columnIndex) !== undefined });
+}
+
+function normalizeNewlines(value: string): string {
+  return value.replace(/\r\n?/g, "\n");
+}
+
+function localRejection(value: string): string | null {
+  if (!state || state.quoting) return null;
+  return value.includes(state.detectedDelimiter) || value.includes("\n") ? QUOTES_OFF_SENTENCE : null;
+}
+
+// The request is kept so it can be sent again if the worker is replaced before it answers.
+const workerCalls = new Map<number, { resolve: (msg: WorkerResponse) => void; request: WorkerRequest }>();
+
+function callWorker<T extends WorkerResponse>(build: (requestId: number) => WorkerRequest): Promise<T> {
+  const requestId = nextRequestId++;
+  const request = build(requestId);
+  return new Promise<T>((resolve) => {
+    workerCalls.set(requestId, { resolve: (msg) => resolve(msg as T), request });
+    postToWorker(request);
+  });
+}
+
+function resolveWorkerCall(requestId: number, msg: WorkerResponse): void {
+  const call = workerCalls.get(requestId);
+  if (!call) return;
+  workerCalls.delete(requestId);
+  call.resolve(msg);
+}
+
+interface InflightEdit {
+  owner: AppState;
+  rowId: number;
+  columnIndex: number;
+  value: string;
+  previous: string | undefined;
+  // The base the edit was made against, which is what the host must be told even if `saved` lands before the answer.
+  base: number;
+}
+
+const inflightEdits = new Map<number, InflightEdit>();
+let settleWaiters: (() => void)[] = [];
+
+function notifySettledIfIdle(): void {
+  if (inflightEdits.size > 0) return;
+  const waiters = settleWaiters;
+  settleWaiters = [];
+  for (const wake of waiters) wake();
+}
+
+function editsSettled(): Promise<void> {
+  if (inflightEdits.size === 0) return Promise.resolve();
+  return new Promise((resolve) => settleWaiters.push(resolve));
+}
+
+// Pending requests of a document that has been replaced can never be answered.
+function abandonInflightEdits(): void {
+  inflightEdits.clear();
+  workerCalls.clear();
+  notifySettledIfIdle();
+  renderFormatLock();
+}
+
+// After a regex-timeout respawn the new worker has only the text and the restored edits, so what was still in flight goes in again, in order.
+function reissuePendingWorkerRequests(): void {
+  const pending: { id: number; request: WorkerRequest }[] = [];
+  for (const [id, call] of workerCalls) pending.push({ id, request: call.request });
+  for (const [id, edit] of inflightEdits) {
+    if (edit.owner === state) pending.push({ id, request: { type: "editCell", requestId: id, rowId: edit.rowId, columnIndex: edit.columnIndex, value: edit.value } });
+  }
+  pending.sort((a, b) => a.id - b.id);
+  for (const { request } of pending) postToWorker(request);
+}
+
+function submitEdit(rowId: number, columnIndex: number, value: string, previous: string | undefined): void {
+  if (!state) return;
+  const row = pageRow(rowId);
+  if (row) row.cells[columnIndex] = value;
+  refreshRow(rowId);
+  const requestId = nextRequestId++;
+  inflightEdits.set(requestId, { owner: state, rowId, columnIndex, value, previous, base: state.baseVersion });
+  renderFormatLock();
+  postToWorker({ type: "editCell", requestId, rowId, columnIndex, value });
+}
+
+function onEditResult(msg: Extract<WorkerResponse, { type: "editResult" }>): void {
+  const pending = inflightEdits.get(msg.requestId);
+  if (!pending) return;
+  inflightEdits.delete(msg.requestId);
+  try {
+    if (!state || pending.owner !== state) return;
+    if (!msg.ok) {
+      const row = pageRow(pending.rowId);
+      if (row && pending.previous !== undefined) row.cells[pending.columnIndex] = pending.previous;
+      refreshRow(pending.rowId);
+      showEditError(`Couldn't edit row ${pending.rowId + 1}: ${msg.reason}.`);
+      return;
+    }
+    const change = msg.change;
+    if (!change) {
+      refreshRow(pending.rowId);
+      return;
+    }
+    const prior = editedEntry(change.rowId, change.columnIndex);
+    setEditedCell(change.rowId, change.columnIndex, prior ? prior.original : change.oldValue, change.newValue);
+    const row = pageRow(change.rowId);
+    if (row) row.cells[change.columnIndex] = change.newValue;
+    lastQueryKey = null;
+    hideEditError();
+    pinDetectedDelimiter();
+    vscode.postMessage({ type: "edit", baseVersion: pending.base, change });
+    announce(`${state.headers[change.columnIndex]}, row ${change.rowId + 1}: changed to "${clip(change.newValue, EDIT_STATUS_VALUE_CHARS)}"`);
+    refreshRow(change.rowId);
+  } finally {
+    renderFormatLock();
+    notifySettledIfIdle();
+  }
+}
+
+// An edit can change what auto-detection would pick, so the file is reopened with the separator it was edited under.
+function pinDetectedDelimiter(): void {
+  if (!state || state.view.delimiter !== "" || resolveDelimiterOption("", state.defaultDelimiter) !== undefined) return;
+  state.view.delimiter = state.detectedDelimiter;
+  renderSeparatorControl();
+  renderFormatButton();
+  saveState();
+}
+
+async function onApplyEdits(msg: ApplyEditsMessage): Promise<void> {
+  const owner = state;
+  if (!owner || msg.baseVersion !== owner.baseVersion) return;
+  const touchesOpenEditor = openEditor !== null && msg.cells.some((c) => c.rowId === openEditor!.rowId && c.columnIndex === openEditor!.columnIndex);
+  if (touchesOpenEditor) cancelOpenEditor();
+
+  await callWorker<Extract<WorkerResponse, { type: "setCellsDone" }>>((requestId) => ({
+    type: "setCells",
+    requestId,
+    cells: msg.cells.map(({ rowId, columnIndex, value }) => ({ rowId, columnIndex, value })),
+  }));
+  if (state !== owner) return;
+
+  const rowIds = new Set<number>();
+  for (const cell of msg.cells) {
+    setEditedCell(cell.rowId, cell.columnIndex, cell.original, cell.value);
+    const row = pageRow(cell.rowId);
+    if (row) row.cells[cell.columnIndex] = cell.value;
+    rowIds.add(cell.rowId);
+  }
+  lastQueryKey = null;
+  for (const rowId of rowIds) refreshRow(rowId);
+  const first = msg.cells[0];
+  if (first) {
+    // Without the host's hint, a value back at its baseline reads as an undo.
+    const redone = msg.kind ? msg.kind === "redo" : first.value !== first.original;
+    const verb = redone ? "Redone" : "Undone";
+    announce(`${verb}: ${state.headers[first.columnIndex]}, row ${first.rowId + 1}`);
+  }
+}
+
+async function onSaved(msg: SavedMessage): Promise<void> {
+  const owner = state;
+  if (!owner) return;
+  if (msg.baseVersion !== owner.baseVersion + 1) {
+    vscode.postMessage({ type: "resync" });
+    return;
+  }
+  // Advance at once: undo, redo and new edits that follow the save are already for the new base.
+  owner.baseVersion = msg.baseVersion;
+  fileChangedBanner.hidden = true;
+  const written = msg.written;
+  for (const record of written ?? []) owner.recordFloors.set(record.recordIndex, record.floor ?? record.fields.length);
+  const rebased = await callWorker<Extract<WorkerResponse, { type: "rebased" }>>((requestId) => ({ type: "rebase", requestId, written }));
+  if (state !== owner) return;
+  owner.text = applyTextPatches(owner.text, rebased.patches);
+
+  // Cells changed since the write are still edits, now against what was written.
+  const headerOffset = owner.view.firstRowIsHeader ? 1 : 0;
+  const touched: number[] = [];
+  if (!written) {
+    touched.push(...owner.editedCells.keys());
+    owner.editedCells.clear();
+  }
+  for (const record of written ?? []) {
+    const rowId = record.recordIndex - headerOffset;
+    const marks = owner.editedCells.get(rowId);
+    if (!marks) continue;
+    touched.push(rowId);
+    for (const [columnIndex, mark] of [...marks]) {
+      const baseline = record.fields[columnIndex] ?? "";
+      if (mark.current === baseline) marks.delete(columnIndex);
+      else mark.original = baseline;
+    }
+    if (marks.size === 0) owner.editedCells.delete(rowId);
+  }
+  renderFormatLock();
+  renderFileDeletedBanner();
+  for (const rowId of touched) refreshRow(rowId);
+  announce("All edits saved");
+  vscode.postMessage({ type: "synced", baseVersion: msg.baseVersion });
+}
+
+async function onFlushEdits(msg: FlushEditsMessage): Promise<void> {
+  commitOpenEditor();
+  await editsSettled();
+  vscode.postMessage({ type: "flushed", baseVersion: msg.baseVersion });
+}
+
+function onSpansReady(msg: Extract<WorkerResponse, { type: "spansReady" }>): void {
+  if (!state || msg.requestId !== pendingInitRequestId || msg.spansOk) return;
+  state.spansOk = false;
+  cancelOpenEditor();
+  renderTableBody();
+}
+
+function onSetEditable(msg: SetEditableMessage): void {
+  if (!state) return;
+  state.readOnlyReason = msg.editable ? undefined : (msg.readOnlyReason ?? "setting");
+  if (state.readOnlyReason === undefined || state.readOnlyReason === "setting") readOnlyBanner.hidden = true;
+  renderTableBody();
+}
+
+function pendingToCells(pending: PendingRecordEdit[]): {
+  cells: { rowId: number; columnIndex: number; value: string; original: string }[];
+  verify: { rowId: number; originalFields: string[] }[];
+  rowIdByRecord: Map<number, number>;
+} {
+  const headerOffset = state!.view.firstRowIsHeader ? 1 : 0;
+  const cells: { rowId: number; columnIndex: number; value: string; original: string }[] = [];
+  const verify: { rowId: number; originalFields: string[] }[] = [];
+  const rowIdByRecord = new Map<number, number>();
+  for (const edit of pending) {
+    const rowId = edit.recordIndex - headerOffset;
+    rowIdByRecord.set(edit.recordIndex, rowId);
+    verify.push({ rowId, originalFields: edit.originalFields });
+    const width = Math.max(edit.fields.length, edit.originalFields.length);
+    for (let columnIndex = 0; columnIndex < width && columnIndex < state!.headers.length; columnIndex++) {
+      const value = edit.fields[columnIndex] ?? "";
+      const original = edit.originalFields[columnIndex] ?? "";
+      if (value !== original) cells.push({ rowId, columnIndex, value, original });
+    }
+  }
+  return { cells, verify, rowIdByRecord };
+}
+
+// Runs right after an init: restores edits the host handed us, or re-applies our own after a worker respawn.
+function restoreEditsAfterInit(): void {
+  if (!state) return;
+  const owner = state;
+
+  if (!pendingInitIsFreshParse) {
+    const cells: { rowId: number; columnIndex: number; value: string }[] = [];
+    for (const [rowId, columns] of owner.editedCells) {
+      for (const [columnIndex, entry] of columns) cells.push({ rowId, columnIndex, value: entry.current });
+    }
+    if (cells.length > 0) postToWorker({ type: "setCells", requestId: nextRequestId++, cells });
+    reissuePendingWorkerRequests();
+    return;
+  }
+
+  if (owner.pendingEdits.length === 0) return;
+  const { cells, verify, rowIdByRecord } = pendingToCells(owner.pendingEdits);
+  const pending = owner.pendingEdits;
+  owner.pendingEdits = [];
+  void callWorker<Extract<WorkerResponse, { type: "setCellsDone" }>>((requestId) => ({
+    type: "setCells",
+    requestId,
+    cells: cells.map(({ rowId, columnIndex, value }) => ({ rowId, columnIndex, value })),
+    verify,
+  })).then((done) => {
+    if (state !== owner) return;
+    const rejected = new Set(done.rejectedRowIds);
+    for (const cell of cells) if (!rejected.has(cell.rowId)) setEditedCell(cell.rowId, cell.columnIndex, cell.original, cell.value);
+    const dropped = pending.filter((edit) => rejected.has(rowIdByRecord.get(edit.recordIndex)!)).map((edit) => edit.recordIndex);
+    if (dropped.length > 0) vscode.postMessage({ type: "editsDropped", recordIndexes: dropped });
+    for (const rowId of owner.editedCells.keys()) refreshRow(rowId);
+  });
+}
+
+interface InlineEditor {
+  kind: "inline";
+  rowId: number;
+  columnIndex: number;
+  // The value when the editor opened, which is what an unchanged commit is compared with even if the row has left the page.
+  initial: string;
+  input: HTMLInputElement;
+  done: boolean;
+}
+
+interface FieldEditor {
+  kind: "field";
+  rowId: number;
+  columnIndex: number;
+  initial: string;
+  textarea: HTMLTextAreaElement;
+  done: boolean;
+}
+
+let openEditor: InlineEditor | FieldEditor | null = null;
+
+function setRovingRow(rowId: number): void {
+  if (!state) return;
+  state.focusedRowId = rowId;
+  for (const tr of tableBody.querySelectorAll<HTMLTableRowElement>("tr.data-row")) {
+    tr.tabIndex = Number(tr.dataset.rowId) === rowId ? 0 : -1;
+  }
+}
+
+function editorLabel(columnIndex: number, rowId: number): string {
+  return `Edit ${state!.headers[columnIndex]}, row ${rowId + 1}`;
+}
+
+function startInlineEdit(rowId: number, columnIndex: number): void {
+  if (!state) return;
+  const row = pageRow(rowId);
+  const value = row?.cells[columnIndex];
+  if (row === undefined || value === undefined) return;
+  if (value.length > DETAIL_WARN_CHARS) {
+    showEditError(TOO_LARGE_SENTENCE);
+    return;
+  }
+  commitOpenEditor();
+  if (openEditor) return;
+  if (value.includes("\n") || value.length > TABLE_CELL_MAX_CHARS) {
+    startFieldEdit(rowId, columnIndex);
+    return;
+  }
+  const td = tableBody.querySelector<HTMLTableCellElement>(`tr.data-row[data-row-id="${rowId}"] td[data-column-index="${columnIndex}"]`);
+  if (!td) {
+    startFieldEdit(rowId, columnIndex);
+    return;
+  }
+
+  window.getSelection()?.removeAllRanges();
+  // The editor is absolutely positioned and the cell has no content left, so pin the cell's size.
+  const cellRect = td.getBoundingClientRect();
+  td.style.width = `${cellRect.width}px`;
+  td.style.height = `${cellRect.height}px`;
+  td.classList.add("editing");
+  td.classList.remove("clipped-cell");
+  td.removeAttribute("title");
+  td.replaceChildren();
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "cell-editor";
+  input.value = value;
+  input.setAttribute("aria-label", editorLabel(columnIndex, rowId));
+  td.appendChild(input);
+
+  const editor: InlineEditor = { kind: "inline", rowId, columnIndex, initial: value, input, done: false };
+  openEditor = editor;
+  setRovingRow(rowId);
+  input.addEventListener("keydown", (ev) => onInlineEditorKeyDown(ev, editor));
+  input.addEventListener("blur", () => commitInline(editor, "none"));
+  input.focus();
+  input.select();
+}
+
+function onInlineEditorKeyDown(ev: KeyboardEvent, editor: InlineEditor): void {
+  if ((ev.ctrlKey || ev.metaKey) && ["z", "y"].includes(ev.key.toLowerCase())) {
+    // VS Code forwards these to the document's undo stack unless they stop here; the field keeps its native undo.
+    ev.stopPropagation();
+    return;
+  }
+  if (ev.isComposing) return;
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    commitInline(editor, "row");
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    cancelInline(editor, "row");
+  } else if (ev.key === "Tab") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    commitInline(editor, ev.shiftKey ? "previous" : "next");
+  }
+}
+
+type AfterEdit = "row" | "none" | "next" | "previous";
+
+function commitInline(editor: InlineEditor, after: AfterEdit): void {
+  if (editor.done || !state) return;
+  const value = normalizeNewlines(editor.input.value);
+  const current = editor.initial;
+  if (value !== current) {
+    const rejection = localRejection(value);
+    if (rejection) {
+      showEditError(rejection);
+      return;
+    }
+  }
+  closeEditor(editor);
+  if (value !== current) submitEdit(editor.rowId, editor.columnIndex, value, current);
+  else refreshRow(editor.rowId);
+  moveAfterEdit(editor.rowId, editor.columnIndex, after);
+}
+
+function cancelInline(editor: InlineEditor, after: AfterEdit): void {
+  if (editor.done) return;
+  closeEditor(editor);
+  refreshRow(editor.rowId);
+  moveAfterEdit(editor.rowId, editor.columnIndex, after);
+}
+
+function moveAfterEdit(rowId: number, columnIndex: number, after: AfterEdit): void {
+  if (!state || after === "none") return;
+  if (after === "row") {
+    focusRowById(rowId);
+    return;
+  }
+  const visible = visibleColumns(state.headers, state.view.columnVisibility).map((c) => state!.headers.indexOf(c));
+  const at = visible.indexOf(columnIndex);
+  const target = visible[at + (after === "next" ? 1 : -1)];
+  if (at === -1 || target === undefined) focusRowById(rowId);
+  else startInlineEdit(rowId, target);
+}
+
+function closeEditor(editor: InlineEditor | FieldEditor): void {
+  editor.done = true;
+  if (openEditor === editor) openEditor = null;
+}
+
+function commitOpenEditor(): void {
+  const editor = openEditor;
+  if (!editor) return;
+  if (editor.kind === "inline") commitInline(editor, "none");
+  else commitField(editor, "none");
+}
+
+function cancelOpenEditor(): void {
+  const editor = openEditor;
+  if (!editor) return;
+  if (editor.kind === "inline") cancelInline(editor, "none");
+  else cancelField(editor, "none");
+}
+
+function findDetailDd(rowId: number, columnIndex: number): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`#detail-row-${rowId} dd[data-column-index="${columnIndex}"]`);
+}
+
+function focusFieldEditButton(rowId: number, columnIndex: number): void {
+  document.querySelector<HTMLButtonElement>(`#detail-row-${rowId} dt[data-column-index="${columnIndex}"] .field-edit-btn`)?.focus();
+}
+
+function buildFieldEditButton(rowId: number, field: string, columnIndex: number, value: string): HTMLButtonElement | null {
+  const reason = effectiveReadOnlyReason();
+  if (reason === "setting") return null;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "icon-btn field-edit-btn";
+  btn.setAttribute("aria-label", `Edit ${field} value`);
+  const icon = document.createElement("span");
+  icon.className = "codicon codicon-edit";
+  icon.setAttribute("aria-hidden", "true");
+  btn.appendChild(icon);
+  if (value.length > DETAIL_WARN_CHARS) {
+    btn.disabled = true;
+    btn.title = TOO_LARGE_SENTENCE;
+  } else if (reason !== undefined) {
+    // aria-disabled, not disabled, so a click can still explain why in the banner.
+    btn.setAttribute("aria-disabled", "true");
+    btn.title = readOnlyTitle(reason);
+  }
+  btn.addEventListener("click", () => requestEdit(() => startFieldEdit(rowId, columnIndex)));
+  return btn;
+}
+
+function startFieldEdit(rowId: number, columnIndex: number): void {
+  if (!state) return;
+  const row = pageRow(rowId);
+  const value = row?.cells[columnIndex];
+  if (row === undefined || value === undefined) return;
+  if (value.length > DETAIL_WARN_CHARS) {
+    showEditError(TOO_LARGE_SENTENCE);
+    return;
+  }
+  commitOpenEditor();
+  if (openEditor) return;
+  if (!state.expanded.has(rowId)) toggleExpanded(rowId);
+  const dd = findDetailDd(rowId, columnIndex);
+  if (!dd) return;
+
+  window.getSelection()?.removeAllRanges();
+  for (const btn of dd.previousElementSibling?.querySelectorAll("button") ?? []) btn.hidden = true;
+  dd.classList.add("editing");
+  dd.replaceChildren();
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "field-editor";
+  textarea.value = value;
+  textarea.rows = Math.max(3, Math.min(20, value.split("\n").length));
+  textarea.setAttribute("aria-label", editorLabel(columnIndex, rowId));
+  dd.appendChild(textarea);
+
+  const editor: FieldEditor = { kind: "field", rowId, columnIndex, initial: value, textarea, done: false };
+  openEditor = editor;
+  setRovingRow(rowId);
+
+  const actions = document.createElement("div");
+  actions.className = "field-editor-actions";
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.className = "primary";
+  apply.textContent = "Apply";
+  apply.addEventListener("click", () => commitField(editor, "field"));
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => cancelField(editor, "field"));
+  const hint = document.createElement("span");
+  hint.className = "field-editor-hint";
+  hint.textContent = IS_MAC ? "⌘↩ to apply · Esc to cancel" : "Ctrl+Enter to apply · Esc to cancel";
+  actions.append(apply, cancel, hint);
+  dd.appendChild(actions);
+
+  textarea.addEventListener("keydown", (ev) => {
+    if ((ev.ctrlKey || ev.metaKey) && ["z", "y"].includes(ev.key.toLowerCase())) {
+      ev.stopPropagation();
+      return;
+    }
+    if (ev.isComposing) return;
+    if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      commitField(editor, "field");
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      cancelField(editor, "field");
+    }
+  });
+  textarea.addEventListener("blur", (ev) => {
+    if (ev.relatedTarget instanceof Node && dd.contains(ev.relatedTarget)) return;
+    commitField(editor, "none");
+  });
+  dd.scrollIntoView({ block: "nearest" });
+  textarea.focus();
+}
+
+type AfterFieldEdit = "field" | "none";
+
+function commitField(editor: FieldEditor, after: AfterFieldEdit): void {
+  if (editor.done || !state) return;
+  const value = normalizeNewlines(editor.textarea.value);
+  const current = editor.initial;
+  if (value !== current) {
+    const rejection = localRejection(value);
+    if (rejection) {
+      showEditError(rejection);
+      return;
+    }
+  }
+  closeEditor(editor);
+  if (value !== current) submitEdit(editor.rowId, editor.columnIndex, value, current);
+  else refreshRow(editor.rowId);
+  if (after === "field") focusFieldEditButton(editor.rowId, editor.columnIndex);
+}
+
+function cancelField(editor: FieldEditor, after: AfterFieldEdit): void {
+  if (editor.done) return;
+  closeEditor(editor);
+  refreshRow(editor.rowId);
+  if (after === "field") focusFieldEditButton(editor.rowId, editor.columnIndex);
+}
+
+// Rebuilds the row and its details in place. While an editor is open in the row only the other cells are repainted, so the editor survives.
+function refreshRow(rowId: number): void {
+  if (!state) return;
+  const row = pageRow(rowId);
+  const oldTr = tableBody.querySelector<HTMLTableRowElement>(`tr.data-row[data-row-id="${rowId}"]`);
+  const detailTr = document.getElementById(`detail-row-${rowId}`) as HTMLTableRowElement | null;
+  if (!row || !oldTr || !detailTr) return;
+  const columns = visibleColumns(state.headers, state.view.columnVisibility);
+  const editorHere = openEditor !== null && openEditor.rowId === rowId ? openEditor : null;
+
+  if (editorHere) {
+    for (const td of oldTr.querySelectorAll<HTMLTableCellElement>("td[data-column-index]")) {
+      const columnIndex = Number(td.dataset.columnIndex);
+      if (editorHere.kind === "inline" && editorHere.columnIndex === columnIndex) continue;
+      fillCell(td, row, columnIndex);
+    }
+    if (editorHere.kind === "inline" && state.expanded.has(rowId)) {
+      populateDetailContent(row, detailTr, columns, clippedVisibleColumnsForRow(oldTr, columns));
+    }
+    return;
+  }
+
+  const focusedTr = document.activeElement === oldTr;
+  const focusedEditButton =
+    document.activeElement instanceof HTMLElement && detailTr.contains(document.activeElement) && document.activeElement.classList.contains("field-edit-btn")
+      ? document.activeElement.closest<HTMLElement>("dt")?.dataset.columnIndex
+      : undefined;
+
+  const newTr = buildRowTr(row, columns, state.focusedRowId);
+  oldTr.replaceWith(newTr);
+  if (state.expanded.has(rowId)) populateDetailContent(row, detailTr, columns, clippedVisibleColumnsForRow(newTr, columns));
+  if (focusedTr) newTr.focus();
+  if (focusedEditButton !== undefined) focusFieldEditButton(rowId, Number(focusedEditButton));
+}
+
+function onCellDoubleClick(ev: MouseEvent, rowId: number, columnIndex: number): void {
+  if (effectiveReadOnlyReason() === "setting") return;
+  if (ev.target instanceof Element && ev.target.closest(".cell-editor")) return;
+  const toggled = lastClickToggle;
+  lastClickToggle = null;
+  if (toggled && toggled.rowId === rowId && performance.now() - toggled.at < DOUBLE_CLICK_TOGGLE_MS) toggleExpanded(rowId);
+  window.getSelection()?.removeAllRanges();
+  requestEdit(() => startInlineEdit(rowId, columnIndex));
+}
+
 async function copyToClipboard(value: string): Promise<void> {
   try {
     if (navigator.clipboard?.writeText) {
@@ -2661,10 +3590,43 @@ function closeContextMenu(): void {
   invoker?.focus();
 }
 
-function onCellContextMenu(ev: MouseEvent, column: string, value: string, row: WorkerRow): void {
+function menuItem(label: string, onClick: () => void): HTMLButtonElement {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.setAttribute("role", "menuitem");
+  item.textContent = label;
+  item.addEventListener("click", onClick);
+  return item;
+}
+
+function onCellContextMenu(ev: MouseEvent, column: string, value: string, row: WorkerRow, source: "cell" | "field"): void {
   ev.preventDefault();
   contextMenu.innerHTML = "";
   contextMenuInvoker = null;
+
+  const columnIndex = state ? state.headers.indexOf(column) : -1;
+  const reason = effectiveReadOnlyReason();
+  if (reason !== "setting" && columnIndex !== -1) {
+    const editItem = menuItem("Edit Value", () => {
+      closeContextMenu();
+      requestEdit(() => (source === "cell" ? startInlineEdit(row.id, columnIndex) : startFieldEdit(row.id, columnIndex)));
+    });
+    if (reason !== undefined) {
+      // aria-disabled, not disabled, so choosing it can still explain why in the banner.
+      editItem.setAttribute("aria-disabled", "true");
+      editItem.title = readOnlyTitle(reason);
+    }
+    contextMenu.appendChild(editItem);
+    const entry = editedEntry(row.id, columnIndex);
+    if (entry) {
+      contextMenu.appendChild(
+        menuItem(`Revert Cell to "${truncateForMenuLabel(entry.original)}"`, () => {
+          closeContextMenu();
+          submitEdit(row.id, columnIndex, entry.original, currentCellValue(row.id, columnIndex));
+        }),
+      );
+    }
+  }
 
   const copyItem = document.createElement("button");
   copyItem.type = "button";
@@ -2765,7 +3727,7 @@ function openRowContextMenu(rowId: number, anchorEl: HTMLTableRowElement): void 
 }
 
 contextMenu.addEventListener("keydown", (ev) => {
-  const items = Array.from(contextMenu.querySelectorAll<HTMLButtonElement>("button"));
+  const items = Array.from(contextMenu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
   if (items.length === 0) return;
   const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
   if (ev.key === "ArrowDown") {
@@ -2825,6 +3787,12 @@ document.addEventListener("keydown", (ev) => {
     ev.preventDefault();
     quickSearchInput.focus();
     quickSearchInput.select();
+    return;
+  }
+
+  // Commit synchronously, before VS Code's save runs; the host's flush handshake then waits for the edit to land.
+  if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "s") {
+    commitOpenEditor();
     return;
   }
 

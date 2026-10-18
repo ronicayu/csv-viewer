@@ -1074,3 +1074,112 @@ tr.data-row:focus-visible {
 .detail-wrap {
   padding-left: 32px;
 }
+
+.field-copy-btn {
+  margin-left: auto;
+}
+
+.format-locked-note {
+  margin: 6px 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.field-edit-btn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+}
+
+.field-edit-btn .codicon {
+  font-size: 0.9em;
+}
+
+.field-edit-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.context-menu button:disabled:hover {
+  background: transparent;
+}
+
+.context-menu button[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+td.editing {
+  position: relative;
+  padding: 0;
+  overflow: visible;
+}
+
+.cell-editor {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 8px;
+  font: inherit;
+  text-align: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 0;
+  outline: none;
+}
+
+body.vscode-high-contrast .cell-editor,
+body.vscode-high-contrast .field-editor {
+  outline: 1px solid var(--vscode-contrastActiveBorder);
+  outline-offset: -2px;
+}
+
+dd.editing {
+  white-space: normal;
+}
+
+.field-editor {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 4px 6px;
+  font: inherit;
+  white-space: pre-wrap;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 0;
+  outline: none;
+}
+
+.field-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.field-editor-hint {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/* The "modified" gutter colour exists in every built-in theme, including the high-contrast ones. */
+td.edited-cell,
+dd.edited-field {
+  box-shadow: inset 3px 0 0 var(--vscode-editorGutter-modifiedBackground, var(--vscode-focusBorder));
+}
+
+dd.edited-field {
+  padding-left: 8px;
+}
+
+@media (forced-colors: active) {
+  td.edited-cell,
+  dd.edited-field {
+    box-shadow: inset 3px 0 0 Highlight;
+    text-decoration: underline dotted;
+  }
+}

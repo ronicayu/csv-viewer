@@ -1,8 +1,8 @@
 {
   "name": "csv-row-details",
   "displayName": "Wide CSV",
-  "description": "Read wide CSV/TSV files without scrolling sideways: keep key columns in the table, expand any row to read long text and JSON. Filter, sort, live reload.",
-  "version": "0.7.3",
+  "description": "Read and edit wide CSV/TSV files without scrolling sideways: key columns in the table, long text and JSON in row details. Filter, sort, edit cells, live reload.",
+  "version": "0.8.0",
   "publisher": "ronica",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -46,7 +46,9 @@
     "sort",
     "json",
     "wide",
-    "data"
+    "data",
+    "edit",
+    "editor"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -125,6 +127,11 @@
           "minimum": 0,
           "description": "The most columns shown in the table when a file is first opened. Short columns are chosen in file order; long-text, multi-line and JSON columns start in the row details regardless."
         },
+        "csvViewer.editing": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow changing cell values in the table and row details. Nothing is written until you save."
+        },
         "csvViewer.suggestOnOpen": {
           "type": "boolean",
           "default": true,
@@ -144,7 +151,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:webview": "npm run compile && tsc -p tsconfig.e2e.json --noEmit && playwright test",
-    "test:perf": "npm run compile && PERF_TESTS=1 playwright test src/test/webview-e2e/stress/scale.spec.ts --workers=1 && PERF_TESTS=1 vitest run src/test/stress",
+    "test:perf": "npm run compile && PERF_TESTS=1 playwright test src/test/webview-e2e/stress/scale.spec.ts src/test/webview-e2e/stress/editingStress.spec.ts --workers=1 && PERF_TESTS=1 vitest run src/test/stress",
     "compile:integration": "node -e \"require('fs').rmSync('out-integration',{recursive:true,force:true})\" && tsc -p tsconfig.integration.json",
     "test:integration": "npm run compile && npm run compile:integration && node ./out-integration/test/integration/runTest.js",
     "package": "vsce package --no-dependencies",

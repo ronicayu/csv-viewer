@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0
+
+**Added**
+- Cell editing in the table and the row details. Double-click a cell, press **F2** on a
+  row, or use **Edit Value** in the right-click menu; **Enter** commits and **Esc**
+  cancels. Multi-line, JSON, Markdown and very long values edit in the row details,
+  where every field also has an edit button.
+- The usual editor behavior: the unsaved dot on the tab, **Ctrl/Cmd+S** to save,
+  undo and redo, **Revert File**, **Save As**, and unsaved edits that survive a restart.
+- Saves keep every byte you didn't touch. Only the rows you edited are rewritten, so
+  quoting, line endings, blank lines and the final newline stay as they were.
+- Edited cells are marked in blue until saved, and **Revert Cell** in the right-click
+  menu puts the original value back.
+- A **csvViewer.editing** setting to turn editing off.
+
+**Changed**
+- The extension is no longer read-only.
+- The File format controls are locked while there are unsaved edits.
+- Files that aren't valid UTF-8 open read-only, with a note.
+- The extension host now keeps a file's bytes while it is open, so large files use more
+  memory than before.
+
 ## 0.7.3
 
 **Changed**

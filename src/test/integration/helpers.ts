@@ -16,6 +16,10 @@ export interface CsvViewerTestApi {
   choosePromptButton(button: string | undefined): void;
   getHintsSeen(): string[];
   resetSuggestPromptState(): void;
+  getDocument(fileKey: string): { dirty: boolean; editCount: number; baseVersion: number; bytesLength: number } | undefined;
+  saveDocumentAs(fileKey: string, destination: vscode.Uri): Promise<void>;
+  backupDocument(fileKey: string, destination: vscode.Uri): Promise<string>;
+  openDocumentFromBackup(uri: vscode.Uri, backupId: string): Promise<{ editCount: number }>;
 }
 
 export async function getTestApi(): Promise<CsvViewerTestApi> {
@@ -111,4 +115,49 @@ export async function waitForReady(api: CsvViewerTestApi, fileKey: string, opts:
     timeoutMs: opts.timeoutMs,
     message: `never saw a "ready" message for ${fileKey}`,
   });
+}
+
+export function viewerTab(uri: vscode.Uri): vscode.Tab | undefined {
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      if (tab.input instanceof vscode.TabInputCustom && tab.input.uri.toString() === uri.toString()) return tab;
+    }
+  }
+  return undefined;
+}
+
+// Drives the webview's real commit path; resolves once the host has recorded the edit.
+export async function editCell(api: CsvViewerTestApi, fileKey: string, rowId: number, columnIndex: number, value: string, expectEditCount: number): Promise<void> {
+  const edits = () => api.getMessages(fileKey).filter((m) => m.type === "edit").length;
+  const before = edits();
+  api.postToWebview(fileKey, { type: "testEditCell", rowId, columnIndex, value });
+  await waitFor(() => edits() > before && api.getDocument(fileKey)?.editCount === expectEditCount, {
+    message: `the edit to row ${rowId}, column ${columnIndex} never reached the host. Messages: ${JSON.stringify(api.getMessages(fileKey).slice(-5))}`,
+  });
+}
+
+export async function cellValue(api: CsvViewerTestApi, fileKey: string, rowId: number, columnIndex: number): Promise<{ value: string | null; edited: boolean }> {
+  const answers = () => api.getMessages(fileKey).filter((m): m is Extract<WebviewToHostMessage, { type: "testCellValue" }> => m.type === "testCellValue");
+  const before = answers().length;
+  api.postToWebview(fileKey, { type: "testGetCell", rowId, columnIndex });
+  await waitFor(() => answers().length > before, { message: "the webview never answered testGetCell" });
+  const answer = answers()[answers().length - 1];
+  return { value: answer.value, edited: answer.edited };
+}
+
+export async function waitForCellValue(
+  api: CsvViewerTestApi,
+  fileKey: string,
+  rowId: number,
+  columnIndex: number,
+  value: string,
+): Promise<{ value: string | null; edited: boolean }> {
+  const deadline = Date.now() + 10000;
+  let last = await cellValue(api, fileKey, rowId, columnIndex);
+  while (last.value !== value && Date.now() < deadline) {
+    await sleep(100);
+    last = await cellValue(api, fileKey, rowId, columnIndex);
+  }
+  if (last.value !== value) throw new Error(`cell (${rowId}, ${columnIndex}) is ${JSON.stringify(last.value)}, expected ${JSON.stringify(value)}`);
+  return last;
 }

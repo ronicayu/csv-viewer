@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import Papa from "papaparse";
 import { expect, type Page } from "@playwright/test";
-import type { LoadMessage, ViewState } from "../../core/types";
+import type { HostToWebviewMessage, LoadMessage, PendingRecordEdit, ReadOnlyReason, RecordFloor, ViewState } from "../../core/types";
 
 export const REPO_ROOT = path.resolve(__dirname, "../../..");
 const outFile = (...parts: string[]): string => path.join(REPO_ROOT, "out", ...parts);
@@ -101,6 +101,10 @@ export interface FixtureLoad {
   defaultDelimiter?: string;
   testHooks?: boolean;
   hintsSeen?: string[];
+  baseVersion?: number;
+  editable?: boolean;
+  readOnlyReason?: ReadOnlyReason;
+  pendingEdits?: PendingRecordEdit[];
 }
 
 export interface TextLoad {
@@ -111,6 +115,22 @@ export interface TextLoad {
   defaultDelimiter?: string;
   testHooks?: boolean;
   hintsSeen?: string[];
+  baseVersion?: number;
+  editable?: boolean;
+  readOnlyReason?: ReadOnlyReason;
+  pendingEdits?: PendingRecordEdit[];
+  recordFloors?: RecordFloor[];
+}
+
+function editingFields(data: FixtureLoad | TextLoad): Pick<LoadMessage, "baseVersion" | "editable" | "readOnlyReason" | "pendingEdits" | "recordFloors"> {
+  const editable = data.editable ?? true;
+  return {
+    baseVersion: data.baseVersion ?? 1,
+    editable,
+    readOnlyReason: editable ? undefined : (data.readOnlyReason ?? "setting"),
+    pendingEdits: data.pendingEdits ?? [],
+    recordFloors: "recordFloors" in data ? data.recordFloors : undefined,
+  };
 }
 
 function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
@@ -123,6 +143,7 @@ function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
     defaultDelimiter: data.defaultDelimiter ?? "",
     testHooks: data.testHooks ?? false,
     hintsSeen: data.hintsSeen ?? [],
+    ...editingFields(data),
   };
 }
 
@@ -135,7 +156,13 @@ function toTextLoadMessage(data: TextLoad): Omit<LoadMessage, "type"> {
     defaultDelimiter: data.defaultDelimiter ?? "",
     testHooks: data.testHooks ?? false,
     hintsSeen: data.hintsSeen ?? [],
+    ...editingFields(data),
   };
+}
+
+// Plays the host: delivers any host-to-webview message exactly as the extension's postMessage would.
+export async function postFromHost(page: Page, message: HostToWebviewMessage): Promise<void> {
+  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
 }
 
 export async function pushLoad(page: Page, data: FixtureLoad): Promise<void> {

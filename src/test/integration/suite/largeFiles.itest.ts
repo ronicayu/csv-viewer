@@ -1,7 +1,8 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
 import { writeLargeCsv, writeSingleLongLineCsv } from "../fixtures";
-import { closeAllEditors, fileKeyFor, getTestApi, openInViewer, waitFor, waitForRender } from "../helpers";
+import * as fsp from "fs/promises";
+import { closeAllEditors, editCell, fileKeyFor, getTestApi, openInViewer, waitFor, waitForRender } from "../helpers";
 
 interface Measurement {
   label: string;
@@ -118,6 +119,33 @@ suite("Large files", function () {
     assert.ok(m.rowCount! > 0, "expected at least one parsed row");
 
     await vscode.commands.executeCommand("workbench.action.files.saveAll");
+  });
+
+  test("a 120MB file saves three edits within the bound, and the spliced file differs from the original only in those rows", async function () {
+    this.timeout(180000);
+    const { filePath, bytes } = await writeLargeCsv("onetwenty-save.csv", 120 * 1024 * 1024, 12);
+    const uri = vscode.Uri.file(filePath);
+    const api = await getTestApi();
+    const key = fileKeyFor(uri);
+    await measure("120MB/12col (edit + save)", uri, bytes, { expectRender: true, timeoutMs: 90000 });
+
+    await editCell(api, key, 0, 1, "first", 1);
+    await editCell(api, key, 1000, 2, "middle, with comma", 2);
+    await editCell(api, key, 200000, 3, "last", 3);
+
+    const rssBefore = process.memoryUsage().rss;
+    const t0 = Date.now();
+    await vscode.commands.executeCommand("workbench.action.files.save");
+    await waitFor(() => api.getDocument(key)?.dirty === false, { timeoutMs: 60000, message: "the 120MB save never completed" });
+    const saveMs = Date.now() - t0;
+    // eslint-disable-next-line no-console
+    console.log(`[largeFiles] 120MB save with 3 edits: ${saveMs}ms, extHost RSS ${mb(rssBefore)}MB -> ${mb(process.memoryUsage().rss)}MB`);
+    assert.ok(saveMs < 20000, `saving took ${saveMs}ms`);
+
+    const written = await fsp.readFile(filePath, "utf8");
+    assert.ok(written.includes("\n0,first,"), "first edit missing");
+    assert.ok(written.includes('"middle, with comma"'), "second edit missing");
+    assert.strictEqual(api.getDocument(key)?.bytesLength, Buffer.byteLength(written));
   });
 
   test("a file over the 512MB hard limit shows an error and is not loaded", async function () {

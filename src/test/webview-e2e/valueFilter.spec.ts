@@ -841,6 +841,7 @@ test.describe("context menu", () => {
   test("a cell's menu has `Filter ‹column› by Values…` after the two quick filters, before the row-copy items", async ({ page }) => {
     await page.locator("tr.data-row").first().locator("td").nth(3).click({ button: "right" });
     await expect(page.locator("#context-menu button")).toHaveText([
+      "Edit Value",
       "Copy Value",
       'Show only rows where status = "open"',
       'Hide rows where status = "open"',
@@ -849,7 +850,7 @@ test.describe("context menu", () => {
       "Copy Row as JSON",
     ]);
     const kinds = await page.locator("#context-menu > *").evaluateAll((els) => els.map((e) => e.tagName));
-    expect(kinds).toEqual(["BUTTON", "HR", "BUTTON", "BUTTON", "BUTTON", "HR", "BUTTON", "BUTTON"]);
+    expect(kinds).toEqual(["BUTTON", "BUTTON", "HR", "BUTTON", "BUTTON", "BUTTON", "HR", "BUTTON", "BUTTON"]);
   });
 
   test("the item closes the menu and opens the picker under that column's funnel", async ({ page }) => {
@@ -876,11 +877,12 @@ test.describe("context menu", () => {
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
-    await expect(items.nth(3)).toBeFocused();
-    await expect(items.nth(3)).toHaveText("Filter status by Values…");
     await page.keyboard.press("ArrowDown");
-    await expect(items.nth(4)).toHaveText("Copy Row as CSV");
     await expect(items.nth(4)).toBeFocused();
+    await expect(items.nth(4)).toHaveText("Filter status by Values…");
+    await page.keyboard.press("ArrowDown");
+    await expect(items.nth(5)).toHaveText("Copy Row as CSV");
+    await expect(items.nth(5)).toBeFocused();
     await page.keyboard.press("ArrowUp");
     await page.keyboard.press("Enter");
     await expect(picker(page)).toBeVisible();
