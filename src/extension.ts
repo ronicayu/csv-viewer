@@ -9,6 +9,7 @@ import {
   type EditMessage,
   type HostToWebviewMessage,
   type PendingRecordEdit,
+  type RecordFloor,
   type ReadOnlyReason,
   type ViewState,
   type WebviewToHostMessage,
@@ -26,6 +27,7 @@ const HARD_LIMIT_BYTES = 512 * 1024 * 1024;
 const RELOAD_DEBOUNCE_MS = 300;
 const DELETE_GRACE_MS = 500;
 const FLUSH_TIMEOUT_MS = 500;
+const REASSERT_DIRTY_FALLBACK_MS = 500;
 
 const SUGGEST_DONE_KEY = "csvViewer.suggestOnOpen.done";
 const HINTS_SEEN_KEY = "csvViewer.hintsSeen";
@@ -300,6 +302,8 @@ class CsvDocument implements vscode.CustomDocument {
   isDeleted = false;
   changedOnDisk = false;
   pendingFlush: { baseVersion: number; resolve: () => void } | undefined;
+  // Set after a save that left edits behind: VS Code has just marked the document clean and must be told otherwise.
+  reassertDirtyTimer: ReturnType<typeof setTimeout> | undefined;
 
   reloadDebounceHandle: ReturnType<typeof setTimeout> | undefined;
   deleteCheckHandle: ReturnType<typeof setTimeout> | undefined;
@@ -321,10 +325,16 @@ class CsvDocument implements vscode.CustomDocument {
   dispose(): void {
     if (this.reloadDebounceHandle) clearTimeout(this.reloadDebounceHandle);
     if (this.deleteCheckHandle) clearTimeout(this.deleteCheckHandle);
+    if (this.reassertDirtyTimer) clearTimeout(this.reassertDirtyTimer);
     for (const sub of this.subscriptions) sub.dispose();
     this.subscriptions.length = 0;
     this.onDispose(this);
   }
+}
+
+// One empty field serializes to an empty line, and blank lines are not records.
+function vanishes(fields: string[]): boolean {
+  return fields.length === 0 || (fields.length === 1 && fields[0] === "");
 }
 
 function notify(level: "warning" | "error", message: string): void {
@@ -522,9 +532,10 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
         document.send = undefined;
       }
       document.pendingFlush?.resolve();
+      // A newer panel for the same file (a moved editor) owns the hooks now.
       if (TEST_HOOKS_ENABLED) {
-        testHookPanels.delete(fileKey);
-        testHookMessageHandlers.delete(fileKey);
+        if (testHookPanels.get(fileKey) === webviewPanel) testHookPanels.delete(fileKey);
+        if (testHookMessageHandlers.get(fileKey) === handleWebviewMessage) testHookMessageHandlers.delete(fileKey);
       }
     });
   }
@@ -555,6 +566,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
         break;
       case "synced":
         document.syncedBase = message.baseVersion;
+        if (document.reassertDirtyTimer && message.baseVersion === document.baseVersion) this.reassertDirty(document);
         break;
       case "resync":
         this.postLoad(document);
@@ -575,10 +587,24 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     this.postLoad(document);
   }
 
+  // The webview writes the separator it detected into an Auto choice on the first edit; the tokenization the edits are addressed in is the same.
+  private isPin(document: CsvDocument, state: ViewState): boolean {
+    if (!document.format) return false;
+    let stored: unknown;
+    try {
+      stored = JSON.parse(document.formatKey);
+    } catch {
+      return false;
+    }
+    if (!Array.isArray(stored)) return false;
+    const [delimiter, firstRowIsHeader, quotes] = stored;
+    return delimiter === "" && state.delimiter === document.format.delimiter && state.firstRowIsHeader === firstRowIsHeader && state.quotes === quotes;
+  }
+
   private onSaveState(document: CsvDocument, state: ViewState): void {
     const fileKey = document.uri.toString();
     const formatKey = JSON.stringify([state.delimiter, state.firstRowIsHeader, state.quotes]);
-    const changed = document.formatKey !== "" && formatKey !== document.formatKey;
+    const changed = document.formatKey !== "" && formatKey !== document.formatKey && !this.isPin(document, state);
     if (changed && document.dirty) {
       // Edits are addressed by record and field index under one tokenization; keep the stored format and put the webview back on it.
       const stored = this.loadOrCreateState(fileKey);
@@ -618,6 +644,12 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       });
     }
 
+    // Only records whose floor is below their field count differ from what the webview derives for itself.
+    const recordFloors: RecordFloor[] = [];
+    for (const [recordIndex, record] of document.records) {
+      if (record.floor < record.originalFields.length) recordFloors.push({ recordIndex, floor: record.floor });
+    }
+
     document.send({
       type: "load",
       fileKey,
@@ -631,6 +663,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       editable: reason === undefined,
       readOnlyReason: reason,
       pendingEdits,
+      recordFloors,
     });
 
     if (document.isDeleted) document.send({ type: "fileDeleted", name: document.name });
@@ -727,7 +760,9 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
   }
 
   private onEdit(document: CsvDocument, message: EditMessage): void {
-    // An edit committed just before the webview saw `saved` still describes the file as it was; the save does not touch other records.
+    // An edit committed against the base just before the save was made before the webview saw `saved`. The save rewrote only the records it
+    // wrote, so such an edit is accepted for any other record (it is checked against the held record below). For a record the save did
+    // write, the webview's baseline is the pre-save one, so the text is not compared and the host keeps its own record.
     const justSaved = document.saveBase === message.baseVersion && document.baseVersion === message.baseVersion + 1;
     if (document.lossy || (message.baseVersion !== document.baseVersion && !justSaved)) {
       this.postLoad(document);
@@ -752,8 +787,17 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
         fields: info.originalFields.slice(),
         floor: info.originalFields.length,
       };
-      document.records.set(change.recordIndex, record);
     }
+    // A record that would be written as one empty field is an empty line, which reads back as no record at all.
+    const prospective = record.fields.slice();
+    while (prospective.length <= change.columnIndex) prospective.push("");
+    prospective[change.columnIndex] = change.newValue;
+    if (vanishes(fieldsForWrite(prospective, record.floor))) {
+      console.error(`csv-viewer: refused an edit that would empty record ${change.recordIndex} of "${document.name}"`);
+      this.postLoad(document);
+      return;
+    }
+    document.records.set(change.recordIndex, record);
     document.format ??= change.format;
 
     const apply = record;
@@ -848,6 +892,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       const record = document.records.get(recordIndex)!;
       if (recordIndex >= table.length || decoded.text.slice(table.start[recordIndex], table.end[recordIndex]) !== record.originalText) throw consistency;
       const fields = this.fieldsToWrite(record);
+      if (vanishes(fields)) throw consistency;
       written.push({ recordIndex, fields, text: serializeRecord(fields, format.delimiter, format.quoting) });
     }
     try {
@@ -898,15 +943,25 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       document.changedOnDisk = false;
       document.saveBase = document.baseVersion;
       document.baseVersion++;
-      document.send?.({ type: "saved", baseVersion: document.baseVersion, written: written.map((w) => ({ recordIndex: w.recordIndex, fields: w.fields })) });
-
-      // VS Code marks the document clean when this returns; edits made during the write still need saving.
+      // VS Code marks the document clean when this returns; edits made during the write still need saving. The event goes out once the
+      // webview confirms the new base (which can only happen after the save reply has left), or after a delay if the webview is hidden.
       if (document.dirty) {
-        setTimeout(() => {
-          if (document.dirty) this.changeEmitter.fire({ document });
-        }, 0);
+        if (document.reassertDirtyTimer) clearTimeout(document.reassertDirtyTimer);
+        document.reassertDirtyTimer = setTimeout(() => this.reassertDirty(document), REASSERT_DIRTY_FALLBACK_MS);
       }
+      document.send?.({
+        type: "saved",
+        baseVersion: document.baseVersion,
+        written: written.map((w) => ({ recordIndex: w.recordIndex, fields: w.fields, floor: document.records.get(w.recordIndex)?.floor ?? w.fields.length })),
+      });
     });
+  }
+
+  // A content-change event without an undo entry, so the undo stack is untouched.
+  private reassertDirty(document: CsvDocument): void {
+    if (document.reassertDirtyTimer) clearTimeout(document.reassertDirtyTimer);
+    document.reassertDirtyTimer = undefined;
+    if (document.dirty) this.changeEmitter.fire({ document });
   }
 
   private async confirmOverwriteIfChanged(document: CsvDocument): Promise<void> {

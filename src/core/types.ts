@@ -107,6 +107,12 @@ export interface PendingRecordEdit {
   fields: string[];
 }
 
+// A record's floor when it is below its field count, which the webview cannot derive from the file (see RecordState.floor in the host).
+export interface RecordFloor {
+  recordIndex: number;
+  floor: number;
+}
+
 export interface LoadMessage {
   type: "load";
   fileKey: string;
@@ -121,6 +127,7 @@ export interface LoadMessage {
   editable: boolean;
   readOnlyReason?: ReadOnlyReason;
   pendingEdits: PendingRecordEdit[];
+  recordFloors?: RecordFloor[];
 }
 
 export interface FileDeletedMessage {
@@ -163,6 +170,8 @@ export interface ApplyEditsMessage {
 export interface WrittenRecord {
   recordIndex: number;
   fields: string[];
+  // The host's floor for the record; absent means the field count it had before this write.
+  floor?: number;
 }
 
 export interface SavedMessage {
@@ -194,14 +203,6 @@ export interface TestGetCellMessage {
   type: "testGetCell";
   rowId: number;
   columnIndex: number;
-}
-
-export interface TestPressKeyMessage {
-  type: "testPressKey";
-  key: string;
-  // Ctrl, or Cmd on macOS.
-  primary?: boolean;
-  shift?: boolean;
 }
 
 export interface ReadyMessage {
@@ -277,8 +278,7 @@ export type HostToWebviewMessage =
   | FlushEditsMessage
   | TestEditCellMessage
   | TestOpenEditorMessage
-  | TestGetCellMessage
-  | TestPressKeyMessage;
+  | TestGetCellMessage;
 
 export type WebviewToHostMessage =
   | ReadyMessage

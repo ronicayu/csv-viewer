@@ -2,6 +2,7 @@ import * as assert from "assert";
 import * as fsp from "fs/promises";
 import * as path from "path";
 import * as vscode from "vscode";
+import { PRIMARY_MODIFIER, WorkbenchDriver } from "../cdp";
 import { WORKSPACE_ROOT } from "../fixtures";
 import {
   cellValue,
@@ -274,25 +275,33 @@ suite("Cell editing", function () {
   test("Ctrl/Cmd+Z typed inside an open editor stays in the editor; with no editor open it reaches the document's undo", async () => {
     const opened = await openFixture(SIMPLE, "keys");
     const { api, key } = opened;
+    const driver = await WorkbenchDriver.connect();
     try {
       await editCell(api, key, 0, 1, "Alicia", 1);
 
-      // A synthetic keydown inside the webview takes the same route as a typed one: VS Code's host script sees it on the window.
+      // Real key presses sent through the debugging protocol: VS Code ignores keys a page script synthesizes.
       api.postToWebview(key, { type: "testOpenEditor", rowId: 1, columnIndex: 1 });
-      await sleep(300);
-      api.postToWebview(key, { type: "testPressKey", key: "z", primary: true });
+      const { frame } = await driver.frameWith("input.cell-editor");
+      const input = frame.locator("input.cell-editor");
+      await input.press(`${PRIMARY_MODIFIER}+z`);
       await sleep(1500);
       assert.strictEqual(api.getDocument(key)?.editCount, 1, "undo typed inside an open editor must not reach the document's undo stack");
       assert.strictEqual((await cellValue(api, key, 0, 1)).value, "Alicia");
 
-      api.postToWebview(key, { type: "testPressKey", key: "Escape" });
-      await sleep(300);
-      api.postToWebview(key, { type: "testPressKey", key: "z", primary: true });
+      await input.press("Escape");
+      for (let i = 0; (await frame.locator("input.cell-editor").count()) > 0; i++) {
+        if (i > 100) throw new Error("Escape never closed the editor");
+        await sleep(50);
+      }
+      // The positive control: the same key with focus in the grid must undo, or the check above proves nothing.
+      await frame.locator("tr.data-row").first().press(`${PRIMARY_MODIFIER}+z`);
       await waitFor(() => api.getDocument(key)?.editCount === 0, {
         timeoutMs: 10000,
-        message: "with no editor open, the forwarded undo key should have undone the edit; if not, the test's key route does not reach the workbench and the check above proves nothing",
+        message: "with no editor open, Ctrl/Cmd+Z should have undone the edit; the key did not reach the workbench",
       });
+      assert.strictEqual((await cellValue(api, key, 0, 1)).value, "Alice");
     } finally {
+      await driver.close();
       // A dirty tab would raise a native dialog on close.
       await revertAndWait(opened);
     }

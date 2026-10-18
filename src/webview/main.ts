@@ -94,6 +94,8 @@ interface AppState {
   // Edited-but-unsaved cells, keyed by row id then column index, so marks survive paging, sorting and filtering.
   editedCells: Map<number, Map<number, { original: string; current: string }>>;
   pendingEdits: PendingRecordEdit[];
+  // The host's floors for records whose floor is below their field count; a worker respawn or re-parse hands them back to the worker.
+  recordFloors: Map<number, number>;
   readOnlyBannerShown: boolean;
 }
 
@@ -439,10 +441,26 @@ function endOperation(): void {
   tableEl.removeAttribute("aria-busy");
 }
 
+// A load replaces the document state after awaiting the worker, so whatever the host sent after it describes the new state and waits for it.
+let hostQueue: Promise<void> | null = null;
+
+function enqueueHostTask(task: () => void | Promise<void>): void {
+  const run = (hostQueue ?? Promise.resolve()).then(task);
+  hostQueue = run;
+  void run.finally(() => {
+    if (hostQueue === run) hostQueue = null;
+  });
+}
+
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => {
   const message = event.data;
-  if (message.type === "load") void onLoad(message);
-  else if (message.type === "fileDeleted") onFileDeleted(message);
+  if (message.type === "load") enqueueHostTask(() => onLoad(message));
+  else if (hostQueue) enqueueHostTask(() => handleHostMessage(message));
+  else handleHostMessage(message);
+});
+
+function handleHostMessage(message: HostToWebviewMessage): void {
+  if (message.type === "fileDeleted") onFileDeleted(message);
   else if (message.type === "fileRestored") onFileRestored();
   else if (message.type === "fileChangedOnDisk") onFileChangedOnDisk(message);
   else if (message.type === "setEditable") onSetEditable(message);
@@ -453,9 +471,8 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
     if (message.type === "testEditCell") submitEdit(message.rowId, message.columnIndex, message.value, currentCellValue(message.rowId, message.columnIndex));
     else if (message.type === "testOpenEditor") startInlineEdit(message.rowId, message.columnIndex);
     else if (message.type === "testGetCell") postTestCellValue(message.rowId, message.columnIndex);
-    else if (message.type === "testPressKey") pressTestKey(message.key, message.primary === true, message.shift === true);
   }
-});
+}
 
 function onFileDeleted(message: FileDeletedMessage): void {
   if (!state) return;
@@ -554,6 +571,7 @@ async function onLoad(message: LoadMessage): Promise<void> {
     quoting: true,
     editedCells: new Map(),
     pendingEdits: message.pendingEdits ?? [],
+    recordFloors: new Map((message.recordFloors ?? []).map((f) => [f.recordIndex, f.floor])),
     readOnlyBannerShown: false,
   };
   renderFileDeletedBanner();
@@ -568,8 +586,12 @@ async function onLoad(message: LoadMessage): Promise<void> {
   pendingPageAfterQuery = previousPage;
   const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
   beginInit(message.text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader, quotes: view.quotes }, true);
+  const initDone = new Promise<void>((resolve) => {
+    initWaiter = resolve;
+  });
   // Lets the host tell a base it merely sent from one this webview actually reached.
   vscode.postMessage({ type: "synced", baseVersion: message.baseVersion });
+  await initDone;
 }
 
 function reparseFromText(options: { resetPage: boolean }): void {
@@ -579,10 +601,22 @@ function reparseFromText(options: { resetPage: boolean }): void {
   // Row ids are re-tokenized on re-parse, so expanded and focused ids no longer match the same rows.
   state.expanded = new Set<number>();
   state.focusedRowId = null;
+  // Only a clean document re-tokenizes, and the host forgets its records when the format changes.
+  state.recordFloors.clear();
   beginInit(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, true);
 }
 
+// Resolved when the init the last load started has been answered and its edits restored.
+let initWaiter: (() => void) | null = null;
+
+function settleInitWaiter(): void {
+  const waiter = initWaiter;
+  initWaiter = null;
+  waiter?.();
+}
+
 function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean): void {
+  settleInitWaiter();
   const requestId = nextRequestId++;
   pendingInitRequestId = requestId;
   pendingInitIsFreshParse = isFreshParse;
@@ -590,7 +624,8 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   resetRegexWatchdogState();
   // Timeout recovery re-parses identical text, so only a fresh parse discards the values picker.
   if (isFreshParse) discardValuesPicker();
-  postToWorker({ type: "init", requestId, text, options });
+  const floors = state ? [...state.recordFloors].map(([recordIndex, floor]) => ({ recordIndex, floor })) : [];
+  postToWorker({ type: "init", requestId, text, options, floors });
 }
 
 function renderColumnsButton(): void {
@@ -798,6 +833,7 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   if (valuesPicker && valuesPicker.items === null) requestDistinct();
 
   continueAfterInit();
+  settleInitWaiter();
 }
 
 function continueAfterInit(): void {
@@ -2901,14 +2937,6 @@ function currentCellValue(rowId: number, columnIndex: number): string | undefine
   return pageRow(rowId)?.cells[columnIndex];
 }
 
-// A synthetic keydown reaches VS Code's webview host script the way a typed one does, which is what the undo-key tests need.
-function pressTestKey(key: string, primary: boolean, shift: boolean): void {
-  const target = document.activeElement ?? document.body;
-  target.dispatchEvent(
-    new KeyboardEvent("keydown", { key, ctrlKey: primary && !IS_MAC, metaKey: primary && IS_MAC, shiftKey: shift, bubbles: true, cancelable: true }),
-  );
-}
-
 function postTestCellValue(rowId: number, columnIndex: number): void {
   const value = currentCellValue(rowId, columnIndex);
   vscode.postMessage({ type: "testCellValue", rowId, columnIndex, value: value ?? null, edited: editedEntry(rowId, columnIndex) !== undefined });
@@ -3082,6 +3110,7 @@ async function onSaved(msg: SavedMessage): Promise<void> {
   owner.baseVersion = msg.baseVersion;
   fileChangedBanner.hidden = true;
   const written = msg.written;
+  for (const record of written ?? []) owner.recordFloors.set(record.recordIndex, record.floor ?? record.fields.length);
   const rebased = await callWorker<Extract<WorkerResponse, { type: "rebased" }>>((requestId) => ({ type: "rebase", requestId, written }));
   if (state !== owner) return;
   owner.text = applyTextPatches(owner.text, rebased.patches);

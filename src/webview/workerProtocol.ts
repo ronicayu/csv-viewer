@@ -1,7 +1,7 @@
 import type { ColumnProfile } from "../core/columns";
 import type { DistinctValue } from "../core/distinct";
 import type { TextPatch } from "../core/csvEdit";
-import type { CellChange, FilterRule, SortKey, WrittenRecord } from "../core/types";
+import type { CellChange, FilterRule, RecordFloor, SortKey, WrittenRecord } from "../core/types";
 
 export interface ParseOptionsMsg {
   delimiter?: string;
@@ -10,7 +10,7 @@ export interface ParseOptionsMsg {
 }
 
 export type WorkerRequest =
-  | { type: "init"; requestId: number; text: string; options: ParseOptionsMsg }
+  | { type: "init"; requestId: number; text: string; options: ParseOptionsMsg; floors?: RecordFloor[] }
   | { type: "query"; requestId: number; quickSearch: string; filterRules: FilterRule[]; sortKeys: SortKey[] }
   | { type: "page"; requestId: number; page: number; pageSize: number }
   | { type: "distinct"; requestId: number; column: string }

@@ -7,7 +7,7 @@ import { applyFilters } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
 import { EOL_TEXT, SpanTableBuilder, addByteOffsets, scanRecords, splitRecordsToTable, type SpanTable } from "../core/recordSpans";
-import type { CellChange, FilterRule, SortDirection, SortKey, WrittenRecord } from "../core/types";
+import type { CellChange, FilterRule, RecordFloor, SortDirection, SortKey, WrittenRecord } from "../core/types";
 import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./workerProtocol";
 
 let headers: string[] = [];
@@ -49,14 +49,14 @@ function post(message: WorkerResponse): void {
   (self as unknown as Worker).postMessage(message);
 }
 
-function onInit(requestId: number, source: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): void {
+function onInit(requestId: number, source: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }, initialFloors: RecordFloor[] | undefined): void {
   const parsed = parseCsv(source, options);
   text = source;
   delimiter = parsed.delimiter;
   quoting = parsed.quoting;
   quotesRequested = options.quotes;
   originals = new Map();
-  floors = new Map();
+  floors = new Map((initialFloors ?? []).map((f) => [f.recordIndex, f.floor]));
   headerOffset = options.firstRowIsHeader && parsed.headers.length > 0 ? 1 : 0;
   spans = null;
   spansOk = false;
@@ -211,9 +211,16 @@ function floorOf(recordIndex: number): number {
   return floors.get(recordIndex) ?? spans!.fieldCount[recordIndex];
 }
 
+// How many fields the host would write for a record: its own, the edited cell, and every other cell already edited (those are written too).
+function writeReach(rowId: number, columnIndex: number): number {
+  let reach = Math.max(spans!.fieldCount[rowId + headerOffset], columnIndex + 1);
+  for (const column of originals.get(rowId)?.keys() ?? []) reach = Math.max(reach, column + 1);
+  return reach;
+}
+
 function writtenFields(rowId: number, columnIndex: number, value: string): string[] {
   const recordIndex = rowId + headerOffset;
-  const current = rawRows[rowId].slice(0, Math.max(spans!.fieldCount[recordIndex], columnIndex + 1));
+  const current = rawRows[rowId].slice(0, writeReach(rowId, columnIndex));
   current[columnIndex] = value;
   return fieldsForWrite(current, floorOf(recordIndex));
 }
@@ -326,7 +333,7 @@ function editedRecords(): WrittenRecord[] {
   if (!spans) return records;
   for (const rowId of originals.keys()) {
     const recordIndex = rowId + headerOffset;
-    const reach = Math.max(spans.fieldCount[recordIndex], ...[...originals.get(rowId)!.keys()].map((column) => column + 1));
+    const reach = writeReach(rowId, 0);
     records.push({ recordIndex, fields: fieldsForWrite(rawRows[rowId].slice(0, reach), floorOf(recordIndex)) });
   }
   return records;
@@ -339,8 +346,11 @@ function onRebase(requestId: number, written: WrittenRecord[] | undefined): void
   const records: EditedRecord[] = (written ?? editedRecords()).map((w) => ({ index: w.recordIndex, fields: w.fields })).sort((a, b) => a.index - b.index);
   let patches: ReturnType<typeof textPatches> = [];
   if (spans) {
+    const hostFloors = new Map((written ?? []).map((w) => [w.recordIndex, w.floor]));
     for (const { index } of records) {
-      if (!floors.has(index)) floors.set(index, spans.fieldCount[index]);
+      const floor = hostFloors.get(index);
+      if (floor !== undefined) floors.set(index, floor);
+      else if (!floors.has(index)) floors.set(index, spans.fieldCount[index]);
     }
     patches = textPatches(spans, records, delimiter, quoting);
     text = applyTextPatches(text, patches);
@@ -377,7 +387,7 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
   try {
     switch (msg.type) {
       case "init":
-        onInit(msg.requestId, msg.text, msg.options);
+        onInit(msg.requestId, msg.text, msg.options, msg.floors);
         break;
       case "query":
         onQuery(msg.requestId, msg.quickSearch, msg.filterRules, msg.sortKeys);
