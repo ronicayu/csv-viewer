@@ -16,7 +16,8 @@ view it as a table. Choose **Always for CSV Files** to make the viewer the defau
 can also do this yourself through **Open With… → Configure default editor**).
 Double-click a cell (or press **F2** on a row) to edit it, and **Ctrl/Cmd+S** saves.
 **Open as Text** in the toolbar or the editor title bar takes you to the text editor
-for anything beyond cell values.
+for anything beyond cell values; it asks you to save or revert first if you have
+unsaved edits.
 
 ## What it does
 
@@ -97,7 +98,9 @@ The gear button opens **File format**:
   offers **Read Quotes as Plain Text**, which turns this off.
 
 These choices are remembered per file. `.tsv` and `.tab` files default to Tab. They
-are locked while there are unsaved edits; save or revert first.
+are locked while there are unsaved edits; save or revert first. The first edit to a
+file set to **Auto** fixes the separator that was detected, so the file reopens the
+way you edited it.
 
 ## Editing
 

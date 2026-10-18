@@ -130,7 +130,6 @@
         "csvViewer.editing": {
           "type": "boolean",
           "default": true,
-          "title": "Editing",
           "description": "Allow changing cell values in the table and row details. Nothing is written until you save."
         },
         "csvViewer.suggestOnOpen": {
