@@ -134,6 +134,18 @@ suite("package.json manifest sanity", () => {
     assert.strictEqual(prop.default, true);
   });
 
+  test("declares csvViewer.editing (boolean, default true) and keeps the custom editor at priority option", () => {
+    const manifest = readManifest();
+    const prop = manifest.contributes.configuration.properties["csvViewer.editing"];
+    assert.ok(prop, "expected csvViewer.editing to be declared");
+    assert.strictEqual(prop.type, "boolean");
+    assert.strictEqual(prop.default, true);
+    assert.strictEqual(prop.description, "Allow changing cell values in the table and row details. Nothing is written until you save.");
+    assert.strictEqual(manifest.contributes.customEditors[0].priority, "option");
+    assert.ok(manifest.keywords.includes("edit") && manifest.keywords.includes("editor"));
+    assert.strictEqual(manifest.version, "0.8.0");
+  });
+
   test("listing fields: displayName, description, pricing, qna, galleryBanner, icon, keywords, categories", () => {
     const manifest = readManifest();
     assert.strictEqual(manifest.displayName, "Wide CSV");

@@ -3,7 +3,7 @@ import * as fsp from "fs/promises";
 import * as path from "path";
 import * as vscode from "vscode";
 import { WORKSPACE_ROOT } from "../fixtures";
-import { closeAllEditors, fileKeyFor, getTestApi, openInViewer, renderCount, sleep, waitFor, waitForRender, waitForSaveState } from "../helpers";
+import { closeAllEditors, editCell, fileKeyFor, getTestApi, openInViewer, renderCount, sleep, waitFor, waitForRender, waitForSaveState } from "../helpers";
 
 const VIEW_TYPE = "csvViewer.table";
 
@@ -76,6 +76,25 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     assert.ok(allB.every((r) => JSON.stringify(r.headers) === JSON.stringify(["sku", "qty"])));
   });
 
+  test("opening the same file in a second column moves the one viewer: still a single panel, edits kept", async () => {
+    const uri = fixture("sidebyside.csv");
+    await openInViewer(uri);
+    const api = await getTestApi();
+    const key = fileKeyFor(uri);
+    await waitForRender(api, key);
+    assert.strictEqual(api.panelCount(), 1);
+    await editCell(api, key, 0, 1, "moved", 1);
+
+    await vscode.commands.executeCommand("vscode.openWith", uri, VIEW_TYPE, vscode.ViewColumn.Two);
+    await sleep(500);
+    assert.strictEqual(api.panelCount(), 1, "supportsMultipleEditorsPerDocument: false should move the editor, not open a second one");
+    assert.strictEqual(api.getDocument(key)?.editCount, 1, "the document and its edits should survive the move");
+
+    // A dirty tab would raise a native dialog on close.
+    await vscode.commands.executeCommand("workbench.action.files.revert");
+    await waitFor(() => api.getDocument(key)?.editCount === 0, { message: "revert never cleared the edits" });
+  });
+
   test("delimiter state is keyed per file, not shared, verified through the real webview via a synthetic load", async () => {
     const uriA = fixture("fileA.csv");
     const uriB = fixture("fileB.csv");
@@ -104,6 +123,9 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
       defaultDelimiter: "",
       hintsSeen: [],
       testHooks: true,
+      baseVersion: 1,
+      editable: true,
+      pendingEdits: [],
     });
     assert.ok(posted, "postToWebview found no live panel for fileA");
 

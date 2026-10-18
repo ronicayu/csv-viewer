@@ -109,5 +109,9 @@ suite("Opening", () => {
     const api = await getTestApi();
     const render = await waitForRender(api, fileKeyFor(uri));
     assert.strictEqual(render.rowCount, 2);
+    const load = api.getOutgoing(fileKeyFor(uri)).find((m) => m.type === "load");
+    assert.ok(load && load.type === "load");
+    assert.strictEqual(load.editable, false);
+    assert.strictEqual(load.readOnlyReason, "encoding");
   });
 });

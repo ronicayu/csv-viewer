@@ -39,6 +39,29 @@ suite("Live reload", () => {
     assert.strictEqual(renderCount(api, key), 1, "expected exactly one render after opening an unchanged file");
   });
 
+  test("a clean document reloads on a disk change, bumping its base version, exactly as before editing existed", async () => {
+    const filePath = path.join(await freshDir("live-clean-dir"), "live-clean.csv");
+    await fsp.writeFile(filePath, "id,val\n1,a\n");
+    const uri = vscode.Uri.file(filePath);
+    await openInViewer(uri);
+    const api = await getTestApi();
+    const key = fileKeyFor(uri);
+    await waitForRender(api, key);
+    assert.strictEqual(api.getDocument(key)?.dirty, false);
+    const baseBefore = api.getDocument(key)!.baseVersion;
+
+    await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n");
+    await waitFor(
+      () => {
+        const renders = api.getMessages(key).filter((m) => m.type === "rendered") as { rowCount: number }[];
+        return renders[renders.length - 1]?.rowCount === 2;
+      },
+      { timeoutMs: 8000, message: "a clean document never reloaded" },
+    );
+    assert.ok(api.getDocument(key)!.baseVersion > baseBefore);
+    assert.ok(!api.getOutgoing(key).some((m) => m.type === "fileChangedOnDisk"), "a clean document must not raise the changed-on-disk banner");
+  });
+
   test("an atomic save (delete, then recreate) reloads without a 'deleted' warning", async () => {
     const filePath = path.join(await freshDir("live-atomic-dir"), "live-atomic.csv");
     await fsp.writeFile(filePath, "id,val\n1,a\n");

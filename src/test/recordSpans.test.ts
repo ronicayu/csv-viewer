@@ -64,6 +64,11 @@ describe("splitRecords: line endings and gaps", () => {
     expect(split("\n\n\r\n")).toEqual([]);
   });
 
+  it("splits a header-only file into its one record, with and without a final newline", () => {
+    expect(split("a,b,c")).toEqual([{ start: 0, end: 5, eol: "", fieldCount: 3 }]);
+    expect(split("a,b,c\n")).toEqual([{ start: 0, end: 5, eol: "\n", fieldCount: 3 }]);
+  });
+
   it("counts physical fields for short and long rows and a trailing delimiter", () => {
     expect(split("a,b,c\n1\n1,2,3,4,5\n1,").map((s) => s.fieldCount)).toEqual([3, 1, 5, 2]);
   });
