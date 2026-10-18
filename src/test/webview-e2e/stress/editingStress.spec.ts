@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { bootAndLoad, bootAndLoadText, bootShell, defaultViewState, postFromHost } from "../harness";
+import { splitRecords } from "../../../core/recordSpans";
+import { posted } from "../harness";
 import { toCsvText, trackConsoleErrors } from "./stressHelpers";
 
 const STRICT = process.env.PERF_TESTS === "1";
@@ -160,3 +162,32 @@ test("500 edits on one page keep the page re-render within the scale spec's page
   console.log(`[stress] paging away and back over 500 edited rows: ${ms}ms`);
   expect(ms).toBeLessThan(PAGE_BOUND_MS);
 });
+
+for (const waitMs of [0, 1_500]) {
+  test(`a file past the synchronous span limit edits correctly (${waitMs === 0 ? "while the background span pass may still be running" : "after it has finished"})`, async ({ page }) => {
+    test.setTimeout(60_000);
+    const lines = ["id,name,city"];
+    for (let i = 0; i < 300_000; i++) lines.push(`${i},person ${i},"city, ${i % 97}"`);
+    const text = lines.join("\n") + "\n";
+    expect(text.length).toBeGreaterThan(8 * 1024 * 1024);
+    await bootAndLoadText(page, {
+      fileKey: "file:///big-spans.csv",
+      text,
+      state: defaultViewState({ pageSize: 25 }),
+      defaultTableColumns: 3,
+      hintsSeen: ["rowDetails"],
+    });
+    await page.waitForTimeout(waitMs);
+    await cell(page, 3, 1).dblclick();
+    await page.keyboard.type("early edit");
+    await page.keyboard.press("Enter");
+    await expect(cell(page, 3, 1)).toHaveClass(/edited-cell/);
+
+    const edits = (await posted(page)).filter((m) => m.type === "edit") as unknown as Array<{ change: { record: { charStart: number; charEnd: number; originalText: string } } }>;
+    expect(edits).toHaveLength(1);
+    const span = splitRecords(text, { delimiter: ",", quotes: true })[4];
+    expect(edits[0].change.record.charStart).toBe(span.start);
+    expect(edits[0].change.record.charEnd).toBe(span.end);
+    expect(edits[0].change.record.originalText).toBe('3,person 3,"city, 3"');
+  });
+}

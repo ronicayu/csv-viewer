@@ -44,8 +44,10 @@ export type WorkerResponse =
       totalRows: number;
       columnProfiles: ColumnProfile[];
       quoting: boolean;
-      spansOk: boolean;
+      // Absent for a large file whose span pass is still running; `spansReady` follows.
+      spansOk?: boolean;
     }
+  | { type: "spansReady"; requestId: number; spansOk: boolean }
   | { type: "queryStarted"; requestId: number }
   | { type: "filterDone"; requestId: number }
   | { type: "queryResult"; requestId: number; filteredCount: number }

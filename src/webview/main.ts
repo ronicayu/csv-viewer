@@ -744,6 +744,9 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
     case "distinctResult":
       onDistinctResult(msg);
       break;
+    case "spansReady":
+      onSpansReady(msg);
+      break;
     case "editResult":
       onEditResult(msg);
       break;
@@ -769,7 +772,7 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   state.quoteProblems = msg.quoteProblems;
   state.totalRows = msg.totalRows;
   state.quoting = msg.quoting;
-  state.spansOk = msg.spansOk;
+  state.spansOk = msg.spansOk !== false;
   if (pendingInitIsFreshParse) state.quoteBannerDismissed = false;
 
   const previousVisibility = state.view.columnVisibility;
@@ -3016,7 +3019,9 @@ async function onApplyEdits(msg: ApplyEditsMessage): Promise<void> {
   for (const rowId of rowIds) refreshRow(rowId);
   const first = msg.cells[0];
   if (first) {
-    const verb = msg.kind === "redo" ? "Redone" : "Undone";
+    // Without the host's hint, a value back at its baseline reads as an undo.
+    const redone = msg.kind ? msg.kind === "redo" : first.value !== first.original;
+    const verb = redone ? "Redone" : "Undone";
     announce(`${verb}: ${state.headers[first.columnIndex]}, row ${first.rowId + 1}`);
   }
 }
@@ -3047,6 +3052,13 @@ async function onFlushEdits(msg: FlushEditsMessage): Promise<void> {
   commitOpenEditor();
   await editsSettled();
   vscode.postMessage({ type: "flushed", baseVersion: msg.baseVersion });
+}
+
+function onSpansReady(msg: Extract<WorkerResponse, { type: "spansReady" }>): void {
+  if (!state || msg.requestId !== pendingInitRequestId || msg.spansOk) return;
+  state.spansOk = false;
+  cancelOpenEditor();
+  renderTableBody();
 }
 
 function onSetEditable(msg: SetEditableMessage): void {
@@ -3403,6 +3415,7 @@ function cancelField(editor: FieldEditor, after: AfterFieldEdit): void {
   refreshRow(editor.rowId);
   if (after === "field") focusFieldEditButton(editor.rowId, editor.columnIndex);
 }
+
 // Rebuilds the row and its details in place. While an editor is open in the row only the other cells are repainted, so the editor survives.
 function refreshRow(rowId: number): void {
   if (!state) return;

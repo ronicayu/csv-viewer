@@ -633,6 +633,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     if (document.isDeleted) document.send({ type: "fileDeleted", name: document.name });
     if (document.changedOnDisk) document.send({ type: "fileChangedOnDisk", name: document.name });
   }
+
   // Re-reads a clean document when the file differs from what it holds; true if the bytes were replaced.
   private async syncFromDisk(document: CsvDocument): Promise<boolean> {
     let stat: vscode.FileStat;
@@ -1037,6 +1038,7 @@ async function openAsText(context: vscode.ExtensionContext, document: CsvDocumen
     notify("warning", "Save or revert your edits before opening as text.");
     return;
   }
+
   // Using "Open as Text" shows the user knows the viewer exists, so stop suggesting it.
   void context.globalState.update(SUGGEST_DONE_KEY, true);
   await vscode.commands.executeCommand("vscode.openWith", document.uri, "default");

@@ -55,21 +55,33 @@ function isTrimBlank(c: number): boolean {
   );
 }
 
-// Reproduces Papa's record boundaries only, never field values.
+function indexOrEnd(text: string, needle: string, from: number, end: number): number {
+  const at = text.indexOf(needle, from);
+  return at === -1 ? end : at;
+}
+
+// Reproduces Papa's record boundaries only, never field values. Scans from `from` (a record boundary) for at most
+// `maxRecords` records and returns where to resume; text.length means done.
 export function scanRecords(
   text: string,
   options: SplitOptions,
   emit: (start: number, end: number, eol: number, fieldCount: number) => void,
-): void {
+  from = 0,
+  maxRecords = Infinity,
+): number {
   const n = text.length;
   const delimiter = options.delimiter === "" ? "," : options.delimiter;
   const quotes = options.quotes;
   const dl = delimiter.length;
   const d0 = delimiter.charCodeAt(0);
 
-  let pos = n > 0 && text.charCodeAt(0) === 0xfeff ? 1 : 0;
+  let pos = from > 0 ? from : n > 0 && text.charCodeAt(0) === 0xfeff ? 1 : 0;
+  let nextDelim = -1;
+  let nextLF = -1;
+  let nextCR = -1;
+  let scanned = 0;
 
-  while (pos < n) {
+  while (pos < n && scanned++ < maxRecords) {
     const start = pos;
     let fieldCount = 0;
     let singleFieldEmpty = false;
@@ -135,40 +147,34 @@ export function scanRecords(
         }
       }
 
-      let i = pos;
-      let c = 0;
-      if (dl === 1) {
-        for (; i < n; i++) {
-          c = text.charCodeAt(i);
-          if (c === d0 || c === LF || c === CR) break;
-        }
+      // Cached positions of the next delimiter and terminators at or after `pos`; recomputed only once passed, so each is found once.
+      if (nextDelim < pos) nextDelim = indexOrEnd(text, delimiter, pos, n);
+      if (nextLF < pos) nextLF = indexOrEnd(text, "\n", pos, n);
+      if (nextCR < pos) nextCR = indexOrEnd(text, "\r", pos, n);
+      const terminator = nextLF < nextCR ? nextLF : nextCR;
+      singleFieldEmpty = (nextDelim < terminator ? nextDelim : terminator) === pos;
+
+      if (nextDelim < terminator) {
+        pos = nextDelim + dl;
+        continue fields;
+      }
+      if (terminator >= n) break fields;
+      end = terminator;
+      if (terminator === nextCR && text.charCodeAt(terminator + 1) === LF) {
+        eol = EOL_CRLF;
+        next = terminator + 2;
       } else {
-        for (; i < n; i++) {
-          c = text.charCodeAt(i);
-          if (c === LF || c === CR) break;
-          if (c === d0 && text.startsWith(delimiter, i)) break;
-        }
+        eol = terminator === nextCR ? EOL_CR : EOL_LF;
+        next = terminator + 1;
       }
-      singleFieldEmpty = i === pos;
-      if (i >= n) break fields;
-      if (c === LF || c === CR) {
-        end = i;
-        if (c === CR && text.charCodeAt(i + 1) === LF) {
-          eol = EOL_CRLF;
-          next = i + 2;
-        } else {
-          eol = c === CR ? EOL_CR : EOL_LF;
-          next = i + 1;
-        }
-        break fields;
-      }
-      pos = i + dl;
+      break fields;
     }
 
     // Papa's skipEmptyLines: a record that is one empty field is not a row.
     if (!(fieldCount === 1 && singleFieldEmpty)) emit(start, end, eol, fieldCount);
     pos = next;
   }
+  return pos;
 }
 
 export function splitRecords(text: string, options: SplitOptions): RecordSpan[] {
@@ -179,41 +185,52 @@ export function splitRecords(text: string, options: SplitOptions): RecordSpan[] 
   return spans;
 }
 
-export function splitRecordsToTable(text: string, options: SplitOptions): SpanTable {
-  let capacity = 1024;
-  let start = new Uint32Array(capacity);
-  let end = new Uint32Array(capacity);
-  let fieldCount = new Uint32Array(capacity);
-  let eol = new Uint8Array(capacity);
-  let length = 0;
+// Accumulates scan results into typed arrays; usable across several scanRecords calls.
+export class SpanTableBuilder {
+  private capacity = 1024;
+  private start = new Uint32Array(this.capacity);
+  private end = new Uint32Array(this.capacity);
+  private fieldCount = new Uint32Array(this.capacity);
+  private eol = new Uint8Array(this.capacity);
+  private length = 0;
 
-  scanRecords(text, options, (s, e, k, f) => {
-    if (length === capacity) {
-      capacity *= 2;
-      const grow = <T extends Uint32Array | Uint8Array>(a: T): T => {
-        const bigger = new (a.constructor as new (n: number) => T)(capacity);
-        bigger.set(a);
-        return bigger;
-      };
-      start = grow(start);
-      end = grow(end);
-      fieldCount = grow(fieldCount);
-      eol = grow(eol);
-    }
-    start[length] = s;
-    end[length] = e;
-    fieldCount[length] = f;
-    eol[length] = k;
-    length++;
-  });
-
-  return {
-    length,
-    start: start.slice(0, length),
-    end: end.slice(0, length),
-    fieldCount: fieldCount.slice(0, length),
-    eol: eol.slice(0, length),
+  readonly push = (s: number, e: number, k: number, f: number): void => {
+    if (this.length === this.capacity) this.grow();
+    this.start[this.length] = s;
+    this.end[this.length] = e;
+    this.fieldCount[this.length] = f;
+    this.eol[this.length] = k;
+    this.length++;
   };
+
+  private grow(): void {
+    this.capacity *= 2;
+    const bigger = <T extends Uint32Array | Uint8Array>(a: T): T => {
+      const copy = new (a.constructor as new (n: number) => T)(this.capacity);
+      copy.set(a);
+      return copy;
+    };
+    this.start = bigger(this.start);
+    this.end = bigger(this.end);
+    this.fieldCount = bigger(this.fieldCount);
+    this.eol = bigger(this.eol);
+  }
+
+  finish(): SpanTable {
+    return {
+      length: this.length,
+      start: this.start.slice(0, this.length),
+      end: this.end.slice(0, this.length),
+      fieldCount: this.fieldCount.slice(0, this.length),
+      eol: this.eol.slice(0, this.length),
+    };
+  }
+}
+
+export function splitRecordsToTable(text: string, options: SplitOptions): SpanTable {
+  const builder = new SpanTableBuilder();
+  scanRecords(text, options, builder.push);
+  return builder.finish();
 }
 
 export function spansFromTable(table: SpanTable): RecordSpan[] {
@@ -226,6 +243,12 @@ export function spansFromTable(table: SpanTable): RecordSpan[] {
 
 // UTF-8 offsets for each span, in one pass; exact for valid UTF-8, which editable files are.
 export function addByteOffsets(table: SpanTable, text: string): void {
+  // Character and byte offsets coincide in ASCII, and checking that is several times cheaper than measuring every span.
+  if (!/[^\x00-\x7f]/.test(text)) {
+    table.byteStart = table.start;
+    table.byteEnd = table.end;
+    return;
+  }
   const byteStart = new Uint32Array(table.length);
   const byteEnd = new Uint32Array(table.length);
   let charPos = 0;

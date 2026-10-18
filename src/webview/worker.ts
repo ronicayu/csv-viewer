@@ -6,7 +6,7 @@ import { distinctValues, type DistinctResult } from "../core/distinct";
 import { applyFilters } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
-import { EOL_TEXT, addByteOffsets, splitRecordsToTable, type SpanTable } from "../core/recordSpans";
+import { EOL_TEXT, SpanTableBuilder, addByteOffsets, scanRecords, splitRecordsToTable, type SpanTable } from "../core/recordSpans";
 import type { CellChange, FilterRule, SortDirection, SortKey } from "../core/types";
 import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./workerProtocol";
 
@@ -28,6 +28,20 @@ let headerOffset = 0;
 // Baseline value of every cell that differs from the file; an entry is dropped when the cell returns to it.
 let originals = new Map<number, Map<number, string>>();
 
+// Past this size the span pass would hold up the first render, so it runs in slices after the initial queries and edits finish it on demand.
+const SYNC_SPANS_MAX_CHARS = 8 * 1024 * 1024;
+const SPAN_SLICE_MS = 8;
+const SPAN_SLICE_RECORDS = 1024;
+
+interface SpanJob {
+  requestId: number;
+  builder: SpanTableBuilder;
+  pos: number;
+  expectedRecords: number;
+}
+
+let spanJob: SpanJob | null = null;
+
 function post(message: WorkerResponse): void {
   (self as unknown as Worker).postMessage(message);
 }
@@ -39,12 +53,18 @@ function onInit(requestId: number, source: string, options: { delimiter?: string
   quoting = parsed.quoting;
   originals = new Map();
   headerOffset = options.firstRowIsHeader && parsed.headers.length > 0 ? 1 : 0;
-  spans = splitRecordsToTable(source, { delimiter, quotes: quoting });
-  addByteOffsets(spans, source);
-  spansOk = spans.length === parsed.rows.length + headerOffset;
-  if (!spansOk) {
-    // eslint-disable-next-line no-console
-    console.error(`csv-viewer: record splitter found ${spans.length} records but the parser found ${parsed.rows.length + headerOffset}; editing is disabled`);
+  spans = null;
+  spansOk = false;
+  spanJob = null;
+  const expectedRecords = parsed.rows.length + headerOffset;
+  if (source.length <= SYNC_SPANS_MAX_CHARS) {
+    spans = splitRecordsToTable(source, { delimiter, quotes: quoting });
+    spansOk = spans.length === expectedRecords;
+    if (!spansOk) reportSpanMismatch(spans.length, expectedRecords);
+  } else {
+    const job: SpanJob = { requestId, builder: new SpanTableBuilder(), pos: 0, expectedRecords };
+    spanJob = job;
+    setTimeout(() => stepSpanJob(job), 0);
   }
   headers = parsed.headers;
   rawRows = parsed.rows;
@@ -63,8 +83,41 @@ function onInit(requestId: number, source: string, options: { delimiter?: string
     totalRows: rawRows.length,
     columnProfiles: profileColumns(headers, rawRows),
     quoting,
-    spansOk,
+    spansOk: spanJob ? undefined : spansOk,
   });
+}
+
+function reportSpanMismatch(found: number, expected: number): void {
+  // eslint-disable-next-line no-console
+  console.error(`csv-viewer: record splitter found ${found} records but the parser found ${expected}; editing is disabled`);
+}
+
+function finishSpanJob(job: SpanJob): void {
+  spans = job.builder.finish();
+  spansOk = spans.length === job.expectedRecords;
+  spanJob = null;
+  if (!spansOk) reportSpanMismatch(spans.length, job.expectedRecords);
+  post({ type: "spansReady", requestId: job.requestId, spansOk });
+}
+
+function stepSpanJob(job: SpanJob): void {
+  if (spanJob !== job) return;
+  const deadline = performance.now() + SPAN_SLICE_MS;
+  do {
+    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos, SPAN_SLICE_RECORDS);
+  } while (job.pos < text.length && performance.now() < deadline);
+  if (job.pos < text.length) setTimeout(() => stepSpanJob(job), 0);
+  else finishSpanJob(job);
+}
+
+// Anything that needs the spans before the background pass is done finishes it in one go.
+function ensureSpans(withBytes: boolean): void {
+  const job = spanJob;
+  if (job) {
+    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos);
+    finishSpanJob(job);
+  }
+  if (withBytes && spans && !spans.byteStart) addByteOffsets(spans, text);
 }
 
 function getColumnSortKeys(columnIndex: number, columnName: string): ResolvedCellSortKey[] {
@@ -182,6 +235,7 @@ function rejectionReason(rowId: number, columnIndex: number, value: string): str
 }
 
 function onEditCell(requestId: number, rowId: number, columnIndex: number, value: string): void {
+  ensureSpans(true);
   const row = rawRows[rowId];
   if (!row || columnIndex < 0 || columnIndex >= headers.length) {
     post({ type: "editResult", requestId, ok: false, reason: "no such cell" });
@@ -227,6 +281,7 @@ function onEditCell(requestId: number, rowId: number, columnIndex: number, value
 }
 
 function onSetCells(requestId: number, cells: CellValue[], verify: RowBaseline[] | undefined): void {
+  if (verify) ensureSpans(false);
   const rejected = new Set<number>();
   for (const check of verify ?? []) {
     const recordIndex = check.rowId + headerOffset;
@@ -245,6 +300,7 @@ function onSetCells(requestId: number, cells: CellValue[], verify: RowBaseline[]
 
 // Brings the span tables and the retained text in line with the file the host just wrote.
 function onRebase(requestId: number): void {
+  ensureSpans(true);
   const edited: EditedRecord[] = [];
   if (spans) {
     for (const rowId of [...originals.keys()].sort((a, b) => a - b)) {

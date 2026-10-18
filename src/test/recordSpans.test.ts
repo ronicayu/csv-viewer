@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { effectiveQuoting, parseCsv } from "../core/csvParse";
-import { splitRecords, splitRecordsToTable, spansFromTable, addByteOffsets, type RecordSpan, type SplitOptions } from "../core/recordSpans";
+import { SpanTableBuilder, scanRecords, splitRecords, splitRecordsToTable, spansFromTable, addByteOffsets, type RecordSpan, type SplitOptions } from "../core/recordSpans";
 
 function split(text: string, delimiter = ",", quotes = true): RecordSpan[] {
   return splitRecords(text, { delimiter, quotes });
@@ -150,6 +150,14 @@ describe("span tables", () => {
     expect(table.byteStart![0]).toBe(3);
   });
 
+  it("byte offsets equal character offsets for ASCII text", () => {
+    const text = "a,b\r\n1,2\n";
+    const table = splitRecordsToTable(text, { delimiter: ",", quotes: true });
+    addByteOffsets(table, text);
+    expect(Array.from(table.byteStart!)).toEqual(Array.from(table.start));
+    expect(Array.from(table.byteEnd!)).toEqual(Array.from(table.end));
+  });
+
   it("grows past its initial capacity", () => {
     const text = "x\n".repeat(5000);
     const table = splitRecordsToTable(text, { delimiter: ",", quotes: true });
@@ -166,6 +174,24 @@ const optionsArb = fc.record({
   delimiter: fc.constantFrom("", ",", ";", "|", "\t", "||", ";;"),
   quotes: fc.boolean(),
   firstRowIsHeader: fc.boolean(),
+});
+
+describe("scanRecords can be resumed", () => {
+  it("scanning in slices of any size finds the same records as one pass (property)", () => {
+    fc.assert(
+      fc.property(textArb, optionsArb, fc.integer({ min: 1, max: 4 }), (text, opts, slice) => {
+        const parsed = parseCsv(text, opts);
+        const options: SplitOptions = { delimiter: parsed.delimiter, quotes: parsed.quoting };
+        const builder = new SpanTableBuilder();
+        let pos = 0;
+        do {
+          pos = scanRecords(text, options, builder.push, pos, slice);
+        } while (pos < text.length);
+        expect(spansFromTable(builder.finish())).toEqual(splitRecords(text, options));
+      }),
+      { numRuns: 3000 },
+    );
+  });
 });
 
 describe("splitRecords agrees with Papa (property tests)", () => {
