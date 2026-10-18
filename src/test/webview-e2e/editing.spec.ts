@@ -306,7 +306,7 @@ test.describe("inline editing", () => {
     await page.keyboard.press("Control+a");
     await page.keyboard.press("Delete");
     await page.keyboard.press("Enter");
-    await expect(page.locator("#edit-error-text")).toHaveText("Couldn't edit row 1: an empty value would remove this row from a one-column file.");
+    await expect(page.locator("#edit-error-text")).toHaveText("Couldn't edit row 1: an empty value would leave this row empty, which removes it from the file.");
     await expect(cell(page, 0, 0)).toHaveText("alpha");
     await expect(cell(page, 0, 0)).not.toHaveClass(/edited-cell/);
   });

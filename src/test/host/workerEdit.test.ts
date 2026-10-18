@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { applyTextPatches, fieldsForWrite, spliceBytes } from "../../core/csvEdit";
+import { applyTextPatches, recordFieldsForWrite, spliceBytes } from "../../core/csvEdit";
 import { parseCsv } from "../../core/csvParse";
 import { splitRecords } from "../../core/recordSpans";
 import { utf8Length } from "../../core/csvSerialize";
@@ -45,6 +45,7 @@ describe("worker edit pipeline (property)", () => {
           const before = parseCsv(text, options);
           const expected = before.rows.map((r) => r.slice());
           const written = new Map<number, string[]>();
+          const originals = new Map<number, string[]>();
           const touched = new Set<number>();
           let format: { delimiter: string; quoting: boolean } | undefined;
           for (const [pick, column, value] of picks) {
@@ -55,6 +56,7 @@ describe("worker edit pipeline (property)", () => {
             accepted++;
             const change = result.change;
             format = change.format;
+            originals.set(change.recordIndex, change.record.originalFields);
             const record = written.get(change.recordIndex) ?? change.record.originalFields.slice();
             while (record.length <= columnIndex) record.push("");
             record[columnIndex] = value;
@@ -68,7 +70,7 @@ describe("worker edit pipeline (property)", () => {
           const table = splitRecords(text, { delimiter: before.delimiter, quotes: before.quoting });
           const records = [...touched]
             .sort((a, b) => a - b)
-            .map((index) => ({ index, fields: fieldsForWrite(written.get(index)!, table[index].fieldCount) }));
+            .map((index) => ({ index, fields: recordFieldsForWrite(originals.get(index)!, written.get(index)!, table[index].fieldCount, before.headers.length) }));
           const byteStart = (i: number) => utf8Length(text, 0, table[i].start);
           const byteEnd = (i: number) => utf8Length(text, 0, table[i].end);
           const out = dec.decode(
@@ -106,11 +108,15 @@ describe("worker edit refusals", () => {
     const text = "a,b,c\nq,,x\nz,z,z\n";
     workerReply({ type: "init", text, options: { firstRowIsHeader: true, quotes: true }, floors: [{ recordIndex: 1, floor: 1 }] }, "initResult");
     expect(edit(0, 2, "")).toMatchObject({ ok: true });
-    expect(edit(0, 0, "")).toMatchObject({ ok: false });
-    // without it the worker would take the saved field count as the floor and accept this
+    expect(edit(0, 0, "")).toMatchObject({ ok: true });
+    // what the worker would write for the record if the host said nothing: two empty fields, not three
+    const rebased = workerReply({ type: "rebase" }, "rebased");
+    expect(applyTextPatches(text, rebased.patches)).toBe("a,b,c\n,\nz,z,z\n");
+    // without the floor the worker takes the saved field count (3) as the floor
     init(text);
     expect(edit(0, 2, "")).toMatchObject({ ok: true });
     expect(edit(0, 0, "")).toMatchObject({ ok: true });
+    expect(applyTextPatches(text, workerReply({ type: "rebase" }, "rebased").patches)).toBe("a,b,c\n,,\nz,z,z\n");
   });
 
   it("quotes off: a NUL cannot be added or removed, because that is what turns quoting back on", async () => {
@@ -125,10 +131,13 @@ describe("worker edit refusals", () => {
     expect(edit(0, 0, "ok")).toMatchObject({ ok: true });
   });
 
-  it("an empty value in a one-column file would drop the row, so it is refused", async () => {
+  it("an empty value in a one-column file would drop the row, so it is refused; in a wider file the row stays, as two empty fields", async () => {
     await worker();
     init("name\nalpha\nbeta\n");
-    expect(edit(0, 0, "")).toMatchObject({ ok: false });
+    expect(edit(0, 0, "")).toMatchObject({ ok: false, reason: "an empty value would leave this row empty, which removes it from the file" });
+    init("a,b,c\nq\nz,z,z\n");
+    expect(edit(0, 0, "")).toMatchObject({ ok: true });
+    expect(applyTextPatches("a,b,c\nq\nz,z,z\n", workerReply({ type: "rebase" }, "rebased").patches)).toBe("a,b,c\n,\nz,z,z\n");
   });
 
   it("with quoting off a value with the separator is refused", async () => {

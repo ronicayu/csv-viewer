@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseCsv } from "../../core/csvParse";
 import * as fake from "./fakeVscode";
 import { callWorker, openSession, Session, tick, workerReply } from "./harness";
 
@@ -222,7 +223,7 @@ describe("format", () => {
     s.send({
       type: "edit",
       baseVersion: 1,
-      change: { rowId: 0, recordIndex: 1, columnIndex: 0, column: "n", oldValue: "caf�", newValue: "x", record: { charStart: 2, charEnd: 7, byteStart: 2, byteEnd: 7, eol: "\n", fieldCount: 1, originalText: "caf�", originalFields: ["caf�"] }, format: { delimiter: ",", quoting: true } },
+      change: { rowId: 0, recordIndex: 1, columnIndex: 0, column: "n", oldValue: "caf�", newValue: "x", record: { charStart: 2, charEnd: 7, byteStart: 2, byteEnd: 7, eol: "\n", fieldCount: 1, originalText: "caf�", originalFields: ["caf�"], columns: 1 }, format: { delimiter: ",", quoting: true } },
     });
     expect(s.dirty).toBe(false);
     expect(s.of("load").length).toBe(loads + 1);
@@ -246,6 +247,17 @@ describe("backup and restore", () => {
     expect(restored.dirty).toBe(true);
     await restored.save();
     expect(text("/h/k1.csv")).toBe("id,name\n1,Alicia\n2,Robert\n");
+  });
+
+  it("a short row emptied in a wide file survives a backup round trip as `,`", async () => {
+    const s = await openSession("/h/k0.csv", "a,b,c\nq\nz,z,z\n");
+    s.edit(0, 0, "");
+    const id = await s.host.api.backupDocument(s.key, fake.Uri.file("/backups/k0.json"));
+    s.dispose();
+    const restored = await openSession("/h/k0.csv", "", { backupId: id, existing: true });
+    expect(restored.dirty).toBe(true);
+    await restored.save();
+    expect(text("/h/k0.csv")).toBe("a,b,c\n,\nz,z,z\n");
   });
 
   it("drops the edits with one warning when the file changed", async () => {
@@ -448,7 +460,7 @@ describe("the rest of the provider", () => {
 });
 
 describe("one owner for a record's floor", () => {
-  it("survives a webview reload: blanking a once-padded row cannot delete it from the file", async () => {
+  it("survives a webview reload: emptying a once-padded row keeps it as a row of empty fields", async () => {
     const s = await openSession("/h/floor.csv", "a,b,c\nq\nz,z,z\n");
     s.edit(0, 2, "x");
     await s.save();
@@ -457,10 +469,34 @@ describe("one owner for a record's floor", () => {
     await s.ready();
     expect(s.of("load").at(-1).recordFloors).toEqual([{ recordIndex: 1, floor: 1 }]);
     s.edit(0, 2, "");
-    // The worker knows the record may shrink back to one field, so emptying it too is refused instead of written as a blank line.
-    expect(s.tryEdit(0, 0, "")).toMatchObject({ ok: false });
+    // One empty field would be a blank line and the row would be gone on reopening, so the row is written as two.
+    expect(s.tryEdit(0, 0, "")).toMatchObject({ ok: true });
     await s.save();
-    expect(text("/h/floor.csv")).toBe("a,b,c\nq\nz,z,z\n");
+    expect(text("/h/floor.csv")).toBe("a,b,c\n,\nz,z,z\n");
+    expect(parseCsv(text("/h/floor.csv")).rows).toEqual([["", "", ""], ["z", "z", "z"]]);
+    expect(s.text).toBe(text("/h/floor.csv"));
+    expect(workerReply({ type: "page", page: 1, pageSize: 10 }, "pageResult").rows[0].cells).toEqual(["", "", ""]);
+  });
+
+  it("a short row emptied in a wide file is written as `,` and undoing it writes the original bytes back", async () => {
+    const s = await openSession("/h/short.csv", "a,b,c\nq\nz,z,z\n");
+    s.edit(0, 0, "");
+    await s.save();
+    expect(text("/h/short.csv")).toBe("a,b,c\n,\nz,z,z\n");
+    s.undo();
+    expect(s.dirty).toBe(true);
+    await s.save();
+    expect(text("/h/short.csv")).toBe("a,b,c\nq\nz,z,z\n");
+
+    // before any save, undo is simply clean
+    s.edit(0, 0, "");
+    s.undo();
+    expect(s.dirty).toBe(false);
+  });
+
+  it("a one-column file's row still cannot be emptied, and the worker says why", async () => {
+    const s = await openSession("/h/onecol.csv", "n\nq\nz\n");
+    expect(s.tryEdit(0, 0, "")).toMatchObject({ ok: false, reason: "an empty value would leave this row empty, which removes it from the file" });
   });
 
   it("is also handed back after a hot-exit style restore and a worker re-init", async () => {
@@ -477,16 +513,18 @@ describe("one owner for a record's floor", () => {
     expect(text("/h/floor2.csv")).toBe("a,b,c\nq\nz,z,z\n");
   });
 
-  it("the host never writes a record that would be one empty field, whatever the webview says", async () => {
-    const s = await openSession("/h/vanish.csv", "a,b,c\nq\nz,z,z\n");
+  it("the host never writes a record that would be one empty field, whatever the webview says, and the user is told", async () => {
+    const s = await openSession("/h/vanish.csv", "n\nq\nz\n");
     const change = s.edit(0, 0, "w");
     s.undo();
     const loads = s.of("load").length;
     s.send({ type: "edit", baseVersion: s.baseVersion, change: { ...change, newValue: "" } } as any);
     expect(s.of("load").length).toBe(loads + 1);
+    expect(s.of("editRefused")).toHaveLength(1);
+    expect(s.messages.at(-1)).toMatchObject({ type: "editRefused" });
     expect(s.host.api.getDocument(s.key)).toMatchObject({ dirty: false, editCount: 0 });
     await s.save();
-    expect(text("/h/vanish.csv")).toBe("a,b,c\nq\nz,z,z\n");
+    expect(text("/h/vanish.csv")).toBe("n\nq\nz\n");
   });
 });
 

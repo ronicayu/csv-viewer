@@ -209,13 +209,40 @@ test.describe("messages that follow a load", () => {
     await expect(cell(page, 0, 1)).not.toHaveClass(/edited-cell/);
   });
 
-  test("the host's record floors reach the worker: a row that was padded and saved cannot be emptied into a blank line", async ({ page }) => {
+  test("the host's record floors reach the worker: a padded and saved row that is emptied is rewritten as two fields, not three", async ({ page }) => {
     await boot(page, "a,b,c\nq,,x\nz,z,z\n", { recordFloors: [{ recordIndex: 1, floor: 1 }] });
     await edit(page, 0, 2, "");
-    await cell(page, 0, 0).dblclick();
-    await page.locator("input.cell-editor").fill("");
-    await page.keyboard.press("Enter");
+    await edit(page, 0, 0, "");
+    await clearPosted(page);
+    // No account from the host, so the worker rebases from its own idea of what was written.
+    await postFromHost(page, { type: "saved", baseVersion: 2 });
+    await awaitPosted(page, "synced");
+    await edit(page, 0, 1, "m");
+    const edits = (await posted(page)).filter((m) => m.type === "edit") as unknown as Array<{ change: { record: { originalText: string } } }>;
+    expect(edits[0].change.record.originalText).toBe(",");
+  });
+});
+
+test.describe("host messages", () => {
+  test("a refused edit is explained in the edit-error banner", async ({ page }) => {
+    await boot(page, "id,name\n1,Alice\n");
+    await postFromHost(page, { type: "editRefused", message: "that edit would leave the row empty, which removes it from the file" });
     await expect(page.locator("#edit-error-banner")).toBeVisible();
-    await expect(cell(page, 0, 0)).toHaveText("q");
+    await expect(page.locator("#edit-error-text")).toHaveText("Couldn't edit: that edit would leave the row empty, which removes it from the file.");
+  });
+
+  test("a load that fails does not stop the messages queued behind it", async ({ page }) => {
+    await boot(page, "id,name\n1,Alice\n");
+    const errors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+    await page.evaluate(() => {
+      // no `state`: onLoad throws after the queue has handed it the message
+      window.postMessage({ type: "load", fileKey: "file:///broken.csv", text: "a\n1\n", baseVersion: 1 }, "*");
+      window.postMessage({ type: "fileDeleted", name: "races.csv" }, "*");
+    });
+    await expect(page.locator("#file-deleted-banner")).toBeVisible();
+    expect(errors.some((e) => e.includes("a host message failed"))).toBe(true);
   });
 });
