@@ -16,7 +16,7 @@ const init = (text: string, options: { delimiter?: string; firstRowIsHeader?: bo
 const edit = (rowId: number, columnIndex: number, value: string) => workerReply({ type: "editCell", rowId, columnIndex, value }, "editResult");
 
 // Includes characters Papa trims, a BOM, and the NEL that it does not.
-const ALPHABET = ["a", "b", "1", ",", ";", "|", '"', " ", "\n", "\r", "\r\n", "é", "😀", "\t", " ", "　", "﻿", "\u0085"];
+const ALPHABET = ["a", "b", "1", ",", ";", "|", "||", '"', " ", "\n", "\r", "\r\n", "é", "😀", "\t", " ", "　", "﻿", "\u0085"];
 const textArb = fc.array(fc.constantFrom(...ALPHABET), { maxLength: 40 }).map((c) => c.join(""));
 const valueArb = fc
   .array(fc.constantFrom("a", ",", ";", "|", '"', " ", "\n", "é", "😀", "\t", " ", "﻿", "\u0000", ""), { maxLength: 6 })
@@ -86,13 +86,33 @@ describe("worker edit pipeline (property)", () => {
           expect(resplit.length, context).toBe(after.rows.length + (firstRowIsHeader && after.headers.length > 0 ? 1 : 0));
         },
       ),
-      { numRuns: 6000 },
+      { numRuns: 30000 },
     );
     expect(accepted).toBeGreaterThan(500);
   });
 });
 
 describe("worker edit refusals", () => {
+  it("quotes off, multi-character separator: the whole record the host will write is checked, including pending cells to the right", async () => {
+    await worker();
+    init("a||b||c\nq\nr||s||t\n", { delimiter: "||", quotes: false });
+    expect(edit(0, 2, "x")).toMatchObject({ ok: true });
+    expect(edit(0, 0, "a|")).toMatchObject({ ok: false });
+    expect(edit(0, 0, "a")).toMatchObject({ ok: true });
+  });
+
+  it("a floor handed in with init decides how far a record may shrink", async () => {
+    await worker();
+    const text = "a,b,c\nq,,x\nz,z,z\n";
+    workerReply({ type: "init", text, options: { firstRowIsHeader: true, quotes: true }, floors: [{ recordIndex: 1, floor: 1 }] }, "initResult");
+    expect(edit(0, 2, "")).toMatchObject({ ok: true });
+    expect(edit(0, 0, "")).toMatchObject({ ok: false });
+    // without it the worker would take the saved field count as the floor and accept this
+    init(text);
+    expect(edit(0, 2, "")).toMatchObject({ ok: true });
+    expect(edit(0, 0, "")).toMatchObject({ ok: true });
+  });
+
   it("quotes off: a NUL cannot be added or removed, because that is what turns quoting back on", async () => {
     await worker();
     init("a,b\n1,2\n", { quotes: false });

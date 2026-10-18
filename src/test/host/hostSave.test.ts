@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as fake from "./fakeVscode";
-import { callWorker, openSession, tick, workerReply } from "./harness";
+import { callWorker, openSession, Session, tick, workerReply } from "./harness";
 
 const text = (path: string): string => fake.readFileText(path);
 
@@ -444,5 +444,142 @@ describe("the rest of the provider", () => {
     s.edit(0, 2, "x");
     await s.save();
     expect(text("/h/q1.csv")).toBe("a,b,c\n1,,x\n");
+  });
+});
+
+describe("one owner for a record's floor", () => {
+  it("survives a webview reload: blanking a once-padded row cannot delete it from the file", async () => {
+    const s = await openSession("/h/floor.csv", "a,b,c\nq\nz,z,z\n");
+    s.edit(0, 2, "x");
+    await s.save();
+    expect(text("/h/floor.csv")).toBe("a,b,c\nq,,x\nz,z,z\n");
+
+    await s.ready();
+    expect(s.of("load").at(-1).recordFloors).toEqual([{ recordIndex: 1, floor: 1 }]);
+    s.edit(0, 2, "");
+    // The worker knows the record may shrink back to one field, so emptying it too is refused instead of written as a blank line.
+    expect(s.tryEdit(0, 0, "")).toMatchObject({ ok: false });
+    await s.save();
+    expect(text("/h/floor.csv")).toBe("a,b,c\nq\nz,z,z\n");
+  });
+
+  it("is also handed back after a hot-exit style restore and a worker re-init", async () => {
+    const s = await openSession("/h/floor2.csv", "a,b,c\nq\nz,z,z\n");
+    s.edit(0, 2, "x");
+    await s.save();
+    s.edit(0, 0, "w");
+    await s.ready();
+    expect(s.of("load").at(-1)).toMatchObject({ recordFloors: [{ recordIndex: 1, floor: 1 }], pendingEdits: [{ recordIndex: 1, fields: ["w", "", "x"] }] });
+    s.edit(0, 0, "q");
+    s.edit(0, 2, "");
+    expect(s.tryEdit(0, 1, "")).toMatchObject({ ok: true });
+    await s.save();
+    expect(text("/h/floor2.csv")).toBe("a,b,c\nq\nz,z,z\n");
+  });
+
+  it("the host never writes a record that would be one empty field, whatever the webview says", async () => {
+    const s = await openSession("/h/vanish.csv", "a,b,c\nq\nz,z,z\n");
+    const change = s.edit(0, 0, "w");
+    s.undo();
+    const loads = s.of("load").length;
+    s.send({ type: "edit", baseVersion: s.baseVersion, change: { ...change, newValue: "" } } as any);
+    expect(s.of("load").length).toBe(loads + 1);
+    expect(s.host.api.getDocument(s.key)).toMatchObject({ dirty: false, editCount: 0 });
+    await s.save();
+    expect(text("/h/vanish.csv")).toBe("a,b,c\nq\nz,z,z\n");
+  });
+});
+
+describe("validation covers the whole record the host will write", () => {
+  it("quotes off with a multi-character separator: an edit before a pending padded edit is checked against it", async () => {
+    const s = await openSession("/h/qoff.csv", "a||b||c\nq\nr||s||t\n", { delimiter: "||", quotes: false, firstRowIsHeader: true });
+    s.send({ type: "saveState", state: { ...s.of("load")[0].state, delimiter: "||", quotes: false } } as any);
+    s.send({ type: "resync" } as any);
+    s.edit(0, 2, "x");
+    // "a|" followed by the padding separator would read back as "a" and "|x"
+    expect(s.tryEdit(0, 0, "a|")).toMatchObject({ ok: false });
+    expect(s.tryEdit(0, 0, "a")).toMatchObject({ ok: true });
+    await s.save();
+    expect(text("/h/qoff.csv")).toBe("a||b||c\na||||x\nr||s||t\n");
+  });
+});
+
+describe("dirty is re-asserted after the webview confirms a save", () => {
+  it("on `synced` for the new base, with no undo entry", async () => {
+    const s = await openSession("/h/reassert.csv", "h,v\n1,a\n");
+    s.edit(0, 1, "b");
+    const entries = s.stack.length;
+    fake.world.beforeWrite = () => {
+      s.edit(0, 1, "c");
+    };
+    await s.save();
+    fake.world.beforeWrite = undefined;
+    // Nothing yet: the save reply is what clears VS Code's flag, so an event sent before it would be lost.
+    expect(s.contentChanges).toBe(0);
+    await tick(10);
+    expect(s.contentChanges).toBe(1);
+    expect(s.stack.length).toBe(entries + 1);
+    expect(s.dirty).toBe(true);
+  });
+
+  it("after a delay when the webview never answers, and not at all if the document is clean by then", async () => {
+    const s = await openSession("/h/reassert2.csv", "h,v\n1,a\n");
+    s.autoSync = false;
+    s.edit(0, 1, "b");
+    fake.world.beforeWrite = () => {
+      s.edit(0, 1, "c");
+    };
+    await s.save();
+    fake.world.beforeWrite = undefined;
+    await tick(100);
+    expect(s.contentChanges).toBe(0);
+    await tick(600);
+    expect(s.contentChanges).toBe(1);
+
+    const clean = await openSession("/h/reassert3.csv", "h,v\n1,a\n");
+    clean.autoSync = false;
+    clean.edit(0, 1, "b");
+    fake.world.beforeWrite = () => {
+      clean.edit(0, 1, "c");
+    };
+    await clean.save();
+    fake.world.beforeWrite = undefined;
+    clean.undo();
+    expect(clean.dirty).toBe(false);
+    await tick(600);
+    expect(clean.contentChanges).toBe(0);
+  });
+});
+
+describe("pinning the detected separator", () => {
+  it("while the host holds edits is the same tokenization, not a format change", async () => {
+    const s = await openSession("/h/pin.csv", "h,v\n1,a\n2,b\n");
+    s.edit(0, 1, "A");
+    const second = workerReply({ type: "editCell", rowId: 1, columnIndex: 1, value: "B" }, "editResult");
+    const loads = s.of("load").length;
+    s.send({ type: "saveState", state: { ...s.of("load")[0].state, delimiter: "," } } as any);
+    s.send({ type: "edit", baseVersion: s.baseVersion, change: second.change } as any);
+    expect(s.of("load").length).toBe(loads);
+    expect(s.host.api.getDocument(s.key)).toMatchObject({ editCount: 2 });
+    await s.save();
+    expect(text("/h/pin.csv")).toBe("h,v\n1,A\n2,B\n");
+
+    // A real change of separator while dirty is still refused.
+    s.edit(0, 1, "C");
+    s.send({ type: "saveState", state: { ...s.of("load")[0].state, delimiter: ";" } } as any);
+    expect(s.of("load").length).toBe(loads + 1);
+  });
+});
+
+describe("test hooks", () => {
+  it("a moved viewer keeps the hooks: disposing the old panel does not remove the new one's", async () => {
+    const s = await openSession("/h/hooks.csv", "h,v\n1,a\n");
+    const api = s.host.api as any;
+    const replacement = new Session(s.host, s.doc, s.path);
+    await replacement.attach({});
+    s.closePanel();
+    expect(api.postToWebview(s.key, { type: "fileRestored" })).toBe(true);
+    expect(replacement.of("fileRestored")).toHaveLength(1);
+    expect(api.simulateWebviewMessage(s.key, { type: "resync" })).toBe(true);
   });
 });

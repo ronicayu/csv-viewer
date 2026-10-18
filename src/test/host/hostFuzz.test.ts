@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseCsv } from "../../core/csvParse";
 import { splitRecords } from "../../core/recordSpans";
 import * as fake from "./fakeVscode";
-import { openSession } from "./harness";
+import { openSession, workerReply } from "./harness";
 
 // Deterministic, so a failure reproduces.
 let seed = 987654321;
@@ -130,5 +130,73 @@ describe("random edit, undo, redo and save sequences, some with edits landing du
     expect(files).toBeGreaterThan(250);
     expect(edits).toBeGreaterThan(500);
     expect(saves).toBeGreaterThan(300);
+  }, 120000);
+});
+
+describe("padded rows, quotes off, multi-character separators and webview reloads in the middle", () => {
+  it("leave the file equal to the table the webview shows", async () => {
+    let runs = 0;
+    let accepted = 0;
+    let reloads = 0;
+    for (let iteration = 0; iteration < 400; iteration++) {
+      const format = pick([
+        { delimiter: ",", quotes: true },
+        { delimiter: ";", quotes: true },
+        { delimiter: "||", quotes: true },
+        { delimiter: ",", quotes: false },
+        { delimiter: "||", quotes: false },
+      ]);
+      const cell = (): string => pick(["a", "b", "x y", "|", "q|", "1", "é"]);
+      const rows = 1 + int(4);
+      const lines = [["h1", "h2", "h3"].join(format.delimiter)];
+      for (let r = 0; r < rows; r++) lines.push(Array.from({ length: random() < 0.5 ? 1 : 1 + int(3) }, cell).join(format.delimiter));
+      const original = lines.join(pick(["\n", "\r\n"])) + pick(["", "\n"]);
+      const before = parseCsv(original, { delimiter: format.delimiter, quotes: format.quotes });
+      if (before.rows.length !== rows) continue;
+      runs++;
+      const s = await openSession(`/fuzz2/f${iteration}.csv`, original);
+      s.send({ type: "saveState", state: { ...s.of("load")[0].state, delimiter: format.delimiter, quotes: format.quotes } } as any);
+      s.send({ type: "resync" } as any);
+      const log: string[] = [];
+      try {
+        for (let step = 0; step < 16; step++) {
+          const roll = random();
+          if (roll < 0.5) {
+            const row = int(rows);
+            const column = int(3);
+            const value = pick(["", "", "", "v", "|", "w|", "k"]);
+            const result = s.tryEdit(row, column, value);
+            if (result.ok && result.change) accepted++;
+            log.push(`edit(${row},${column},${JSON.stringify(value)})=${result.ok ? "ok" : "refused"}`);
+          } else if (roll < 0.62 && s.pointer > 0) {
+            s.undo();
+            log.push("undo");
+          } else if (roll < 0.7 && s.pointer < s.stack.length) {
+            s.redo();
+            log.push("redo");
+          } else if (roll < 0.85) {
+            await s.save();
+            log.push("save");
+          } else {
+            await s.ready();
+            reloads++;
+            log.push("reload");
+          }
+        }
+        for (let i = 0; i < 3 && s.dirty; i++) await s.save();
+        expect(s.dirty).toBe(false);
+        const shown = workerReply({ type: "page", page: 1, pageSize: 1000 }, "pageResult").rows.map((r: { cells: string[] }) => r.cells);
+        const pad = (table: string[][]): string[][] => table.map((row) => [...row, ...Array(Math.max(0, 3 - row.length)).fill("")]);
+        const disk = parseCsv(s.file(), { delimiter: format.delimiter, quotes: format.quotes }).rows;
+        expect(pad(disk)).toEqual(pad(shown));
+        expect(s.text).toBe(s.file());
+      } catch (err) {
+        throw new Error(`${JSON.stringify({ original, format, log, file: s.file() })}\n${String(err)}`);
+      }
+      s.dispose();
+    }
+    expect(runs).toBeGreaterThan(300);
+    expect(accepted).toBeGreaterThan(800);
+    expect(reloads).toBeGreaterThan(100);
   }, 120000);
 });

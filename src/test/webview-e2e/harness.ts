@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import Papa from "papaparse";
 import { expect, type Page } from "@playwright/test";
-import type { HostToWebviewMessage, LoadMessage, PendingRecordEdit, ReadOnlyReason, ViewState } from "../../core/types";
+import type { HostToWebviewMessage, LoadMessage, PendingRecordEdit, ReadOnlyReason, RecordFloor, ViewState } from "../../core/types";
 
 export const REPO_ROOT = path.resolve(__dirname, "../../..");
 const outFile = (...parts: string[]): string => path.join(REPO_ROOT, "out", ...parts);
@@ -119,15 +119,17 @@ export interface TextLoad {
   editable?: boolean;
   readOnlyReason?: ReadOnlyReason;
   pendingEdits?: PendingRecordEdit[];
+  recordFloors?: RecordFloor[];
 }
 
-function editingFields(data: FixtureLoad | TextLoad): Pick<LoadMessage, "baseVersion" | "editable" | "readOnlyReason" | "pendingEdits"> {
+function editingFields(data: FixtureLoad | TextLoad): Pick<LoadMessage, "baseVersion" | "editable" | "readOnlyReason" | "pendingEdits" | "recordFloors"> {
   const editable = data.editable ?? true;
   return {
     baseVersion: data.baseVersion ?? 1,
     editable,
     readOnlyReason: editable ? undefined : (data.readOnlyReason ?? "setting"),
     pendingEdits: data.pendingEdits ?? [],
+    recordFloors: "recordFloors" in data ? data.recordFloors : undefined,
   };
 }
 

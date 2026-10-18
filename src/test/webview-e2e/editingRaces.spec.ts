@@ -178,3 +178,44 @@ test.describe("read-only explanations", () => {
     await expect(page.locator("#edit-error-banner")).toBeHidden();
   });
 });
+
+test.describe("messages that follow a load", () => {
+  test("an undo that arrives right after a same-base load is applied to the new state, not lost to it", async ({ page }) => {
+    const text = "id,name\n1,Alice\n2,Bob\n";
+    await boot(page, text);
+    await edit(page, 0, 1, "Zed");
+    await awaitPosted(page, "edit");
+    // A resync load (the host still holds the edit), then the user's Ctrl+Z right behind it.
+    await page.evaluate((t) => {
+      window.postMessage(
+        {
+          type: "load",
+          fileKey: "file:///races.csv",
+          text: t,
+          state: { columnVisibility: {}, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: ",", quotes: true, markdownColumns: {} },
+          defaultTableColumns: 3,
+          defaultDelimiter: "",
+          hintsSeen: ["rowDetails"],
+          testHooks: true,
+          baseVersion: 1,
+          editable: true,
+          pendingEdits: [{ recordIndex: 1, originalFields: ["1", "Alice"], fields: ["1", "Zed"] }],
+        },
+        "*",
+      );
+      window.postMessage({ type: "applyEdits", baseVersion: 1, kind: "undo", cells: [{ rowId: 0, columnIndex: 1, value: "Alice", original: "Alice" }] }, "*");
+    }, text);
+    await expect(cell(page, 0, 1)).toHaveText("Alice");
+    await expect(cell(page, 0, 1)).not.toHaveClass(/edited-cell/);
+  });
+
+  test("the host's record floors reach the worker: a row that was padded and saved cannot be emptied into a blank line", async ({ page }) => {
+    await boot(page, "a,b,c\nq,,x\nz,z,z\n", { recordFloors: [{ recordIndex: 1, floor: 1 }] });
+    await edit(page, 0, 2, "");
+    await cell(page, 0, 0).dblclick();
+    await page.locator("input.cell-editor").fill("");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#edit-error-banner")).toBeVisible();
+    await expect(cell(page, 0, 0)).toHaveText("q");
+  });
+});

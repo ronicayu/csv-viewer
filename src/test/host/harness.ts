@@ -99,6 +99,11 @@ export class Session {
   rows: string[][] = [];
   headers: string[] = [];
   dropped: number[] = [];
+  // Content-change events with no undo entry: how the host tells VS Code the document is dirty again.
+  contentChanges = 0;
+  // Set false to model a webview that never answers `saved` (hidden, or busy).
+  autoSync = true;
+  private recordFloors = new Map<number, number>();
   private deliver: (m: WebviewToHostMessage) => void = () => {};
   private viewState: (e: unknown) => void = () => {};
   private disposePanel: () => void = () => {};
@@ -129,7 +134,11 @@ export class Session {
 
   async attach(options: OpenOptions): Promise<void> {
     this.subscription = this.host.provider.onDidChangeCustomDocument((e: any) => {
-      if (e.document !== this.doc || !e.undo) return;
+      if (e.document !== this.doc) return;
+      if (!e.undo) {
+        this.contentChanges++;
+        return;
+      }
       this.stack.length = this.pointer;
       this.stack.push(e);
       this.pointer++;
@@ -197,7 +206,8 @@ export class Session {
 
   private init(text: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): WorkerResponse {
     this.text = text;
-    return workerReply({ type: "init", text, options }, "initResult");
+    const floors = [...this.recordFloors].map(([recordIndex, floor]) => ({ recordIndex, floor }));
+    return workerReply({ type: "init", text, options, floors }, "initResult");
   }
 
   private onHostMessage(m: HostToWebviewMessage): void {
@@ -206,6 +216,7 @@ export class Session {
         this.baseVersion = m.baseVersion;
         const delimiter = m.state.delimiter || m.defaultDelimiter || this.options.delimiter || undefined;
         this.options = { delimiter, firstRowIsHeader: m.state.firstRowIsHeader, quotes: m.state.quotes };
+        this.recordFloors = new Map((m.recordFloors ?? []).map((f) => [f.recordIndex, f.floor]));
         const init = this.init(m.text, this.options);
         this.headers = init.headers;
         this.restore(m.pendingEdits);
@@ -214,11 +225,13 @@ export class Session {
       }
       case "saved":
         this.baseVersion = m.baseVersion;
+        for (const record of m.written ?? []) this.recordFloors.set(record.recordIndex, record.floor ?? record.fields.length);
         {
           const rebased = workerReply({ type: "rebase", written: m.written }, "rebased");
           this.text = applyTextPatches(this.text, rebased.patches);
         }
-        this.send({ type: "synced", baseVersion: m.baseVersion });
+        // The real webview answers after a round trip through its worker, i.e. after the host's save has returned.
+        if (this.autoSync) setTimeout(() => this.send({ type: "synced", baseVersion: m.baseVersion }), 0);
         break;
       case "applyEdits":
         if (m.baseVersion === this.baseVersion) {
