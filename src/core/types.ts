@@ -3,6 +3,7 @@ export interface ParseResult {
   rows: string[][];
   delimiter: string;
   quoteProblems: { row: number }[];
+  quoting: boolean;
 }
 
 export type FilterOperator =

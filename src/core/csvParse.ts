@@ -15,6 +15,11 @@ export interface ParseOptions {
   quotes?: boolean;
 }
 
+// What Papa was actually run with: the NUL sentinel cannot be the quote char when the text contains NUL.
+export function effectiveQuoting(text: string, quotes: boolean): boolean {
+  return quotes || text.includes(QUOTELESS_SENTINEL);
+}
+
 export function stripBom(text: string): string {
   return text.length > 0 && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
@@ -69,7 +74,8 @@ export function parseCsv(text: string, options: ParseOptions = {}): ParseResult 
   const firstRowIsHeader = options.firstRowIsHeader ?? true;
   const quotesEnabled = options.quotes ?? true;
   const requestedDelimiter = options.delimiter && options.delimiter.length > 0 ? options.delimiter : undefined;
-  const quoteChar = quotesEnabled || stripped.includes(QUOTELESS_SENTINEL) ? '"' : QUOTELESS_SENTINEL;
+  const quoting = effectiveQuoting(stripped, quotesEnabled);
+  const quoteChar = quoting ? '"' : QUOTELESS_SENTINEL;
 
   const useQuoteDelimiterWorkaround =
     !quotesEnabled && requestedDelimiter === '"' && !stripped.includes(QUOTE_DELIMITER_PLACEHOLDER);
@@ -90,7 +96,7 @@ export function parseCsv(text: string, options: ParseOptions = {}): ParseResult 
   const quoteProblems = quoteErrorDataRows(parsed.errors, firstRowIsHeader);
 
   if (records.length === 0) {
-    return { headers: [], rows: [], delimiter, quoteProblems };
+    return { headers: [], rows: [], delimiter, quoteProblems, quoting };
   }
 
   const headerRow = firstRowIsHeader ? records[0] : [];
@@ -113,5 +119,5 @@ export function parseCsv(text: string, options: ParseOptions = {}): ParseResult 
     return padded;
   });
 
-  return { headers, rows, delimiter, quoteProblems };
+  return { headers, rows, delimiter, quoteProblems, quoting };
 }
