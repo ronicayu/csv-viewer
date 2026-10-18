@@ -87,6 +87,8 @@ export interface RecordInfo {
   originalText: string;
   // The record's baseline fields, before padding to the header width.
   originalFields: string[];
+  // The file's column count (the header width): a row of one empty field is only a blank line in a one-column file.
+  columns: number;
 }
 
 export interface CellChange {
@@ -128,6 +130,12 @@ export interface LoadMessage {
   readOnlyReason?: ReadOnlyReason;
   pendingEdits: PendingRecordEdit[];
   recordFloors?: RecordFloor[];
+}
+
+// The host declined an edit the webview had accepted (it re-sends the document with a load first).
+export interface EditRefusedMessage {
+  type: "editRefused";
+  message: string;
 }
 
 export interface FileDeletedMessage {
@@ -275,6 +283,7 @@ export type HostToWebviewMessage =
   | SetEditableMessage
   | ApplyEditsMessage
   | SavedMessage
+  | EditRefusedMessage
   | FlushEditsMessage
   | TestEditCellMessage
   | TestOpenEditorMessage

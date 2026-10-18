@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { normalizeColumnFlags } from "./core/columns";
-import { fieldsForWrite, isRecordEdited, spliceBytes } from "./core/csvEdit";
+import { isRecordEdited, recordFieldsForWrite, spliceBytes } from "./core/csvEdit";
 import { serializeRecord } from "./core/csvSerialize";
 import { normalizePageSize } from "./core/paging";
 import { addByteOffsets, splitRecordsToTable } from "./core/recordSpans";
@@ -256,6 +256,8 @@ interface RecordState {
   fields: string[];
   // The record's field count when first touched; trailing empties above it are not written.
   floor: number;
+  // The file's column count when the record was first touched.
+  columns: number;
 }
 
 type LoadError = { kind: "read"; error: unknown } | { kind: "tooLarge" };
@@ -270,6 +272,7 @@ interface BackupFile {
     originalFields: string[];
     fields: string[];
     floor?: number;
+    columns?: number;
   }[];
 }
 
@@ -461,7 +464,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     }
     document.format = backup.format ?? undefined;
     for (const r of backup.records) {
-      const record: RecordState = { originalText: r.originalText, originalFields: r.originalFields, fields: r.fields, floor: r.floor ?? r.originalFields.length };
+      const record: RecordState = { originalText: r.originalText, originalFields: r.originalFields, fields: r.fields, floor: r.floor ?? r.originalFields.length, columns: r.columns ?? 1 };
       document.records.set(r.recordIndex, record);
       this.updateEditedness(document, r.recordIndex, record);
     }
@@ -751,12 +754,12 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
   }
 
   private updateEditedness(document: CsvDocument, recordIndex: number, record: RecordState): void {
-    if (isRecordEdited(record.originalFields, record.fields, record.floor)) document.edited.add(recordIndex);
+    if (isRecordEdited(record.originalFields, record.fields, record.floor, record.columns)) document.edited.add(recordIndex);
     else document.edited.delete(recordIndex);
   }
 
   private fieldsToWrite(record: RecordState): string[] {
-    return fieldsForWrite(record.fields, record.floor);
+    return recordFieldsForWrite(record.originalFields, record.fields, record.floor, record.columns);
   }
 
   private onEdit(document: CsvDocument, message: EditMessage): void {
@@ -786,15 +789,17 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
         originalFields: info.originalFields.slice(),
         fields: info.originalFields.slice(),
         floor: info.originalFields.length,
+        columns: info.columns,
       };
     }
     // A record that would be written as one empty field is an empty line, which reads back as no record at all.
     const prospective = record.fields.slice();
     while (prospective.length <= change.columnIndex) prospective.push("");
     prospective[change.columnIndex] = change.newValue;
-    if (vanishes(fieldsForWrite(prospective, record.floor))) {
+    if (vanishes(recordFieldsForWrite(record.originalFields, prospective, record.floor, record.columns)) && isRecordEdited(record.originalFields, prospective, record.floor, record.columns)) {
       console.error(`csv-viewer: refused an edit that would empty record ${change.recordIndex} of "${document.name}"`);
       this.postLoad(document);
+      document.send?.({ type: "editRefused", message: "that edit would leave the row empty, which removes it from the file" });
       return;
     }
     document.records.set(change.recordIndex, record);
@@ -1014,7 +1019,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
         .sort((a, b) => a - b)
         .map((recordIndex) => {
           const r = document.records.get(recordIndex)!;
-          return { recordIndex, originalText: r.originalText, originalFields: r.originalFields, fields: this.fieldsToWrite(r), floor: r.floor };
+          return { recordIndex, originalText: r.originalText, originalFields: r.originalFields, fields: this.fieldsToWrite(r), floor: r.floor, columns: r.columns };
         }),
     };
     const destination = context.destination;

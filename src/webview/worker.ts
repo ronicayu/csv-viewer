@@ -1,5 +1,5 @@
 import { profileColumns } from "../core/columns";
-import { applyTextPatches, fieldsForWrite, rebaseSpanTable, textPatches, type EditedRecord } from "../core/csvEdit";
+import { applyTextPatches, recordFieldsForWrite, rebaseSpanTable, textPatches, type EditedRecord } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
 import { serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
@@ -222,7 +222,7 @@ function writtenFields(rowId: number, columnIndex: number, value: string): strin
   const recordIndex = rowId + headerOffset;
   const current = rawRows[rowId].slice(0, writeReach(rowId, columnIndex));
   current[columnIndex] = value;
-  return fieldsForWrite(current, floorOf(recordIndex));
+  return recordFieldsForWrite(baselineFields(rowId), current, floorOf(recordIndex), headers.length);
 }
 
 // A newline first keeps Papa from treating a U+FEFF at the record's start as the file's BOM.
@@ -253,7 +253,7 @@ function rejectionReason(rowId: number, columnIndex: number, value: string): str
     if (quoting && rawRows[rowId][columnIndex].includes(NUL)) return "this file's NUL characters keep quoting on, so this value can't change";
   }
   const fields = writtenFields(rowId, columnIndex, value);
-  if (fields.length === 1 && fields[0] === "") return "an empty value would remove this row from a one-column file";
+  if (fields.length === 1 && fields[0] === "" && !sameFields(fields, baselineFields(rowId))) return "an empty value would leave this row empty, which removes it from the file";
   const serialized = serializeRecord(fields, delimiter, quoting);
   if (recordIndex === 0 && serialized.charCodeAt(0) === 0xfeff) return "a value at the very start of the file can't begin with a byte order mark";
   const written = parseRecord(serialized + eol);
@@ -303,6 +303,7 @@ function onEditCell(requestId: number, rowId: number, columnIndex: number, value
       fieldCount: spans!.fieldCount[recordIndex],
       originalText: recordText(recordIndex, false),
       originalFields,
+      columns: headers.length,
     },
     format: { delimiter, quoting },
   };
@@ -334,7 +335,7 @@ function editedRecords(): WrittenRecord[] {
   for (const rowId of originals.keys()) {
     const recordIndex = rowId + headerOffset;
     const reach = writeReach(rowId, 0);
-    records.push({ recordIndex, fields: fieldsForWrite(rawRows[rowId].slice(0, reach), floorOf(recordIndex)) });
+    records.push({ recordIndex, fields: recordFieldsForWrite(baselineFields(rowId), rawRows[rowId].slice(0, reach), floorOf(recordIndex), headers.length) });
   }
   return records;
 }

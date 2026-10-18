@@ -19,8 +19,17 @@ export function fieldsForWrite(fields: readonly string[], floor: number): string
   return fields.slice(0, length);
 }
 
-export function isRecordEdited(originalFields: readonly string[], fields: readonly string[], floor = originalFields.length): boolean {
+// The fields the host writes for a record. Edits that empty a short row down to one empty field would write a blank line, which is not a row,
+// so in a file with more than one column it is written as two empty fields (which reads back as the same all-empty row).
+export function recordFieldsForWrite(originalFields: readonly string[], fields: readonly string[], floor: number, columns = 1): string[] {
   const trimmed = fieldsForWrite(fields, floor);
+  const wasEmpty = originalFields.length === 1 && originalFields[0] === "";
+  if (columns > 1 && trimmed.length === 1 && trimmed[0] === "" && !wasEmpty) return ["", ""];
+  return trimmed;
+}
+
+export function isRecordEdited(originalFields: readonly string[], fields: readonly string[], floor = originalFields.length, columns = 1): boolean {
+  const trimmed = recordFieldsForWrite(originalFields, fields, floor, columns);
   if (trimmed.length !== originalFields.length) return true;
   for (let i = 0; i < trimmed.length; i++) if (trimmed[i] !== originalFields[i]) return true;
   return false;

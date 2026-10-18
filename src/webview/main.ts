@@ -444,10 +444,13 @@ function endOperation(): void {
 // A load replaces the document state after awaiting the worker, so whatever the host sent after it describes the new state and waits for it.
 let hostQueue: Promise<void> | null = null;
 
+// A task that fails is logged and the ones behind it still run.
 function enqueueHostTask(task: () => void | Promise<void>): void {
-  const run = (hostQueue ?? Promise.resolve()).then(task);
+  const run = (hostQueue ?? Promise.resolve()).then(task).catch((err: unknown) => {
+    console.error("csv-viewer: a host message failed:", err);
+  });
   hostQueue = run;
-  void run.finally(() => {
+  void run.then(() => {
     if (hostQueue === run) hostQueue = null;
   });
 }
@@ -466,6 +469,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
   else if (message.type === "setEditable") onSetEditable(message);
   else if (message.type === "applyEdits") void onApplyEdits(message);
   else if (message.type === "saved") void onSaved(message);
+  else if (message.type === "editRefused") showEditError(`Couldn't edit: ${message.message}.`);
   else if (message.type === "flushEdits") void onFlushEdits(message);
   else if (state?.testHooksEnabled) {
     if (message.type === "testEditCell") submitEdit(message.rowId, message.columnIndex, message.value, currentCellValue(message.rowId, message.columnIndex));
