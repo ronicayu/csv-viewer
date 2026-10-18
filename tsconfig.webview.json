@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/webview/**/*.ts", "src/core/**/*.ts"]
+  "include": ["src/webview/**/*.ts", "src/core/**/*.ts", "src/extension.ts", "src/test/host/**/*.ts"]
 }
