@@ -1,3 +1,5 @@
+import type { Eol } from "./recordSpans";
+
 export interface ParseResult {
   headers: string[];
   rows: string[][];
@@ -73,6 +75,38 @@ export function createDefaultViewState(): ViewState {
   };
 }
 
+export type ReadOnlyReason = "setting" | "encoding" | "filesystem" | "spans";
+
+export interface RecordInfo {
+  charStart: number;
+  charEnd: number;
+  byteStart: number;
+  byteEnd: number;
+  eol: Eol;
+  fieldCount: number;
+  originalText: string;
+  // The record's baseline fields, before padding to the header width.
+  originalFields: string[];
+}
+
+export interface CellChange {
+  rowId: number;
+  recordIndex: number;
+  columnIndex: number;
+  // Display name only, for the undo stack's label; the host never parses headers.
+  column: string;
+  oldValue: string;
+  newValue: string;
+  record: RecordInfo;
+  format: { delimiter: string; quoting: boolean };
+}
+
+export interface PendingRecordEdit {
+  recordIndex: number;
+  originalFields: string[];
+  fields: string[];
+}
+
 export interface LoadMessage {
   type: "load";
   fileKey: string;
@@ -83,6 +117,10 @@ export interface LoadMessage {
   defaultDelimiter: string;
   hintsSeen: string[];
   testHooks?: boolean;
+  baseVersion: number;
+  editable: boolean;
+  readOnlyReason?: ReadOnlyReason;
+  pendingEdits: PendingRecordEdit[];
 }
 
 export interface FileDeletedMessage {
@@ -92,6 +130,62 @@ export interface FileDeletedMessage {
 
 export interface FileRestoredMessage {
   type: "fileRestored";
+}
+
+export interface FileChangedOnDiskMessage {
+  type: "fileChangedOnDisk";
+  name: string;
+}
+
+export interface SetEditableMessage {
+  type: "setEditable";
+  editable: boolean;
+  readOnlyReason?: ReadOnlyReason;
+}
+
+export interface AppliedCell {
+  rowId: number;
+  columnIndex: number;
+  value: string;
+  // The baseline value, so the webview can set or clear the unsaved mark without asking the worker.
+  original: string;
+}
+
+export interface ApplyEditsMessage {
+  type: "applyEdits";
+  baseVersion: number;
+  // Which stack operation this is, for the screen-reader announcement.
+  kind?: "undo" | "redo";
+  cells: AppliedCell[];
+}
+
+export interface SavedMessage {
+  type: "saved";
+  baseVersion: number;
+}
+
+export interface FlushEditsMessage {
+  type: "flushEdits";
+  baseVersion: number;
+}
+
+export interface TestEditCellMessage {
+  type: "testEditCell";
+  rowId: number;
+  columnIndex: number;
+  value: string;
+}
+
+export interface TestOpenEditorMessage {
+  type: "testOpenEditor";
+  rowId: number;
+  columnIndex: number;
+}
+
+export interface TestGetCellMessage {
+  type: "testGetCell";
+  rowId: number;
+  columnIndex: number;
 }
 
 export interface ReadyMessage {
@@ -118,5 +212,67 @@ export interface RenderedMessage {
   headers: string[];
 }
 
-export type HostToWebviewMessage = LoadMessage | FileDeletedMessage | FileRestoredMessage;
-export type WebviewToHostMessage = ReadyMessage | SaveStateMessage | OpenAsTextMessage | HintSeenMessage | RenderedMessage;
+export interface EditMessage {
+  type: "edit";
+  baseVersion: number;
+  change: CellChange;
+}
+
+export interface RevertMessage {
+  type: "revert";
+}
+
+export interface FlushedMessage {
+  type: "flushed";
+  baseVersion: number;
+}
+
+export interface SyncedMessage {
+  type: "synced";
+  baseVersion: number;
+}
+
+export interface ResyncMessage {
+  type: "resync";
+}
+
+// Sent when restored edits no longer match the file's records, so the host forgets them.
+export interface EditsDroppedMessage {
+  type: "editsDropped";
+  recordIndexes: number[];
+}
+
+export interface TestCellValueMessage {
+  type: "testCellValue";
+  rowId: number;
+  columnIndex: number;
+  value: string | null;
+  edited: boolean;
+}
+
+export type HostToWebviewMessage =
+  | LoadMessage
+  | FileDeletedMessage
+  | FileRestoredMessage
+  | FileChangedOnDiskMessage
+  | SetEditableMessage
+  | ApplyEditsMessage
+  | SavedMessage
+  | FlushEditsMessage
+  | TestEditCellMessage
+  | TestOpenEditorMessage
+  | TestGetCellMessage;
+
+export type WebviewToHostMessage =
+  | ReadyMessage
+  | SaveStateMessage
+  | OpenAsTextMessage
+  | HintSeenMessage
+  | RenderedMessage
+  | EditMessage
+  | RevertMessage
+  | FlushedMessage
+  | SyncedMessage
+  | ResyncMessage
+  | EditsDroppedMessage
+  | TestCellValueMessage;
