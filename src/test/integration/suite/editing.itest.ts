@@ -2,7 +2,7 @@ import * as assert from "assert";
 import * as fsp from "fs/promises";
 import * as path from "path";
 import * as vscode from "vscode";
-import { PRIMARY_MODIFIER, WorkbenchDriver } from "../cdp";
+import { ESCAPE_KEY, UNDO_KEY, WorkbenchDriver } from "../cdp";
 import { WORKSPACE_ROOT } from "../fixtures";
 import {
   cellValue,
@@ -281,27 +281,29 @@ suite("Cell editing", function () {
 
       // Real key presses sent through the debugging protocol: VS Code ignores keys a page script synthesizes.
       api.postToWebview(key, { type: "testOpenEditor", rowId: 1, columnIndex: 1 });
-      const { frame } = await driver.frameWith("input.cell-editor");
-      const input = frame.locator("input.cell-editor");
-      await input.press(`${PRIMARY_MODIFIER}+z`);
+      const editor = await driver.waitFor("input.cell-editor");
+      await driver.focus(editor, "input.cell-editor");
+      await driver.press(editor, UNDO_KEY);
       await sleep(1500);
       assert.strictEqual(api.getDocument(key)?.editCount, 1, "undo typed inside an open editor must not reach the document's undo stack");
       assert.strictEqual((await cellValue(api, key, 0, 1)).value, "Alicia");
 
-      await input.press("Escape");
-      for (let i = 0; (await frame.locator("input.cell-editor").count()) > 0; i++) {
+      await driver.press(editor, ESCAPE_KEY);
+      for (let i = 0; (await driver.count(editor, "input.cell-editor")) > 0; i++) {
         if (i > 100) throw new Error("Escape never closed the editor");
         await sleep(50);
       }
       // The positive control: the same key with focus in the grid must undo, or the check above proves nothing.
-      await frame.locator("tr.data-row").first().press(`${PRIMARY_MODIFIER}+z`);
+      const grid = await driver.waitFor("tr.data-row");
+      await driver.focus(grid, "tr.data-row");
+      await driver.press(grid, UNDO_KEY);
       await waitFor(() => api.getDocument(key)?.editCount === 0, {
         timeoutMs: 10000,
-        message: "with no editor open, Ctrl/Cmd+Z should have undone the edit; the key did not reach the workbench",
+        message: "with no editor open, Ctrl/Cmd+Z should have undone the edit; the key reached the webview but not the document's undo",
       });
       assert.strictEqual((await cellValue(api, key, 0, 1)).value, "Alice");
     } finally {
-      await driver.close();
+      driver.close();
       // A dirty tab would raise a native dialog on close.
       await revertAndWait(opened);
     }
