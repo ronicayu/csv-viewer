@@ -14,6 +14,7 @@ import {
   setVisibility,
   visibleColumns,
 } from "../core/columns";
+import { applyTextPatches } from "../core/csvEdit";
 import { formatJsonText, tryParseJsonValue } from "../core/json";
 import { MARKDOWN_MAX_CHARS, looksLikeMarkdown } from "../core/markdownDetect";
 import { renderMarkdown } from "../core/markdownRender";
@@ -452,6 +453,7 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
     if (message.type === "testEditCell") submitEdit(message.rowId, message.columnIndex, message.value, currentCellValue(message.rowId, message.columnIndex));
     else if (message.type === "testOpenEditor") startInlineEdit(message.rowId, message.columnIndex);
     else if (message.type === "testGetCell") postTestCellValue(message.rowId, message.columnIndex);
+    else if (message.type === "testPressKey") pressTestKey(message.key, message.primary === true, message.shift === true);
   }
 });
 
@@ -893,7 +895,6 @@ async function handleRegexTimeout(rulesSent: FilterRule[]): Promise<void> {
   resetRegexWatchdogState(); // no other stale watchdog can fire during the respawn
   worker?.terminate();
   worker = null;
-  abandonInflightEdits(true);
 
   for (const r of rulesSent) {
     if (r.enabled && r.operator === "regex" && isValidRule(r)) state.timedOutRuleIds.add(r.id);
@@ -1746,8 +1747,17 @@ quickSearchInput.addEventListener("input", () => {
   }, SEARCH_DEBOUNCE_MS);
 });
 
+// Controls can still fire from a pending debounce or a link that was already on screen when the lock engaged.
+function refuseWhileLocked(): boolean {
+  if (!state || !formatLocked()) return false;
+  firstRowHeaderCheckbox.checked = state.view.firstRowIsHeader;
+  quotesCheckbox.checked = state.view.quotes;
+  renderSeparatorControl();
+  return true;
+}
+
 firstRowHeaderCheckbox.addEventListener("change", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   state.view.firstRowIsHeader = firstRowHeaderCheckbox.checked;
   reparseFromText({ resetPage: false });
   saveState();
@@ -1810,7 +1820,7 @@ function showSeparatorQuoteConflictError(pendingValue: string): void {
   turnOffBtn.className = "link-btn";
   turnOffBtn.textContent = "Turn Off";
   turnOffBtn.addEventListener("click", () => {
-    if (!state) return;
+    if (!state || refuseWhileLocked()) return;
     quotesCheckbox.checked = false;
     state.view.quotes = false;
     hideSeparatorCustomError();
@@ -1823,7 +1833,7 @@ function showSeparatorQuoteConflictError(pendingValue: string): void {
 }
 
 function applySeparatorChange(delimiter: string): void {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   separatorCustomEditing = false;
   state.view.delimiter = delimiter;
   reparseFromText({ resetPage: true });
@@ -1831,7 +1841,7 @@ function applySeparatorChange(delimiter: string): void {
 }
 
 separatorSelect.addEventListener("change", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   const value = separatorSelect.value;
   if (value === CUSTOM_SENTINEL) {
     separatorCustomEditing = true;
@@ -1848,7 +1858,7 @@ let separatorDebounceHandle: number | undefined;
 separatorCustomInput.addEventListener("input", () => {
   window.clearTimeout(separatorDebounceHandle);
   separatorDebounceHandle = window.setTimeout(() => {
-    if (!state) return;
+    if (!state || refuseWhileLocked()) return;
     // Deliberately not trimmed: a single space or tab is a valid delimiter.
     const value = separatorCustomInput.value;
     if (value === "") {
@@ -1876,14 +1886,14 @@ function renderQuoteWarningBanner(): void {
 }
 
 quotesCheckbox.addEventListener("change", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   state.view.quotes = quotesCheckbox.checked;
   reparseFromText({ resetPage: true });
   saveState();
 });
 
 quoteWarningFixBtn.addEventListener("click", () => {
-  if (!state) return;
+  if (!state || refuseWhileLocked()) return;
   state.view.quotes = false;
   quotesCheckbox.checked = false;
   reparseFromText({ resetPage: true });
@@ -2867,13 +2877,19 @@ function isDirty(): boolean {
 }
 
 // Edits are addressed by record and field index under one tokenization, so re-tokenizing underneath them is not defined.
+// An edit still in the worker counts: it is about to be addressed under the current one.
+function formatLocked(): boolean {
+  return isDirty() || inflightEdits.size > 0;
+}
+
 function renderFormatLock(): void {
-  const locked = isDirty();
+  const locked = formatLocked();
   for (const el of [separatorSelect, separatorCustomInput, firstRowHeaderCheckbox, quotesCheckbox, quoteWarningFixBtn]) {
     el.disabled = locked;
     if (locked) el.title = "Save or revert your edits to change the file format.";
     else el.removeAttribute("title");
   }
+  for (const turnOff of separatorCustomError.querySelectorAll("button")) turnOff.disabled = locked;
   formatLockedNote.hidden = !locked;
 }
 
@@ -2883,6 +2899,14 @@ function pageRow(rowId: number): WorkerRow | undefined {
 
 function currentCellValue(rowId: number, columnIndex: number): string | undefined {
   return pageRow(rowId)?.cells[columnIndex];
+}
+
+// A synthetic keydown reaches VS Code's webview host script the way a typed one does, which is what the undo-key tests need.
+function pressTestKey(key: string, primary: boolean, shift: boolean): void {
+  const target = document.activeElement ?? document.body;
+  target.dispatchEvent(
+    new KeyboardEvent("keydown", { key, ctrlKey: primary && !IS_MAC, metaKey: primary && IS_MAC, shiftKey: shift, bubbles: true, cancelable: true }),
+  );
 }
 
 function postTestCellValue(rowId: number, columnIndex: number): void {
@@ -2899,28 +2923,33 @@ function localRejection(value: string): string | null {
   return value.includes(state.detectedDelimiter) || value.includes("\n") ? QUOTES_OFF_SENTENCE : null;
 }
 
-const workerCalls = new Map<number, (msg: WorkerResponse) => void>();
+// The request is kept so it can be sent again if the worker is replaced before it answers.
+const workerCalls = new Map<number, { resolve: (msg: WorkerResponse) => void; request: WorkerRequest }>();
 
 function callWorker<T extends WorkerResponse>(build: (requestId: number) => WorkerRequest): Promise<T> {
   const requestId = nextRequestId++;
+  const request = build(requestId);
   return new Promise<T>((resolve) => {
-    workerCalls.set(requestId, (msg) => resolve(msg as T));
-    postToWorker(build(requestId));
+    workerCalls.set(requestId, { resolve: (msg) => resolve(msg as T), request });
+    postToWorker(request);
   });
 }
 
 function resolveWorkerCall(requestId: number, msg: WorkerResponse): void {
-  const resolve = workerCalls.get(requestId);
-  if (!resolve) return;
+  const call = workerCalls.get(requestId);
+  if (!call) return;
   workerCalls.delete(requestId);
-  resolve(msg);
+  call.resolve(msg);
 }
 
 interface InflightEdit {
   owner: AppState;
   rowId: number;
   columnIndex: number;
+  value: string;
   previous: string | undefined;
+  // The base the edit was made against, which is what the host must be told even if `saved` lands before the answer.
+  base: number;
 }
 
 const inflightEdits = new Map<number, InflightEdit>();
@@ -2938,19 +2967,23 @@ function editsSettled(): Promise<void> {
   return new Promise((resolve) => settleWaiters.push(resolve));
 }
 
-// Edits whose worker (or document) is gone can never answer; put the displayed values back where we can.
-function abandonInflightEdits(restore = false): void {
-  if (restore) {
-    for (const edit of inflightEdits.values()) {
-      if (edit.owner === state && edit.previous !== undefined) {
-        const row = pageRow(edit.rowId);
-        if (row) row.cells[edit.columnIndex] = edit.previous;
-      }
-    }
-  }
+// Pending requests of a document that has been replaced can never be answered.
+function abandonInflightEdits(): void {
   inflightEdits.clear();
   workerCalls.clear();
   notifySettledIfIdle();
+  renderFormatLock();
+}
+
+// After a regex-timeout respawn the new worker has only the text and the restored edits, so what was still in flight goes in again, in order.
+function reissuePendingWorkerRequests(): void {
+  const pending: { id: number; request: WorkerRequest }[] = [];
+  for (const [id, call] of workerCalls) pending.push({ id, request: call.request });
+  for (const [id, edit] of inflightEdits) {
+    if (edit.owner === state) pending.push({ id, request: { type: "editCell", requestId: id, rowId: edit.rowId, columnIndex: edit.columnIndex, value: edit.value } });
+  }
+  pending.sort((a, b) => a.id - b.id);
+  for (const { request } of pending) postToWorker(request);
 }
 
 function submitEdit(rowId: number, columnIndex: number, value: string, previous: string | undefined): void {
@@ -2959,7 +2992,8 @@ function submitEdit(rowId: number, columnIndex: number, value: string, previous:
   if (row) row.cells[columnIndex] = value;
   refreshRow(rowId);
   const requestId = nextRequestId++;
-  inflightEdits.set(requestId, { owner: state, rowId, columnIndex, previous });
+  inflightEdits.set(requestId, { owner: state, rowId, columnIndex, value, previous, base: state.baseVersion });
+  renderFormatLock();
   postToWorker({ type: "editCell", requestId, rowId, columnIndex, value });
 }
 
@@ -2987,12 +3021,23 @@ function onEditResult(msg: Extract<WorkerResponse, { type: "editResult" }>): voi
     if (row) row.cells[change.columnIndex] = change.newValue;
     lastQueryKey = null;
     hideEditError();
-    vscode.postMessage({ type: "edit", baseVersion: state.baseVersion, change });
+    pinDetectedDelimiter();
+    vscode.postMessage({ type: "edit", baseVersion: pending.base, change });
     announce(`${state.headers[change.columnIndex]}, row ${change.rowId + 1}: changed to "${clip(change.newValue, EDIT_STATUS_VALUE_CHARS)}"`);
     refreshRow(change.rowId);
   } finally {
+    renderFormatLock();
     notifySettledIfIdle();
   }
+}
+
+// An edit can change what auto-detection would pick, so the file is reopened with the separator it was edited under.
+function pinDetectedDelimiter(): void {
+  if (!state || state.view.delimiter !== "" || resolveDelimiterOption("", state.defaultDelimiter) !== undefined) return;
+  state.view.delimiter = state.detectedDelimiter;
+  renderSeparatorControl();
+  renderFormatButton();
+  saveState();
 }
 
 async function onApplyEdits(msg: ApplyEditsMessage): Promise<void> {
@@ -3033,17 +3078,36 @@ async function onSaved(msg: SavedMessage): Promise<void> {
     vscode.postMessage({ type: "resync" });
     return;
   }
-  await editsSettled();
-  const rebased = await callWorker<Extract<WorkerResponse, { type: "rebased" }>>((requestId) => ({ type: "rebase", requestId }));
-  if (state !== owner) return;
-  owner.text = rebased.text;
+  // Advance at once: undo, redo and new edits that follow the save are already for the new base.
   owner.baseVersion = msg.baseVersion;
   fileChangedBanner.hidden = true;
-  const marked = [...owner.editedCells.keys()];
-  owner.editedCells.clear();
+  const written = msg.written;
+  const rebased = await callWorker<Extract<WorkerResponse, { type: "rebased" }>>((requestId) => ({ type: "rebase", requestId, written }));
+  if (state !== owner) return;
+  owner.text = applyTextPatches(owner.text, rebased.patches);
+
+  // Cells changed since the write are still edits, now against what was written.
+  const headerOffset = owner.view.firstRowIsHeader ? 1 : 0;
+  const touched: number[] = [];
+  if (!written) {
+    touched.push(...owner.editedCells.keys());
+    owner.editedCells.clear();
+  }
+  for (const record of written ?? []) {
+    const rowId = record.recordIndex - headerOffset;
+    const marks = owner.editedCells.get(rowId);
+    if (!marks) continue;
+    touched.push(rowId);
+    for (const [columnIndex, mark] of [...marks]) {
+      const baseline = record.fields[columnIndex] ?? "";
+      if (mark.current === baseline) marks.delete(columnIndex);
+      else mark.original = baseline;
+    }
+    if (marks.size === 0) owner.editedCells.delete(rowId);
+  }
   renderFormatLock();
   renderFileDeletedBanner();
-  for (const rowId of marked) refreshRow(rowId);
+  for (const rowId of touched) refreshRow(rowId);
   announce("All edits saved");
   vscode.postMessage({ type: "synced", baseVersion: msg.baseVersion });
 }
@@ -3102,6 +3166,7 @@ function restoreEditsAfterInit(): void {
       for (const [columnIndex, entry] of columns) cells.push({ rowId, columnIndex, value: entry.current });
     }
     if (cells.length > 0) postToWorker({ type: "setCells", requestId: nextRequestId++, cells });
+    reissuePendingWorkerRequests();
     return;
   }
 
@@ -3119,11 +3184,7 @@ function restoreEditsAfterInit(): void {
     const rejected = new Set(done.rejectedRowIds);
     for (const cell of cells) if (!rejected.has(cell.rowId)) setEditedCell(cell.rowId, cell.columnIndex, cell.original, cell.value);
     const dropped = pending.filter((edit) => rejected.has(rowIdByRecord.get(edit.recordIndex)!)).map((edit) => edit.recordIndex);
-    if (dropped.length > 0) {
-      vscode.postMessage({ type: "editsDropped", recordIndexes: dropped });
-      const rows = dropped.map((recordIndex) => rowIdByRecord.get(recordIndex)! + 1).join(", ");
-      showEditError(`Couldn't restore unsaved edits to row ${rows}: the file no longer matches.`);
-    }
+    if (dropped.length > 0) vscode.postMessage({ type: "editsDropped", recordIndexes: dropped });
     for (const rowId of owner.editedCells.keys()) refreshRow(rowId);
   });
 }
@@ -3518,7 +3579,8 @@ function onCellContextMenu(ev: MouseEvent, column: string, value: string, row: W
       requestEdit(() => (source === "cell" ? startInlineEdit(row.id, columnIndex) : startFieldEdit(row.id, columnIndex)));
     });
     if (reason !== undefined) {
-      editItem.disabled = true;
+      // aria-disabled, not disabled, so choosing it can still explain why in the banner.
+      editItem.setAttribute("aria-disabled", "true");
       editItem.title = readOnlyTitle(reason);
     }
     contextMenu.appendChild(editItem);

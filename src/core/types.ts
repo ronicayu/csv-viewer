@@ -159,9 +159,17 @@ export interface ApplyEditsMessage {
   cells: AppliedCell[];
 }
 
+// What the host actually wrote for each record, so the webview rebases to the saved file even if edits landed during the write.
+export interface WrittenRecord {
+  recordIndex: number;
+  fields: string[];
+}
+
 export interface SavedMessage {
   type: "saved";
   baseVersion: number;
+  // Absent means everything the webview has edited was written.
+  written?: WrittenRecord[];
 }
 
 export interface FlushEditsMessage {
@@ -186,6 +194,14 @@ export interface TestGetCellMessage {
   type: "testGetCell";
   rowId: number;
   columnIndex: number;
+}
+
+export interface TestPressKeyMessage {
+  type: "testPressKey";
+  key: string;
+  // Ctrl, or Cmd on macOS.
+  primary?: boolean;
+  shift?: boolean;
 }
 
 export interface ReadyMessage {
@@ -261,7 +277,8 @@ export type HostToWebviewMessage =
   | FlushEditsMessage
   | TestEditCellMessage
   | TestOpenEditorMessage
-  | TestGetCellMessage;
+  | TestGetCellMessage
+  | TestPressKeyMessage;
 
 export type WebviewToHostMessage =
   | ReadyMessage

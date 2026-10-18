@@ -1,9 +1,9 @@
 import * as vscode from "vscode";
 import { normalizeColumnFlags } from "./core/columns";
 import { fieldsForWrite, isRecordEdited, spliceBytes } from "./core/csvEdit";
-import { serializeRecord, utf8Length } from "./core/csvSerialize";
+import { serializeRecord } from "./core/csvSerialize";
 import { normalizePageSize } from "./core/paging";
-import type { Eol } from "./core/recordSpans";
+import { addByteOffsets, splitRecordsToTable } from "./core/recordSpans";
 import {
   createDefaultViewState,
   type EditMessage,
@@ -151,7 +151,7 @@ export function activate(context: vscode.ExtensionContext): CsvViewerTestApi | u
       saveDocumentAs: (fileKey, destination) => {
         const document = testHookDocuments.get(fileKey);
         if (!document) return Promise.reject(new Error(`saveDocumentAs: no document for ${fileKey}`));
-        return provider.saveCustomDocumentAs(document, destination, new vscode.CancellationTokenSource().token);
+        return Promise.resolve(provider.saveCustomDocumentAs(document, destination, new vscode.CancellationTokenSource().token));
       },
       backupDocument: async (fileKey, destination) => {
         const document = testHookDocuments.get(fileKey);
@@ -249,12 +249,11 @@ function migrateWorkspaceState(context: vscode.ExtensionContext, oldUri: vscode.
 }
 
 interface RecordState {
-  byteStart: number;
-  byteEnd: number;
-  eol: Eol;
   originalText: string;
   originalFields: string[];
   fields: string[];
+  // The record's field count when first touched; trailing empties above it are not written.
+  floor: number;
 }
 
 type LoadError = { kind: "read"; error: unknown } | { kind: "tooLarge" };
@@ -265,12 +264,10 @@ interface BackupFile {
   format: { delimiter: string; quoting: boolean } | null;
   records: {
     recordIndex: number;
-    byteStart: number;
-    byteEnd: number;
-    eol: Eol;
     originalText: string;
     originalFields: string[];
     fields: string[];
+    floor?: number;
   }[];
 }
 
@@ -281,6 +278,9 @@ class CsvDocument implements vscode.CustomDocument {
   baseVersion = 0;
   // Bumped whenever `records` is discarded; an undo entry from an earlier epoch refers to records that no longer exist.
   epoch = 0;
+  // The base before the last save, while nothing else has changed the bytes.
+  saveBase = -1;
+  queue: Promise<void> = Promise.resolve();
   format: { delimiter: string; quoting: boolean } | undefined;
   records = new Map<number, RecordState>();
   edited = new Set<number>();
@@ -411,6 +411,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     document.records.clear();
     document.edited.clear();
     document.format = undefined;
+    document.saveBase = -1;
     document.epoch++;
   }
 
@@ -450,14 +451,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     }
     document.format = backup.format ?? undefined;
     for (const r of backup.records) {
-      const record: RecordState = {
-        byteStart: r.byteStart,
-        byteEnd: r.byteEnd,
-        eol: r.eol,
-        originalText: r.originalText,
-        originalFields: r.originalFields,
-        fields: r.fields,
-      };
+      const record: RecordState = { originalText: r.originalText, originalFields: r.originalFields, fields: r.fields, floor: r.floor ?? r.originalFields.length };
       document.records.set(r.recordIndex, record);
       this.updateEditedness(document, r.recordIndex, record);
     }
@@ -582,10 +576,19 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
   }
 
   private onSaveState(document: CsvDocument, state: ViewState): void {
-    this.saveState(document.uri.toString(), state);
+    const fileKey = document.uri.toString();
     const formatKey = JSON.stringify([state.delimiter, state.firstRowIsHeader, state.quotes]);
-    // Records are keyed by index under one tokenization; a changed format makes them (and any undo entries) meaningless.
-    if (document.formatKey !== "" && formatKey !== document.formatKey && !document.dirty) this.discardRecords(document);
+    const changed = document.formatKey !== "" && formatKey !== document.formatKey;
+    if (changed && document.dirty) {
+      // Edits are addressed by record and field index under one tokenization; keep the stored format and put the webview back on it.
+      const stored = this.loadOrCreateState(fileKey);
+      this.saveState(fileKey, { ...state, delimiter: stored.delimiter, firstRowIsHeader: stored.firstRowIsHeader, quotes: stored.quotes });
+      this.postLoad(document);
+      return;
+    }
+    this.saveState(fileKey, state);
+    // A changed format makes the records (and any undo entries) meaningless.
+    if (changed) this.discardRecords(document);
     document.formatKey = formatKey;
   }
 
@@ -611,7 +614,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       pendingEdits.push({
         recordIndex,
         originalFields: record.originalFields,
-        fields: fieldsForWrite(record.fields, record.originalFields.length),
+        fields: this.fieldsToWrite(record),
       });
     }
 
@@ -715,34 +718,39 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
   }
 
   private updateEditedness(document: CsvDocument, recordIndex: number, record: RecordState): void {
-    if (isRecordEdited(record.originalFields, record.fields)) document.edited.add(recordIndex);
+    if (isRecordEdited(record.originalFields, record.fields, record.floor)) document.edited.add(recordIndex);
     else document.edited.delete(recordIndex);
   }
 
+  private fieldsToWrite(record: RecordState): string[] {
+    return fieldsForWrite(record.fields, record.floor);
+  }
+
   private onEdit(document: CsvDocument, message: EditMessage): void {
-    if (message.baseVersion !== document.baseVersion) {
+    // An edit committed just before the webview saw `saved` still describes the file as it was; the save does not touch other records.
+    const justSaved = document.saveBase === message.baseVersion && document.baseVersion === message.baseVersion + 1;
+    if (document.lossy || (message.baseVersion !== document.baseVersion && !justSaved)) {
       this.postLoad(document);
       return;
     }
     const change = message.change;
     const info = change.record;
+    if (document.format && (document.format.delimiter !== change.format.delimiter || document.format.quoting !== change.format.quoting)) {
+      this.postLoad(document);
+      return;
+    }
     let record = document.records.get(change.recordIndex);
-    if (record && (record.byteStart !== info.byteStart || record.byteEnd !== info.byteEnd || record.originalText !== info.originalText)) {
-      if (document.edited.has(change.recordIndex)) {
-        console.error(`csv-viewer: dropped an edit to record ${change.recordIndex} of "${document.name}": its span disagrees with the one on record`);
-        return;
-      }
-      // Nothing is pending on this record, so the webview's account of it simply replaces ours.
-      record = undefined;
+    if (record && !justSaved && record.originalText !== info.originalText) {
+      console.error(`csv-viewer: dropped an edit to record ${change.recordIndex} of "${document.name}": its text disagrees with the one on record`);
+      this.postLoad(document);
+      return;
     }
     if (!record) {
       record = {
-        byteStart: info.byteStart,
-        byteEnd: info.byteEnd,
-        eol: info.eol,
         originalText: info.originalText,
         originalFields: info.originalFields.slice(),
         fields: info.originalFields.slice(),
+        floor: info.originalFields.length,
       };
       document.records.set(change.recordIndex, record);
     }
@@ -753,9 +761,8 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     this.setField(document, change.recordIndex, apply, change.columnIndex, change.newValue);
 
     const epoch = document.epoch;
-    const stale = (): boolean => epoch !== document.epoch;
     const step = (value: string, kind: "undo" | "redo") => (): void => {
-      if (stale()) return;
+      if (epoch !== document.epoch) return;
       const current = document.records.get(change.recordIndex);
       if (!current) return;
       this.setField(document, change.recordIndex, current, change.columnIndex, value);
@@ -810,62 +817,96 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     document.pendingFlush = undefined;
   }
 
-  // The file's bytes with every edited record rewritten; throws, writing nothing, if any span fails its checks.
-  private buildOutput(document: CsvDocument): { out: Uint8Array; edited: [number, RecordState][] } {
+  // Saves, Save As and reverts of one document never overlap: each reads state the others rewrite.
+  private exclusive<T>(document: CsvDocument, task: () => Promise<T>): Promise<T> {
+    const run = document.queue.then(task, task);
+    document.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  // The file's bytes with every edited record rewritten. Record boundaries come from splitting the held bytes here, never from the webview's offsets;
+  // throws, writing nothing, if a record's text is not what the edit was made against.
+  private buildOutput(document: CsvDocument): { out: Uint8Array; written: { recordIndex: number; fields: string[]; text: string }[] } {
     const bytes = document.bytes;
     if (!bytes) throw new Error(`CSV Viewer: "${document.name}" was never loaded`);
-    const edited = [...document.edited]
-      .map((i): [number, RecordState] => [i, document.records.get(i)!])
-      .sort((a, b) => a[1].byteStart - b[1].byteStart);
-    if (edited.length === 0) return { out: bytes, edited };
+    const edited = [...document.edited].sort((a, b) => a - b);
+    if (edited.length === 0) return { out: bytes, written: [] };
 
     const format = document.format;
     const consistency = new Error("CSV Viewer: internal consistency check failed; nothing was written");
     if (!format) throw consistency;
-    const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+    const decoded = decodeText(bytes);
+    if (decoded.lossy) throw consistency;
+    const table = splitRecordsToTable(decoded.text, { delimiter: format.delimiter, quotes: format.quoting });
+    addByteOffsets(table, decoded.text);
+
+    const written: { recordIndex: number; fields: string[]; text: string }[] = [];
+    for (const recordIndex of edited) {
+      const record = document.records.get(recordIndex)!;
+      if (recordIndex >= table.length || decoded.text.slice(table.start[recordIndex], table.end[recordIndex]) !== record.originalText) throw consistency;
+      const fields = this.fieldsToWrite(record);
+      written.push({ recordIndex, fields, text: serializeRecord(fields, format.delimiter, format.quoting) });
+    }
     try {
-      for (const [, record] of edited) {
-        if (record.byteEnd > bytes.length || decoder.decode(bytes.subarray(record.byteStart, record.byteEnd)) !== record.originalText) throw consistency;
-      }
       const out = spliceBytes(
         bytes,
-        edited.map(([, r]) => ({ byteStart: r.byteStart, byteEnd: r.byteEnd, fields: fieldsForWrite(r.fields, r.originalFields.length) })),
+        written.map((w) => ({ byteStart: table.byteStart![w.recordIndex], byteEnd: table.byteEnd![w.recordIndex], fields: w.fields })),
         format.delimiter,
         format.quoting,
       );
-      return { out, edited };
+      return { out, written };
     } catch {
       throw consistency;
     }
   }
 
-  async saveCustomDocument(document: CsvDocument, _token: vscode.CancellationToken): Promise<void> {
-    await this.flush(document);
-    // Also what neutralizes a stale undo entry that toggled VS Code's dirty flag without changing anything.
-    if (!document.dirty) return;
+  saveCustomDocument(document: CsvDocument, token: vscode.CancellationToken): Thenable<void> {
+    return this.exclusive(document, async () => {
+      await this.flush(document);
+      // Also what neutralizes a stale undo entry that toggled VS Code's dirty flag without changing anything.
+      if (!document.dirty) return;
+      if (token.isCancellationRequested) throw new Error("Save cancelled");
 
-    await this.confirmOverwriteIfChanged(document);
-    const { out, edited } = this.buildOutput(document);
-    const format = document.format!;
+      await this.confirmOverwriteIfChanged(document);
+      const { out, written } = this.buildOutput(document);
 
-    try {
-      await vscode.workspace.fs.writeFile(document.uri, out);
-    } catch (err) {
-      throw new Error(`CSV Viewer: could not save "${document.name}": ${err instanceof Error ? err.message : String(err)}`);
-    }
-    try {
-      const stat = await vscode.workspace.fs.stat(document.uri);
-      document.lastLoaded = { size: stat.size, mtime: stat.mtime };
-    } catch {
-      document.lastLoaded = undefined;
-    }
+      try {
+        await vscode.workspace.fs.writeFile(document.uri, out);
+      } catch (err) {
+        throw new Error(`CSV Viewer: could not save "${document.name}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+      try {
+        const stat = await vscode.workspace.fs.stat(document.uri);
+        document.lastLoaded = { size: stat.size, mtime: stat.mtime };
+      } catch {
+        document.lastLoaded = undefined;
+      }
 
-    this.rebaseRecords(document, edited, format);
-    document.bytes = out;
-    document.edited.clear();
-    document.changedOnDisk = false;
-    document.baseVersion++;
-    document.send?.({ type: "saved", baseVersion: document.baseVersion });
+      // Edits and undos that arrived during the write live on the records; only what was written becomes the baseline.
+      for (const w of written) {
+        const record = document.records.get(w.recordIndex);
+        if (!record) continue;
+        record.originalText = w.text;
+        record.originalFields = w.fields.slice();
+      }
+      document.edited.clear();
+      for (const [recordIndex, record] of document.records) this.updateEditedness(document, recordIndex, record);
+      document.bytes = out;
+      document.changedOnDisk = false;
+      document.saveBase = document.baseVersion;
+      document.baseVersion++;
+      document.send?.({ type: "saved", baseVersion: document.baseVersion, written: written.map((w) => ({ recordIndex: w.recordIndex, fields: w.fields })) });
+
+      // VS Code marks the document clean when this returns; edits made during the write still need saving.
+      if (document.dirty) {
+        setTimeout(() => {
+          if (document.dirty) this.changeEmitter.fire({ document });
+        }, 0);
+      }
+    });
   }
 
   private async confirmOverwriteIfChanged(document: CsvDocument): Promise<void> {
@@ -882,50 +923,31 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     if (choice !== OVERWRITE) throw new Error("Save cancelled: the file changed on disk");
   }
 
-  // Every later offset moves by the length changes of the edited records before it.
-  private rebaseRecords(document: CsvDocument, edited: [number, RecordState][], format: { delimiter: string; quoting: boolean }): void {
-    const editedIndexes = new Set(edited.map(([i]) => i));
-    const ordered = [...document.records.entries()].sort((a, b) => a[1].byteStart - b[1].byteStart);
-    let delta = 0;
-    for (const [recordIndex, record] of ordered) {
-      const oldLength = record.byteEnd - record.byteStart;
-      record.byteStart += delta;
-      if (editedIndexes.has(recordIndex)) {
-        const written = fieldsForWrite(record.fields, record.originalFields.length);
-        const text = serializeRecord(written, format.delimiter, format.quoting);
-        const newLength = utf8Length(text);
-        record.byteEnd = record.byteStart + newLength;
-        record.originalText = text;
-        record.originalFields = written;
-        record.fields = written.slice();
-        delta += newLength - oldLength;
-      } else {
-        record.byteEnd += delta;
+  saveCustomDocumentAs(document: CsvDocument, destination: vscode.Uri, _token: vscode.CancellationToken): Thenable<void> {
+    return this.exclusive(document, async () => {
+      await this.flush(document);
+      const { out } = this.buildOutput(document);
+      try {
+        await vscode.workspace.fs.writeFile(destination, out);
+      } catch (err) {
+        throw new Error(`CSV Viewer: could not save "${basename(destination)}": ${err instanceof Error ? err.message : String(err)}`);
       }
-    }
+    });
   }
 
-  async saveCustomDocumentAs(document: CsvDocument, destination: vscode.Uri, _token: vscode.CancellationToken): Promise<void> {
-    await this.flush(document);
-    const { out } = this.buildOutput(document);
-    try {
-      await vscode.workspace.fs.writeFile(destination, out);
-    } catch (err) {
-      throw new Error(`CSV Viewer: could not save "${basename(destination)}": ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  async revertCustomDocument(document: CsvDocument, _token: vscode.CancellationToken): Promise<void> {
-    this.discardRecords(document);
-    try {
-      const stat = await vscode.workspace.fs.stat(document.uri);
-      // loadFromDisk bumps baseVersion itself; the held bytes stay if the file is gone or unreadable.
-      if (!(await this.loadFromDisk(document, stat))) document.baseVersion++;
-    } catch {
-      document.baseVersion++;
-    }
-    document.changedOnDisk = false;
-    this.postLoad(document);
+  revertCustomDocument(document: CsvDocument, _token: vscode.CancellationToken): Thenable<void> {
+    return this.exclusive(document, async () => {
+      this.discardRecords(document);
+      try {
+        const stat = await vscode.workspace.fs.stat(document.uri);
+        // loadFromDisk bumps baseVersion itself; the held bytes stay if the file is gone or unreadable.
+        if (!(await this.loadFromDisk(document, stat))) document.baseVersion++;
+      } catch {
+        document.baseVersion++;
+      }
+      document.changedOnDisk = false;
+      this.postLoad(document);
+    });
   }
 
   async backupCustomDocument(document: CsvDocument, context: vscode.CustomDocumentBackupContext, _token: vscode.CancellationToken): Promise<vscode.CustomDocumentBackup> {
@@ -937,15 +959,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
         .sort((a, b) => a - b)
         .map((recordIndex) => {
           const r = document.records.get(recordIndex)!;
-          return {
-            recordIndex,
-            byteStart: r.byteStart,
-            byteEnd: r.byteEnd,
-            eol: r.eol,
-            originalText: r.originalText,
-            originalFields: r.originalFields,
-            fields: fieldsForWrite(r.fields, r.originalFields.length),
-          };
+          return { recordIndex, originalText: r.originalText, originalFields: r.originalFields, fields: this.fieldsToWrite(r), floor: r.floor };
         }),
     };
     const destination = context.destination;

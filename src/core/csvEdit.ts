@@ -12,15 +12,15 @@ export interface ByteEditedRecord {
   fields: readonly string[];
 }
 
-// Trailing empties beyond the original count are an undone extension of a short row, not data.
-export function fieldsForWrite(fields: readonly string[], originalCount: number): string[] {
+// Trailing empties beyond `floor` (the record's field count in the file as first loaded) are an undone extension of a short row, not data.
+export function fieldsForWrite(fields: readonly string[], floor: number): string[] {
   let length = fields.length;
-  while (length > originalCount && fields[length - 1] === "") length--;
+  while (length > floor && fields[length - 1] === "") length--;
   return fields.slice(0, length);
 }
 
-export function isRecordEdited(originalFields: readonly string[], fields: readonly string[]): boolean {
-  const trimmed = fieldsForWrite(fields, originalFields.length);
+export function isRecordEdited(originalFields: readonly string[], fields: readonly string[], floor = originalFields.length): boolean {
+  const trimmed = fieldsForWrite(fields, floor);
   if (trimmed.length !== originalFields.length) return true;
   for (let i = 0; i < trimmed.length; i++) if (trimmed[i] !== originalFields[i]) return true;
   return false;
@@ -40,23 +40,47 @@ function spanCount(spans: SpanSource): number {
   return spans.length;
 }
 
-export function spliceText(text: string, spans: SpanSource, records: readonly EditedRecord[], delimiter: string, quotes: boolean): string {
-  const parts: string[] = [];
+export interface TextPatch {
+  start: number;
+  end: number;
+  text: string;
+}
+
+// The replacements, in ascending order, that turn the old text into the spliced one.
+export function textPatches(spans: SpanSource, records: readonly EditedRecord[], delimiter: string, quotes: boolean): TextPatch[] {
+  const patches: TextPatch[] = [];
   let cursor = 0;
   let previous = -1;
   for (const record of records) {
     if (record.index <= previous || record.index >= spanCount(spans)) {
-      throw new Error(`spliceText: record ${record.index} is out of order or out of range`);
+      throw new Error(`textPatches: record ${record.index} is out of order or out of range`);
     }
     previous = record.index;
     const start = spanStart(spans, record.index);
     const end = spanEnd(spans, record.index);
-    if (start < cursor || end > text.length) throw new Error(`spliceText: record ${record.index} overlaps or runs past the text`);
-    parts.push(text.slice(cursor, start), serializeRecord(record.fields, delimiter, quotes));
+    if (start < cursor) throw new Error(`textPatches: record ${record.index} overlaps the previous one`);
+    patches.push({ start, end, text: serializeRecord(record.fields, delimiter, quotes) });
     cursor = end;
+  }
+  return patches;
+}
+
+export function applyTextPatches(text: string, patches: readonly TextPatch[]): string {
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const patch of patches) {
+    if (patch.start < cursor || patch.end < patch.start || patch.end > text.length) {
+      throw new Error("applyTextPatches: patches must be ascending, non-overlapping and inside the text");
+    }
+    parts.push(text.slice(cursor, patch.start), patch.text);
+    cursor = patch.end;
   }
   parts.push(text.slice(cursor));
   return parts.join("");
+}
+
+export function spliceText(text: string, spans: SpanSource, records: readonly EditedRecord[], delimiter: string, quotes: boolean): string {
+  return applyTextPatches(text, textPatches(spans, records, delimiter, quotes));
 }
 
 export function spliceBytes(bytes: Uint8Array, records: readonly ByteEditedRecord[], delimiter: string, quotes: boolean): Uint8Array {

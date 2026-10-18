@@ -1104,6 +1104,10 @@ tr.data-row:focus-visible {
   background: transparent;
 }
 
+.context-menu button[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
 td.editing {
   position: relative;
   padding: 0;

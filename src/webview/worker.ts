@@ -1,5 +1,5 @@
 import { profileColumns } from "../core/columns";
-import { fieldsForWrite, isRecordEdited, rebaseSpanTable, spliceText, type EditedRecord } from "../core/csvEdit";
+import { applyTextPatches, fieldsForWrite, rebaseSpanTable, textPatches, type EditedRecord } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
 import { serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
@@ -7,7 +7,7 @@ import { applyFilters } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
 import { EOL_TEXT, SpanTableBuilder, addByteOffsets, scanRecords, splitRecordsToTable, type SpanTable } from "../core/recordSpans";
-import type { CellChange, FilterRule, SortDirection, SortKey } from "../core/types";
+import type { CellChange, FilterRule, SortDirection, SortKey, WrittenRecord } from "../core/types";
 import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./workerProtocol";
 
 let headers: string[] = [];
@@ -24,6 +24,9 @@ let spans: SpanTable | null = null;
 let spansOk = false;
 let delimiter = ",";
 let quoting = true;
+let quotesRequested = true;
+// Smallest field count a record may be written with: its count when first touched, which survives saves so an undo can shrink a record back.
+let floors = new Map<number, number>();
 let headerOffset = 0;
 // Baseline value of every cell that differs from the file; an entry is dropped when the cell returns to it.
 let originals = new Map<number, Map<number, string>>();
@@ -51,7 +54,9 @@ function onInit(requestId: number, source: string, options: { delimiter?: string
   text = source;
   delimiter = parsed.delimiter;
   quoting = parsed.quoting;
+  quotesRequested = options.quotes;
   originals = new Map();
+  floors = new Map();
   headerOffset = options.firstRowIsHeader && parsed.headers.length > 0 ? 1 : 0;
   spans = null;
   spansOk = false;
@@ -202,13 +207,23 @@ function invalidateColumn(columnIndex: number): void {
   distinctCache.delete(name);
 }
 
+function floorOf(recordIndex: number): number {
+  return floors.get(recordIndex) ?? spans!.fieldCount[recordIndex];
+}
+
 function writtenFields(rowId: number, columnIndex: number, value: string): string[] {
   const recordIndex = rowId + headerOffset;
-  const fieldCount = spans!.fieldCount[recordIndex];
-  const current = rawRows[rowId].slice(0, Math.max(fieldCount, columnIndex + 1));
+  const current = rawRows[rowId].slice(0, Math.max(spans!.fieldCount[recordIndex], columnIndex + 1));
   current[columnIndex] = value;
-  return fieldsForWrite(current, fieldCount);
+  return fieldsForWrite(current, floorOf(recordIndex));
 }
+
+// A newline first keeps Papa from treating a U+FEFF at the record's start as the file's BOM.
+function parseRecord(recordText: string): string[][] {
+  return parseCsv(`\n${recordText}`, { delimiter, firstRowIsHeader: false, quotes: quoting }).rows;
+}
+
+const NUL = "\u0000";
 
 // An edit is accepted only if the record's text still parses to its baseline and the new record parses back to what we mean to write.
 function rejectionReason(rowId: number, columnIndex: number, value: string): string | null {
@@ -217,18 +232,25 @@ function rejectionReason(rowId: number, columnIndex: number, value: string): str
   if (recordIndex >= spans.length) return "the row's text couldn't be matched exactly";
   const eol = EOL_TEXT[spans.eol[recordIndex]];
 
-  const reparsed = parseCsv(recordText(recordIndex, true), { delimiter, firstRowIsHeader: false, quotes: quoting });
-  if (reparsed.rows.length !== 1 || !sameFields(reparsed.rows[0], baselineFields(rowId))) {
+  const reparsed = parseRecord(recordText(recordIndex, true));
+  if (reparsed.length !== 1 || !sameFields(reparsed[0], baselineFields(rowId))) {
     return "the row's text couldn't be matched exactly";
   }
 
   if (serializeField(value, delimiter, quoting) === null) {
     return "with Quoted fields off, a value can't contain the separator or a line break";
   }
+  // With quoting off, a NUL is what makes Papa read quotes again, so adding or removing one would re-tokenize the whole file.
+  if (!quotesRequested) {
+    if (value.includes(NUL)) return "with Quoted fields off, a value can't contain a NUL character";
+    if (quoting && rawRows[rowId][columnIndex].includes(NUL)) return "this file's NUL characters keep quoting on, so this value can't change";
+  }
   const fields = writtenFields(rowId, columnIndex, value);
   if (fields.length === 1 && fields[0] === "") return "an empty value would remove this row from a one-column file";
-  const written = parseCsv(serializeRecord(fields, delimiter, quoting) + eol, { delimiter, firstRowIsHeader: false, quotes: quoting });
-  if (written.rows.length !== 1 || !sameFields(written.rows[0], fields)) {
+  const serialized = serializeRecord(fields, delimiter, quoting);
+  if (recordIndex === 0 && serialized.charCodeAt(0) === 0xfeff) return "a value at the very start of the file can't begin with a byte order mark";
+  const written = parseRecord(serialized + eol);
+  if (written.length !== 1 || !sameFields(written[0], fields)) {
     return "that value can't be written to this file without changing its other cells";
   }
   return null;
@@ -298,23 +320,45 @@ function onSetCells(requestId: number, cells: CellValue[], verify: RowBaseline[]
   post({ type: "setCellsDone", requestId, rejectedRowIds: [...rejected] });
 }
 
-// Brings the span tables and the retained text in line with the file the host just wrote.
-function onRebase(requestId: number): void {
-  ensureSpans(true);
-  const edited: EditedRecord[] = [];
-  if (spans) {
-    for (const rowId of [...originals.keys()].sort((a, b) => a - b)) {
-      const recordIndex = rowId + headerOffset;
-      const fieldCount = spans.fieldCount[recordIndex];
-      const reach = Math.max(fieldCount, ...[...originals.get(rowId)!.keys()].map((column) => column + 1));
-      const fields = fieldsForWrite(rawRows[rowId].slice(0, reach), fieldCount);
-      if (isRecordEdited(baselineFields(rowId), fields)) edited.push({ index: recordIndex, fields });
-    }
-    text = spliceText(text, spans, edited, delimiter, quoting);
-    spans = rebaseSpanTable(spans, edited, delimiter, quoting);
+// Without a host account of the write, every cell that differs from the file is taken to have been written.
+function editedRecords(): WrittenRecord[] {
+  const records: WrittenRecord[] = [];
+  if (!spans) return records;
+  for (const rowId of originals.keys()) {
+    const recordIndex = rowId + headerOffset;
+    const reach = Math.max(spans.fieldCount[recordIndex], ...[...originals.get(rowId)!.keys()].map((column) => column + 1));
+    records.push({ recordIndex, fields: fieldsForWrite(rawRows[rowId].slice(0, reach), floorOf(recordIndex)) });
   }
-  originals = new Map();
-  post({ type: "rebased", requestId, text });
+  return records;
+}
+
+// Brings the spans, the retained text and the baselines in line with the file the host just wrote.
+// The host says what it wrote; cells edited since are still edits against that file.
+function onRebase(requestId: number, written: WrittenRecord[] | undefined): void {
+  ensureSpans(true);
+  const records: EditedRecord[] = (written ?? editedRecords()).map((w) => ({ index: w.recordIndex, fields: w.fields })).sort((a, b) => a.index - b.index);
+  let patches: ReturnType<typeof textPatches> = [];
+  if (spans) {
+    for (const { index } of records) {
+      if (!floors.has(index)) floors.set(index, spans.fieldCount[index]);
+    }
+    patches = textPatches(spans, records, delimiter, quoting);
+    text = applyTextPatches(text, patches);
+    spans = rebaseSpanTable(spans, records, delimiter, quoting);
+    for (const { index, fields } of records) {
+      const rowId = index - headerOffset;
+      const row = rawRows[rowId];
+      if (!row) continue;
+      const changed = new Map<number, string>();
+      for (let column = 0; column < headers.length; column++) {
+        const baseline = fields[column] ?? "";
+        if (row[column] !== baseline) changed.set(column, baseline);
+      }
+      if (changed.size > 0) originals.set(rowId, changed);
+      else originals.delete(rowId);
+    }
+  }
+  post({ type: "rebased", requestId, patches });
 }
 
 function onPage(requestId: number, page: number, pageSize: number): void {
@@ -351,7 +395,7 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
         onSetCells(msg.requestId, msg.cells, msg.verify);
         break;
       case "rebase":
-        onRebase(msg.requestId);
+        onRebase(msg.requestId, msg.written);
         break;
     }
   } catch (err) {

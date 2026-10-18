@@ -1,6 +1,7 @@
 import type { ColumnProfile } from "../core/columns";
 import type { DistinctValue } from "../core/distinct";
-import type { CellChange, FilterRule, SortKey } from "../core/types";
+import type { TextPatch } from "../core/csvEdit";
+import type { CellChange, FilterRule, SortKey, WrittenRecord } from "../core/types";
 
 export interface ParseOptionsMsg {
   delimiter?: string;
@@ -15,7 +16,7 @@ export type WorkerRequest =
   | { type: "distinct"; requestId: number; column: string }
   | { type: "editCell"; requestId: number; rowId: number; columnIndex: number; value: string }
   | { type: "setCells"; requestId: number; cells: CellValue[]; verify?: RowBaseline[] }
-  | { type: "rebase"; requestId: number };
+  | { type: "rebase"; requestId: number; written?: WrittenRecord[] };
 
 export interface CellValue {
   rowId: number;
@@ -56,7 +57,7 @@ export type WorkerResponse =
   | { type: "editResult"; requestId: number; ok: true; change: CellChange | null }
   | { type: "editResult"; requestId: number; ok: false; reason: string }
   | { type: "setCellsDone"; requestId: number; rejectedRowIds: number[] }
-  | { type: "rebased"; requestId: number; text: string }
+  | { type: "rebased"; requestId: number; patches: TextPatch[] }
   | { type: "workerError"; requestId: number; message: string };
 
 export const REGEX_TIMEOUT_MS = 2000;
