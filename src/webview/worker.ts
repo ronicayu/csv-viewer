@@ -1,5 +1,5 @@
 import { profileColumns } from "../core/columns";
-import { fieldsForWrite, isRecordEdited, rebaseSpans, spliceText, type EditedRecord } from "../core/csvEdit";
+import { fieldsForWrite, isRecordEdited, rebaseSpanTable, spliceText, type EditedRecord } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
 import { serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
@@ -311,7 +311,7 @@ function onRebase(requestId: number): void {
       if (isRecordEdited(baselineFields(rowId), fields)) edited.push({ index: recordIndex, fields });
     }
     text = spliceText(text, spans, edited, delimiter, quoting);
-    spans = rebaseSpans(spans, edited, delimiter, quoting);
+    spans = rebaseSpanTable(spans, edited, delimiter, quoting);
   }
   originals = new Map();
   post({ type: "rebased", requestId, text });

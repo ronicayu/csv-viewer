@@ -1,5 +1,5 @@
 import { serializeRecord, utf8Length } from "./csvSerialize";
-import type { RecordSpan, SpanTable } from "./recordSpans";
+import { EOL_TEXT, type RecordSpan, type SpanTable } from "./recordSpans";
 
 export interface EditedRecord {
   index: number;
@@ -90,7 +90,7 @@ export function spliceBytes(bytes: Uint8Array, records: readonly ByteEditedRecor
 }
 
 // The span table of the spliced output, without re-splitting it.
-export function rebaseSpans(table: SpanTable, records: readonly EditedRecord[], delimiter: string, quotes: boolean): SpanTable {
+export function rebaseSpanTable(table: SpanTable, records: readonly EditedRecord[], delimiter: string, quotes: boolean): SpanTable {
   const hasBytes = table.byteStart !== undefined && table.byteEnd !== undefined;
   const start = new Uint32Array(table.length);
   const end = new Uint32Array(table.length);
@@ -138,4 +138,38 @@ export function rebaseSpans(table: SpanTable, records: readonly EditedRecord[], 
   shiftRange(next, table.length);
 
   return { length: table.length, start, end, fieldCount, eol, byteStart, byteEnd };
+}
+
+export interface ByteSpan {
+  byteStart: number;
+  byteEnd: number;
+}
+
+// The same rebase over plain span objects, for callers that do not hold typed tables.
+export function rebaseSpans(
+  spans: readonly RecordSpan[],
+  byteSpans: readonly ByteSpan[],
+  records: readonly EditedRecord[],
+  delimiter: string,
+  quotes: boolean,
+): { spans: RecordSpan[]; byteSpans: ByteSpan[] } {
+  const table: SpanTable = {
+    length: spans.length,
+    start: Uint32Array.from(spans, (s) => s.start),
+    end: Uint32Array.from(spans, (s) => s.end),
+    fieldCount: Uint32Array.from(spans, (s) => s.fieldCount),
+    eol: Uint8Array.from(spans, (s) => EOL_TEXT.indexOf(s.eol)),
+    byteStart: Uint32Array.from(byteSpans, (b) => b.byteStart),
+    byteEnd: Uint32Array.from(byteSpans, (b) => b.byteEnd),
+  };
+  const rebased = rebaseSpanTable(table, records, delimiter, quotes);
+  return {
+    spans: Array.from({ length: rebased.length }, (_, i) => ({
+      start: rebased.start[i],
+      end: rebased.end[i],
+      eol: EOL_TEXT[rebased.eol[i]],
+      fieldCount: rebased.fieldCount[i],
+    })),
+    byteSpans: Array.from({ length: rebased.length }, (_, i) => ({ byteStart: rebased.byteStart![i], byteEnd: rebased.byteEnd![i] })),
+  };
 }

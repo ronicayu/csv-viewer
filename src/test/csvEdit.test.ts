@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { fieldsForWrite, isRecordEdited, rebaseSpans, spliceBytes, spliceText } from "../core/csvEdit";
+import { fieldsForWrite, isRecordEdited, rebaseSpanTable, rebaseSpans, spliceBytes, spliceText } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
 import { addByteOffsets, spansFromTable, splitRecords, splitRecordsToTable, type SplitOptions } from "../core/recordSpans";
 
@@ -132,7 +132,24 @@ describe("spliceBytes", () => {
   });
 });
 
-describe("rebaseSpans", () => {
+describe("rebaseSpans (object spans)", () => {
+  it("returns the char and byte spans of the spliced text", () => {
+    const text = "a,b\r\né,2\n3,4";
+    const table = splitRecordsToTable(text, OPTIONS);
+    addByteOffsets(table, text);
+    const spans = splitRecords(text, OPTIONS);
+    const byteSpans = Array.from({ length: table.length }, (_, i) => ({ byteStart: table.byteStart![i], byteEnd: table.byteEnd![i] }));
+    const records = [{ index: 1, fields: ["€€€", "x"] }];
+    const rebased = rebaseSpans(spans, byteSpans, records, ",", true);
+    const spliced = spliceText(text, spans, records, ",", true);
+    const resplit = splitRecordsToTable(spliced, OPTIONS);
+    addByteOffsets(resplit, spliced);
+    expect(rebased.spans).toEqual(splitRecords(spliced, OPTIONS));
+    expect(rebased.byteSpans).toEqual(Array.from({ length: resplit.length }, (_, i) => ({ byteStart: resplit.byteStart![i], byteEnd: resplit.byteEnd![i] })));
+  });
+});
+
+describe("rebaseSpanTable", () => {
   it("matches re-splitting the spliced text, char and byte offsets", () => {
     const text = "a,b\r\n1,2\n\n3,4\n5,6";
     const table = splitRecordsToTable(text, OPTIONS);
@@ -142,7 +159,7 @@ describe("rebaseSpans", () => {
       { index: 3, fields: ["5"] },
     ];
     const spliced = spliceText(text, table, records, ",", true);
-    const rebased = rebaseSpans(table, records, ",", true);
+    const rebased = rebaseSpanTable(table, records, ",", true);
     const resplit = splitRecordsToTable(spliced, OPTIONS);
     addByteOffsets(resplit, spliced);
     expect(spansFromTable(rebased)).toEqual(spansFromTable(resplit));
@@ -216,7 +233,7 @@ describe("edit properties", () => {
         );
         expect(Array.from(bytes)).toEqual(Array.from(new TextEncoder().encode(spliced)));
 
-        const rebased = rebaseSpans(table, records, ",", true);
+        const rebased = rebaseSpanTable(table, records, ",", true);
         const resplit = splitRecordsToTable(spliced, OPTIONS);
         addByteOffsets(resplit, spliced);
         expect(spansFromTable(rebased)).toEqual(spansFromTable(resplit));
