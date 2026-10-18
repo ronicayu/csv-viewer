@@ -77,11 +77,15 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
   });
 
   test("opening the same file in a second column moves the one viewer: still a single panel, edits kept", async () => {
-    const uri = fixture("sidebyside.csv");
-    await openInViewer(uri);
+    // Its own file: the host's message log is per file and outlives each test, so a shared fixture would satisfy waitForRender with an earlier test's render.
+    const filePath = path.join(WORKSPACE_ROOT, "move-viewer.csv");
+    await fsp.writeFile(filePath, "id,val\n1,a\n2,b\n");
+    const uri = vscode.Uri.file(filePath);
     const api = await getTestApi();
     const key = fileKeyFor(uri);
-    await waitForRender(api, key);
+    const rendersBefore = renderCount(api, key);
+    await openInViewer(uri);
+    await waitForRender(api, key, rendersBefore + 1);
     assert.strictEqual(api.panelCount(), 1);
     await editCell(api, key, 0, 1, "moved", 1);
 

@@ -271,6 +271,33 @@ suite("Cell editing", function () {
     await waitFor(() => api.getOutgoing(key).some((m) => m.type === "setEditable" && m.editable === false && m.readOnlyReason === "setting"), { timeoutMs: 8000 });
   });
 
+  test("Ctrl/Cmd+Z typed inside an open editor stays in the editor; with no editor open it reaches the document's undo", async () => {
+    const opened = await openFixture(SIMPLE, "keys");
+    const { api, key } = opened;
+    try {
+      await editCell(api, key, 0, 1, "Alicia", 1);
+
+      // A synthetic keydown inside the webview takes the same route as a typed one: VS Code's host script sees it on the window.
+      api.postToWebview(key, { type: "testOpenEditor", rowId: 1, columnIndex: 1 });
+      await sleep(300);
+      api.postToWebview(key, { type: "testPressKey", key: "z", primary: true });
+      await sleep(1500);
+      assert.strictEqual(api.getDocument(key)?.editCount, 1, "undo typed inside an open editor must not reach the document's undo stack");
+      assert.strictEqual((await cellValue(api, key, 0, 1)).value, "Alicia");
+
+      api.postToWebview(key, { type: "testPressKey", key: "Escape" });
+      await sleep(300);
+      api.postToWebview(key, { type: "testPressKey", key: "z", primary: true });
+      await waitFor(() => api.getDocument(key)?.editCount === 0, {
+        timeoutMs: 10000,
+        message: "with no editor open, the forwarded undo key should have undone the edit; if not, the test's key route does not reach the workbench and the check above proves nothing",
+      });
+    } finally {
+      // A dirty tab would raise a native dialog on close.
+      await revertAndWait(opened);
+    }
+  });
+
   test("Open as Text is refused while the viewer has unsaved edits", async () => {
     const opened = await openFixture(SIMPLE, "astext");
     const { api, uri, key } = opened;

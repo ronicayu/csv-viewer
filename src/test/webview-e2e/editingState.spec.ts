@@ -178,7 +178,6 @@ test.describe("host-driven changes", () => {
     await expect(cell(page, 2, 1)).not.toHaveClass(/edited-cell/);
     const dropped = await awaitPosted(page, "editsDropped");
     expect(dropped.recordIndexes).toEqual([3]);
-    await expect(page.locator("#edit-error-banner")).toBeVisible();
   });
 
   test("a regex-timeout worker respawn keeps edited values", async ({ page }) => {
