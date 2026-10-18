@@ -1,11 +1,14 @@
 import { profileColumns } from "../core/columns";
+import { fieldsForWrite, isRecordEdited, rebaseSpans, spliceText, type EditedRecord } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
+import { serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
 import { applyFilters } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
-import type { FilterRule, SortDirection, SortKey } from "../core/types";
-import type { WorkerRequest, WorkerResponse } from "./workerProtocol";
+import { EOL_TEXT, addByteOffsets, splitRecordsToTable, type SpanTable } from "../core/recordSpans";
+import type { CellChange, FilterRule, SortDirection, SortKey } from "../core/types";
+import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./workerProtocol";
 
 let headers: string[] = [];
 let rawRows: string[][] = [];
@@ -15,12 +18,34 @@ let currentView: number[] | null = null;
 let sortKeyCache = new Map<string, ResolvedCellSortKey[]>();
 let distinctCache = new Map<string, DistinctResult>();
 
+// Kept for the document's lifetime: span slicing and the per-commit re-parse need the text the spans describe.
+let text = "";
+let spans: SpanTable | null = null;
+let spansOk = false;
+let delimiter = ",";
+let quoting = true;
+let headerOffset = 0;
+// Baseline value of every cell that differs from the file; an entry is dropped when the cell returns to it.
+let originals = new Map<number, Map<number, string>>();
+
 function post(message: WorkerResponse): void {
   (self as unknown as Worker).postMessage(message);
 }
 
-function onInit(requestId: number, text: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): void {
-  const parsed = parseCsv(text, options);
+function onInit(requestId: number, source: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): void {
+  const parsed = parseCsv(source, options);
+  text = source;
+  delimiter = parsed.delimiter;
+  quoting = parsed.quoting;
+  originals = new Map();
+  headerOffset = options.firstRowIsHeader && parsed.headers.length > 0 ? 1 : 0;
+  spans = splitRecordsToTable(source, { delimiter, quotes: quoting });
+  addByteOffsets(spans, source);
+  spansOk = spans.length === parsed.rows.length + headerOffset;
+  if (!spansOk) {
+    // eslint-disable-next-line no-console
+    console.error(`csv-viewer: record splitter found ${spans.length} records but the parser found ${parsed.rows.length + headerOffset}; editing is disabled`);
+  }
   headers = parsed.headers;
   rawRows = parsed.rows;
   idByRowRef = new Map();
@@ -37,6 +62,8 @@ function onInit(requestId: number, text: string, options: { delimiter?: string; 
     quoteProblems: parsed.quoteProblems,
     totalRows: rawRows.length,
     columnProfiles: profileColumns(headers, rawRows),
+    quoting,
+    spansOk,
   });
 }
 
@@ -83,6 +110,157 @@ function onDistinct(requestId: number, column: string): void {
   post({ type: "distinctResult", requestId, column, values: result.values, truncated: result.truncated });
 }
 
+function baselineFields(rowId: number): string[] {
+  const recordIndex = rowId + headerOffset;
+  const fieldCount = spans!.fieldCount[recordIndex];
+  const fields = rawRows[rowId].slice(0, fieldCount);
+  const changed = originals.get(rowId);
+  if (changed) for (const [column, value] of changed) if (column < fieldCount) fields[column] = value;
+  return fields;
+}
+
+function recordText(recordIndex: number, withTerminator: boolean): string {
+  const end = spans!.end[recordIndex] + (withTerminator ? EOL_TEXT[spans!.eol[recordIndex]].length : 0);
+  return text.slice(spans!.start[recordIndex], end);
+}
+
+function sameFields(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+function noteBaseline(rowId: number, columnIndex: number, previous: string, next: string): void {
+  let changed = originals.get(rowId);
+  const baseline = changed?.has(columnIndex) ? changed.get(columnIndex)! : previous;
+  if (next === baseline) {
+    changed?.delete(columnIndex);
+    if (changed && changed.size === 0) originals.delete(rowId);
+    return;
+  }
+  if (!changed) {
+    changed = new Map();
+    originals.set(rowId, changed);
+  }
+  changed.set(columnIndex, baseline);
+}
+
+function invalidateColumn(columnIndex: number): void {
+  const name = headers[columnIndex];
+  sortKeyCache.delete(name);
+  distinctCache.delete(name);
+}
+
+function writtenFields(rowId: number, columnIndex: number, value: string): string[] {
+  const recordIndex = rowId + headerOffset;
+  const fieldCount = spans!.fieldCount[recordIndex];
+  const current = rawRows[rowId].slice(0, Math.max(fieldCount, columnIndex + 1));
+  current[columnIndex] = value;
+  return fieldsForWrite(current, fieldCount);
+}
+
+// An edit is accepted only if the record's text still parses to its baseline and the new record parses back to what we mean to write.
+function rejectionReason(rowId: number, columnIndex: number, value: string): string | null {
+  if (!spans || !spansOk) return "this file's rows couldn't be matched to its text";
+  const recordIndex = rowId + headerOffset;
+  if (recordIndex >= spans.length) return "the row's text couldn't be matched exactly";
+  const eol = EOL_TEXT[spans.eol[recordIndex]];
+
+  const reparsed = parseCsv(recordText(recordIndex, true), { delimiter, firstRowIsHeader: false, quotes: quoting });
+  if (reparsed.rows.length !== 1 || !sameFields(reparsed.rows[0], baselineFields(rowId))) {
+    return "the row's text couldn't be matched exactly";
+  }
+
+  if (serializeField(value, delimiter, quoting) === null) {
+    return "with Quoted fields off, a value can't contain the separator or a line break";
+  }
+  const fields = writtenFields(rowId, columnIndex, value);
+  if (fields.length === 1 && fields[0] === "") return "an empty value would remove this row from a one-column file";
+  const written = parseCsv(serializeRecord(fields, delimiter, quoting) + eol, { delimiter, firstRowIsHeader: false, quotes: quoting });
+  if (written.rows.length !== 1 || !sameFields(written.rows[0], fields)) {
+    return "that value can't be written to this file without changing its other cells";
+  }
+  return null;
+}
+
+function onEditCell(requestId: number, rowId: number, columnIndex: number, value: string): void {
+  const row = rawRows[rowId];
+  if (!row || columnIndex < 0 || columnIndex >= headers.length) {
+    post({ type: "editResult", requestId, ok: false, reason: "no such cell" });
+    return;
+  }
+  const oldValue = row[columnIndex];
+  if (oldValue === value) {
+    post({ type: "editResult", requestId, ok: true, change: null });
+    return;
+  }
+  const reason = rejectionReason(rowId, columnIndex, value);
+  if (reason !== null) {
+    post({ type: "editResult", requestId, ok: false, reason });
+    return;
+  }
+
+  const recordIndex = rowId + headerOffset;
+  const originalFields = baselineFields(rowId);
+  noteBaseline(rowId, columnIndex, oldValue, value);
+  row[columnIndex] = value;
+  invalidateColumn(columnIndex);
+
+  const change: CellChange = {
+    rowId,
+    recordIndex,
+    columnIndex,
+    column: headers[columnIndex],
+    oldValue,
+    newValue: value,
+    record: {
+      charStart: spans!.start[recordIndex],
+      charEnd: spans!.end[recordIndex],
+      byteStart: spans!.byteStart![recordIndex],
+      byteEnd: spans!.byteEnd![recordIndex],
+      eol: EOL_TEXT[spans!.eol[recordIndex]],
+      fieldCount: spans!.fieldCount[recordIndex],
+      originalText: recordText(recordIndex, false),
+      originalFields,
+    },
+    format: { delimiter, quoting },
+  };
+  post({ type: "editResult", requestId, ok: true, change });
+}
+
+function onSetCells(requestId: number, cells: CellValue[], verify: RowBaseline[] | undefined): void {
+  const rejected = new Set<number>();
+  for (const check of verify ?? []) {
+    const recordIndex = check.rowId + headerOffset;
+    const valid = spans !== null && rawRows[check.rowId] !== undefined && recordIndex < spans.length;
+    if (!valid || !sameFields(baselineFields(check.rowId), check.originalFields)) rejected.add(check.rowId);
+  }
+  for (const { rowId, columnIndex, value } of cells) {
+    const row = rawRows[rowId];
+    if (!row || rejected.has(rowId) || columnIndex < 0 || columnIndex >= headers.length) continue;
+    noteBaseline(rowId, columnIndex, row[columnIndex], value);
+    row[columnIndex] = value;
+    invalidateColumn(columnIndex);
+  }
+  post({ type: "setCellsDone", requestId, rejectedRowIds: [...rejected] });
+}
+
+// Brings the span tables and the retained text in line with the file the host just wrote.
+function onRebase(requestId: number): void {
+  const edited: EditedRecord[] = [];
+  if (spans) {
+    for (const rowId of [...originals.keys()].sort((a, b) => a - b)) {
+      const recordIndex = rowId + headerOffset;
+      const fieldCount = spans.fieldCount[recordIndex];
+      const reach = Math.max(fieldCount, ...[...originals.get(rowId)!.keys()].map((column) => column + 1));
+      const fields = fieldsForWrite(rawRows[rowId].slice(0, reach), fieldCount);
+      if (isRecordEdited(baselineFields(rowId), fields)) edited.push({ index: recordIndex, fields });
+    }
+    text = spliceText(text, spans, edited, delimiter, quoting);
+    spans = rebaseSpans(spans, edited, delimiter, quoting);
+  }
+  originals = new Map();
+  post({ type: "rebased", requestId, text });
+}
+
 function onPage(requestId: number, page: number, pageSize: number): void {
   const view = currentView ?? rawRows.map((_, id) => id);
   const { start, end } = pageSlice(view.length, page, pageSize);
@@ -109,6 +287,15 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
         break;
       case "distinct":
         onDistinct(msg.requestId, msg.column);
+        break;
+      case "editCell":
+        onEditCell(msg.requestId, msg.rowId, msg.columnIndex, msg.value);
+        break;
+      case "setCells":
+        onSetCells(msg.requestId, msg.cells, msg.verify);
+        break;
+      case "rebase":
+        onRebase(msg.requestId);
         break;
     }
   } catch (err) {
