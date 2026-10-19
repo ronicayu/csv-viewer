@@ -511,6 +511,8 @@ function onFileChangedOnDisk(message: FileChangedOnDiskMessage): void {
 fileChangedRevertBtn.addEventListener("click", () => vscode.postMessage({ type: "revert" }));
 
 vscode.postMessage({ type: "ready" });
+// The load takes a round trip through the host; the worker can start meanwhile. A failure here resurfaces on the load's own await.
+void ensureWorker().catch(() => undefined);
 
 function resolveDelimiterOption(stateDelimiter: string, defaultDelimiter: string): string | undefined {
   if (stateDelimiter !== "") return stateDelimiter;

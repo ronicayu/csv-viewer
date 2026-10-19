@@ -53,11 +53,19 @@ export async function awaitPosted(page: Page, type: string): Promise<Record<stri
   return matches[matches.length - 1];
 }
 
-export async function bootShell(page: Page): Promise<void> {
+export interface BootOptions {
+  // Holds the worker script back, as a slow disk or a busy machine would.
+  workerDelayMs?: number;
+  onWorkerRequest?: () => void;
+}
+
+export async function bootShell(page: Page, options: BootOptions = {}): Promise<void> {
   page.on("pageerror", (err) => {
     throw new Error(`uncaught error in webview: ${err.message}`);
   });
   await page.route(WORKER_SRC_URL, async (route) => {
+    options.onWorkerRequest?.();
+    if (options.workerDelayMs) await new Promise((resolve) => setTimeout(resolve, options.workerDelayMs));
     await route.fulfill({
       path: outFile("webview", "worker.js"),
       contentType: "application/javascript",
