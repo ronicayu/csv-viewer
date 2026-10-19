@@ -4,7 +4,7 @@ import { isRecordEdited, recordFieldsForWrite, spliceBytes } from "./core/csvEdi
 import { serializeRecord } from "./core/csvSerialize";
 import { normalizePageSize } from "./core/paging";
 import { addByteOffsets, splitRecordsToTable } from "./core/recordSpans";
-import { isValidUtf8 } from "./utf8";
+import { isValidUtf8 } from "./core/utf8";
 import {
   createDefaultViewState,
   type EditMessage,

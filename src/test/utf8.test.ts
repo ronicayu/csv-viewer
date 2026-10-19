@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { isValidUtf8, isValidUtf8Js } from "../utf8";
+import { isValidUtf8, isValidUtf8Js } from "../core/utf8";
 
 function fatalDecodeAccepts(bytes: Uint8Array): boolean {
   try {

@@ -13,6 +13,10 @@
 - "All in Table" and "All in Details" on a file with thousands of columns no longer
   freeze the viewer or save a setting per column: the table shows the first 1,000 of the
   columns chosen for it, with a note, and the rest are in the row details.
+- On files with more than 1,000 columns, column choices saved by 0.8.0 that match the
+  defaults are no longer pinned (those columns follow the default rule), and "All in
+  Table" / "All in Details" replace any per-column choices, including ones made under
+  another separator.
 
 **Changed**
 - Large files open faster and use less memory in the extension host: the file is handed
