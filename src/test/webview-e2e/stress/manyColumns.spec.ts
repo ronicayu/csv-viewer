@@ -127,6 +127,25 @@ test.describe("a file with a very large number of columns", () => {
     await expect(page.locator("tr.detail-row:not([hidden]) dt")).toHaveCount(columns - 8);
   });
 
+  test("expanding a row with hundreds of fields lays the page out a handful of times, not once per field", async ({ page }) => {
+    const columns = 900;
+    const header = Array.from({ length: columns }, (_, i) => `h${i + 1}`).join(",");
+    const values = Array.from({ length: columns }, (_, i) => `v${i + 1}`).join(",");
+    await bootShell(page);
+    await pushLoadText(page, { fileKey: "file:///wide.csv", text: `${header}\n${values}\n`, state: defaultViewState(), defaultTableColumns: 8 });
+    await expect(page.locator("tr.data-row")).toHaveCount(1);
+
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Performance.enable");
+    const layouts = async (): Promise<number> => (await cdp.send("Performance.getMetrics")).metrics.find((m) => m.name === "LayoutCount")!.value;
+    const before = await layouts();
+    await page.locator("tr.data-row").first().click();
+    await expect(page.locator("tr.detail-row:not([hidden]) dt")).toHaveCount(columns - 8);
+    await expect(page.locator("tr.detail-row:not([hidden]) dd .detail-value-text").last()).toHaveText(`v${columns}`);
+    // Each field used to measure its own height after the previous one had been written, which is a layout apiece.
+    expect(await layouts() - before).toBeLessThan(50);
+  });
+
   test("first render stays linear in the width of a single line", async ({ page }) => {
     test.setTimeout(180_000);
     const timings: Record<string, number> = {};

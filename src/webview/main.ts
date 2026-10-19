@@ -1408,7 +1408,14 @@ function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, co
     }
   }
 
-  for (const { dd, column, value } of pending) populateDetailValue(dd, column, value);
+  fillDetailValues(pending);
+}
+
+function fillDetailValues(pending: PendingDetailValue[]): void {
+  const steps: PaintStep[] = [];
+  for (const { dd, column, value } of pending) populateDetailValue(dd, column, value, false, steps);
+  for (const step of steps) step.read();
+  for (const step of steps) step.write();
 }
 
 interface PendingDetailValue {
@@ -1442,7 +1449,7 @@ function buildDetailFields(
     const rest: PendingDetailValue[] = [];
     buildDetailFieldList(row, fields.slice(MANY_COLUMNS), indexByHeader, rest, dl);
     button.remove();
-    for (const { dd, column, value } of rest) populateDetailValue(dd, column, value);
+    fillDetailValues(rest);
   });
   fragment.append(dl, button);
   return fragment;
@@ -1540,7 +1547,15 @@ function setColumnMarkdown(column: string, markdown: boolean, sourceDd: HTMLElem
   saveState();
 }
 
-function populateDetailValue(dd: HTMLElement, column: string, rawValue: string, keepMarkdownLink = false): void {
+// The two halves of showing a value after it is written: `read` measures whether it overflows its clamp, `write` applies what that found.
+interface PaintStep {
+  read(): void;
+  write(): void;
+}
+
+// With a `batch`, the first paint is left for the caller to run: every read before any write, so a row with hundreds of fields is laid out once
+// instead of once per field (each scrollHeight read after a write is a layout of the whole table).
+function populateDetailValue(dd: HTMLElement, column: string, rawValue: string, keepMarkdownLink = false, batch?: PaintStep[]): void {
   dd.innerHTML = "";
   if (rawValue === "") {
     dd.appendChild(emptyValueNode());
@@ -1597,7 +1612,7 @@ function populateDetailValue(dd: HTMLElement, column: string, rawValue: string, 
     return formatMode === "formatted" ? formatted : rawValue;
   }
 
-  function render(): void {
+  function paint(): PaintStep {
     const source = currentSource();
     const { text, truncated, fullLength } = truncateForDetail(source);
     const shown = charExpanded ? source : text;
@@ -1618,29 +1633,42 @@ function populateDetailValue(dd: HTMLElement, column: string, rawValue: string, 
 
     // Measure overflow unclamped; scrollHeight right after adding the clamp class can be stale.
     clampEl.classList.remove(clampClass);
-    const lineHeight = parseFloat(getComputedStyle(clampEl).lineHeight) || parseFloat(getComputedStyle(clampEl).fontSize) * 1.2 || 16;
-    const overflowing = clampEl.scrollHeight > lineHeight * 6 + 1;
-    clampEl.classList.toggle(clampClass, !heightExpanded);
+    let overflowing = false;
+    return {
+      read: () => {
+        const lineHeight = parseFloat(getComputedStyle(clampEl).lineHeight) || parseFloat(getComputedStyle(clampEl).fontSize) * 1.2 || 16;
+        overflowing = clampEl.scrollHeight > lineHeight * 6 + 1;
+      },
+      write: () => {
+        clampEl.classList.toggle(clampClass, !heightExpanded);
 
-    // `hidden` keeps textContent, so hidden controls are cleared to keep it out of the dd's text.
-    if (isJson) formatToggle.textContent = formatMode === "formatted" ? "Raw" : "Formatted";
-    else formatToggle.textContent = markdownMode ? "Raw" : showMarkdownLink ? "Markdown" : "";
+        // `hidden` keeps textContent, so hidden controls are cleared to keep it out of the dd's text.
+        if (isJson) formatToggle.textContent = formatMode === "formatted" ? "Raw" : "Formatted";
+        else formatToggle.textContent = markdownMode ? "Raw" : showMarkdownLink ? "Markdown" : "";
 
-    charToggle.hidden = !truncated;
-    if (truncated) {
-      charToggle.textContent = charExpanded ? "Show less" : `Show all (${fullLength.toLocaleString()} characters)`;
-      if (!charExpanded && fullLength > DETAIL_WARN_CHARS) {
-        charToggle.title = "This value is very large — showing it in full may be slow.";
-      } else {
-        charToggle.removeAttribute("title");
-      }
-    } else {
-      charToggle.textContent = "";
-      charToggle.removeAttribute("title");
-    }
+        charToggle.hidden = !truncated;
+        if (truncated) {
+          charToggle.textContent = charExpanded ? "Show less" : `Show all (${fullLength.toLocaleString()} characters)`;
+          if (!charExpanded && fullLength > DETAIL_WARN_CHARS) {
+            charToggle.title = "This value is very large — showing it in full may be slow.";
+          } else {
+            charToggle.removeAttribute("title");
+          }
+        } else {
+          charToggle.textContent = "";
+          charToggle.removeAttribute("title");
+        }
 
-    heightToggle.hidden = !overflowing;
-    heightToggle.textContent = overflowing ? (heightExpanded ? "Less" : "More") : "";
+        heightToggle.hidden = !overflowing;
+        heightToggle.textContent = overflowing ? (heightExpanded ? "Less" : "More") : "";
+      },
+    };
+  }
+
+  function render(): void {
+    const step = paint();
+    step.read();
+    step.write();
   }
 
   formatToggle.addEventListener("click", () => {
@@ -1662,7 +1690,13 @@ function populateDetailValue(dd: HTMLElement, column: string, rawValue: string, 
     render();
   });
 
-  render();
+  const first = paint();
+  if (batch) {
+    batch.push(first);
+  } else {
+    first.read();
+    first.write();
+  }
 }
 
 function toggleExpanded(rowId: number): void {
