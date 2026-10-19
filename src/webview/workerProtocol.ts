@@ -44,7 +44,9 @@ export type WorkerResponse =
       detectedDelimiter: string;
       quoteProblems: { row: number }[];
       totalRows: number;
+      // With more than MANY_COLUMNS columns this is empty and `profileVerdicts` carries what the profiles decide, a byte per column.
       columnProfiles: ColumnProfile[];
+      profileVerdicts?: Uint8Array;
       quoting: boolean;
       // Absent for a large file whose span pass is still running; `spansReady` follows.
       spansOk?: boolean;

@@ -1,15 +1,23 @@
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  MANY_COLUMNS,
+  PROFILE_MARKDOWN,
+  PROFILE_NUMERIC,
+  PROFILE_SHORT,
   type ColumnProfile,
   defaultVisibility,
+  defaultVisibleFlags,
   detailFieldsFor,
   detailOnlyColumns,
   getColumnFlag,
   getVisibility,
   isAutoMarkdownColumn,
   isNumericColumn,
+  isShortColumn,
   normalizeColumnFlags,
   profileColumns,
+  profileVerdicts,
   reconcileVisibility,
   setColumnFlag,
   visibleColumns,
@@ -314,5 +322,128 @@ describe("reconcileVisibility with profiles", () => {
     const again = reconcileVisibility(headers, previous, 1, profiles);
     expect(getVisibility(again, "__proto__")).toBe(true);
     expect(getVisibility(again, "id")).toBe(false);
+  });
+});
+
+// The pre-0.8.1 reconcileVisibility, which pinned a key for every header: the reference for the decisions of the capped version.
+function reconcileVisibilityPinned(headers: string[], previous: Record<string, boolean>, defaultTableColumns: number, profiles?: ColumnProfile[]): Record<string, boolean> {
+  const map: Record<string, boolean> = {};
+  const has = (m: Record<string, boolean>, k: string) => Object.prototype.hasOwnProperty.call(m, k);
+  const isShort = (p: ColumnProfile | undefined) => !p || (p.medianLength <= 60 && p.multilineShare < 0.1 && p.jsonShare < 0.5);
+  for (const key of Object.keys(previous)) map[key] = previous[key];
+  if (!profiles) {
+    headers.forEach((h, i) => {
+      map[h] = has(previous, h) ? previous[h] : i < defaultTableColumns;
+    });
+    return map;
+  }
+  const anyStored = headers.some((h) => has(previous, h));
+  let budget = defaultTableColumns;
+  let anyVisible = false;
+  headers.forEach((h) => {
+    if (has(previous, h) && previous[h] === true) {
+      budget--;
+      anyVisible = true;
+    }
+  });
+  headers.forEach((h, i) => {
+    if (has(previous, h)) return;
+    const visible = isShort(profiles[i]) && budget > 0;
+    map[h] = visible;
+    if (visible) {
+      budget--;
+      anyVisible = true;
+    }
+  });
+  if (!anyVisible && !anyStored && defaultTableColumns > 0 && headers.length > 0) map[headers[0]] = true;
+  return map;
+}
+
+describe("reconcileVisibility with more than MANY_COLUMNS headers", () => {
+  const profileArb = fc.record({
+    medianLength: fc.constantFrom(3, 61),
+    multilineShare: fc.constantFrom(0, 0.5),
+    jsonShare: fc.constantFrom(0, 0.9),
+    numericShare: fc.constantFrom(0, 1),
+    markdownShare: fc.constantFrom(0, 1),
+  });
+  const headersOf = (n: number): string[] => Array.from({ length: n }, (_, i) => `h${i}`);
+
+  it("pins a key per header up to MANY_COLUMNS, exactly as before (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 40 }),
+        fc.dictionary(fc.constantFrom("h0", "h1", "h5", "h9", "gone"), fc.boolean()),
+        fc.integer({ min: 0, max: 12 }),
+        fc.option(fc.array(profileArb, { minLength: 40, maxLength: 40 }), { nil: undefined }),
+        (n, previous, budget, profiles) => {
+          const headers = headersOf(n);
+          expect(reconcileVisibility(headers, previous, budget, profiles)).toEqual(reconcileVisibilityPinned(headers, previous, budget, profiles));
+        },
+      ),
+      { numRuns: 1500 },
+    );
+    const atTheLimit = headersOf(MANY_COLUMNS);
+    expect(Object.keys(reconcileVisibility(atTheLimit, {}, 8)).length).toBe(MANY_COLUMNS);
+  });
+
+  it("stores only what was toggled, and the defaults it computes pick the same columns as the pinned map (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 60 }),
+        fc.dictionary(fc.constantFrom("h0", "h1", "h5", "h9", "h1005", "gone"), fc.boolean()),
+        fc.integer({ min: 0, max: 12 }),
+        fc.option(fc.array(profileArb, { minLength: 60, maxLength: 60 }), { nil: undefined }),
+        fc.array(fc.integer({ min: 0, max: 1059 }), { maxLength: 8 }),
+        (extra, previous, budget, profiles, shortProfiles) => {
+          const headers = headersOf(MANY_COLUMNS + extra);
+          // Columns past the 60 given profiles are short; a few below them are made long by index.
+          const profilesFor = profiles && headers.map((_, i) => (shortProfiles.includes(i) ? profiles[0] : (profiles[i % 60] ?? profiles[0])));
+          const stored = reconcileVisibility(headers, previous, budget, profilesFor);
+          expect(Object.keys(stored).sort()).toEqual(Object.keys(previous).sort());
+
+          const flags = defaultVisibleFlags(headers, stored, budget, profilesFor);
+          const pinned = reconcileVisibilityPinned(headers, previous, budget, profilesFor);
+          expect(visibleColumns(headers, stored, flags)).toEqual(visibleColumns(headers, pinned));
+          expect(detailOnlyColumns(headers, stored, flags)).toEqual(detailOnlyColumns(headers, pinned));
+          expect(detailFieldsFor(headers, stored, flags)).toEqual(detailFieldsFor(headers, pinned));
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
+  it("does not pin defaults for a 200,000-column file, and a toggle overrides its default", () => {
+    const headers = headersOf(200_000);
+    const stored = reconcileVisibility(headers, {}, 8);
+    expect(Object.keys(stored)).toEqual([]);
+    const flags = defaultVisibleFlags(headers, stored, 8);
+    expect(visibleColumns(headers, stored, flags)).toEqual(headers.slice(0, 8));
+    setColumnFlag(stored, "h150000", true);
+    setColumnFlag(stored, "h0", false);
+    expect(visibleColumns(headers, stored, flags)).toEqual(["h1", "h2", "h3", "h4", "h5", "h6", "h7", "h150000"].sort((a, b) => headers.indexOf(a) - headers.indexOf(b)));
+    expect(detailOnlyColumns(headers, stored, flags)).toHaveLength(200_000 - 8);
+  });
+
+  it("profile verdicts carry exactly what the profiles decide, and defaults computed from them match the profiles' (property)", () => {
+    fc.assert(
+      fc.property(fc.array(profileArb, { minLength: 1, maxLength: 30 }), fc.integer({ min: 0, max: 10 }), (profiles, budget) => {
+        const verdicts = profileVerdicts(profiles);
+        profiles.forEach((profile, i) => {
+          expect((verdicts[i] & PROFILE_SHORT) !== 0).toBe(isShortColumn(profile));
+          expect((verdicts[i] & PROFILE_NUMERIC) !== 0).toBe(isNumericColumn(profile));
+          expect((verdicts[i] & PROFILE_MARKDOWN) !== 0).toBe(isAutoMarkdownColumn(profile));
+        });
+        const headers = headersOf(profiles.length);
+        const fromVerdicts = defaultVisibleFlags(headers, {}, budget, (i) => (verdicts[i] & PROFILE_SHORT) !== 0);
+        expect(Array.from(fromVerdicts)).toEqual(Array.from(defaultVisibleFlags(headers, {}, budget, profiles)));
+      }),
+      { numRuns: 1000 },
+    );
+  });
+
+  it("without defaults, a header with no entry is in the table, as before", () => {
+    expect(visibleColumns(["a", "b"], { a: false })).toEqual(["b"]);
+    expect(detailOnlyColumns(["a", "b"], { a: false })).toEqual(["a"]);
   });
 });

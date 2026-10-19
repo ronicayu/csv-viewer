@@ -22,9 +22,10 @@ export function regexErrorMessage(value: string): string | null {
 }
 
 // An inactive rule is ignored rather than matching nothing, so a stale rule cannot hide every row.
-export function isRuleActive(rule: FilterRule, headers: string[]): boolean {
+// `indexByHeader`, if the caller keeps one, replaces the linear scan for the rule's column, which matters with very many columns.
+export function isRuleActive(rule: FilterRule, headers: string[], indexByHeader?: ReadonlyMap<string, number>): boolean {
   if (!isValidRule(rule)) return false;
-  if (rule.column !== null && headers.indexOf(rule.column) === -1) return false;
+  if (rule.column !== null && (indexByHeader ? !indexByHeader.has(rule.column) : headers.indexOf(rule.column) === -1)) return false;
   if (rule.operator === "in") {
     return rule.column !== null && Array.isArray(rule.values) && rule.values.length > 0;
   }

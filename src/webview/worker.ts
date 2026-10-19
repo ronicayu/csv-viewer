@@ -1,4 +1,4 @@
-import { profileColumns } from "../core/columns";
+import { MANY_COLUMNS, profileColumns, profileVerdicts, type ColumnProfile } from "../core/columns";
 import { applyTextPatches, recordFieldsForWrite, rebaseSpanTable, textPatches, type EditedRecord } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
 import { serializeField, serializeRecord } from "../core/csvSerialize";
@@ -13,6 +13,8 @@ import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./wo
 let headers: string[] = [];
 let rawRows: string[][] = [];
 let currentView: number[] | null = null;
+// Built the first time a sort asks for a column by name; with very many columns that is too slow to do on every query.
+let columnIndexByName: Map<string, number> | null = null;
 let sortKeyCache = new Map<string, ResolvedCellSortKey[]>();
 let distinctCache = new Map<string, DistinctResult>();
 
@@ -80,6 +82,7 @@ function onInit(
   headers = parsed.headers;
   rawRows = parsed.rows;
   currentView = null;
+  columnIndexByName = null;
   sortKeyCache = new Map();
   distinctCache = new Map();
 
@@ -90,10 +93,15 @@ function onInit(
     detectedDelimiter: parsed.delimiter,
     quoteProblems: parsed.quoteProblems,
     totalRows: rawRows.length,
-    columnProfiles: profileColumns(headers, rawRows),
+    ...profilesForMain(),
     quoting,
     spansOk: spanJob ? undefined : spansOk,
   });
+}
+
+function profilesForMain(): { columnProfiles: ColumnProfile[]; profileVerdicts?: Uint8Array } {
+  const profiles = profileColumns(headers, rawRows);
+  return headers.length > MANY_COLUMNS ? { columnProfiles: [], profileVerdicts: profileVerdicts(profiles) } : { columnProfiles: profiles };
 }
 
 function reportSpanMismatch(found: number, expected: number): void {
@@ -156,9 +164,9 @@ function onQuery(requestId: number, quickSearch: string, filterRules: FilterRule
   const ids = filterRowIds(headers, rawRows, quickSearch, filterRules);
   post({ type: "filterDone", requestId });
 
-  const columnIndexByName = new Map(headers.map((h, i) => [h, i]));
   const sortColumns: { direction: SortDirection; keys: ResolvedCellSortKey[] }[] = [];
   for (const key of sortKeys) {
+    columnIndexByName ??= new Map(headers.map((h, i) => [h, i]));
     const ci = columnIndexByName.get(key.column);
     if (ci === undefined) continue; // stale key, e.g. after a separator change
     sortColumns.push({ direction: key.direction, keys: getColumnSortKeys(ci, key.column) });

@@ -3,10 +3,16 @@ import type { DistinctValue } from "../core/distinct";
 import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
 import {
+  MANY_COLUMNS,
+  PROFILE_MARKDOWN,
+  PROFILE_NUMERIC,
+  PROFILE_SHORT,
+  defaultVisibleFlags,
   detailOnlyColumns,
   getColumnFlag,
   getVisibility,
   isAutoMarkdownColumn,
+  isColumnInTable,
   isNumericColumn,
   normalizeColumnFlags,
   reconcileVisibility,
@@ -72,6 +78,18 @@ interface AppState {
   byteLength: number | undefined;
   defaultDelimiter: string;
   headers: string[];
+  // Header -> column index, built once per parse (headers are unique); every lookup by name goes through it.
+  indexByHeader: Map<string, number>;
+  // Lowercased headers for the Columns search, built on first use and only for files with more than MANY_COLUMNS columns.
+  headersLower: string[] | null;
+  // With more than MANY_COLUMNS columns, which ones the table shows when the user has not toggled them (see reconcileVisibility); else null.
+  visibleByIndex: Uint8Array | null;
+  // The table and detail-only columns for the current visibility; dropped whenever visibility or headers change.
+  columnLists: { table: string[]; detailOnly: string[] } | null;
+  // What the Sort popover was last built from, so a render that changed neither skips rebuilding its column list.
+  sortPopoverKey: string | null;
+  // Rows whose details list every field rather than the first MANY_COLUMNS.
+  allFieldsRows: Set<number>;
   totalRows: number;
   view: ViewState;
   defaultTableColumns: number;
@@ -174,6 +192,7 @@ app.innerHTML = `
     <div class="sort-add-row">
       <select id="sort-add-select" aria-label="Add sort column"></select>
     </div>
+    <p id="sort-many-note" class="popover-legend" hidden>Use the column header or the Columns search to sort by a column that isn't listed.</p>
     <button id="sort-clear-btn" type="button" hidden>Clear Sort</button>
   </div>
   <div id="format-popover" class="popover" role="dialog" aria-label="File format" hidden>
@@ -283,6 +302,7 @@ const sortPopover = document.getElementById("sort-popover") as HTMLDivElement;
 const sortKeysList = document.getElementById("sort-keys-list") as HTMLDivElement;
 const sortAddSelect = document.getElementById("sort-add-select") as HTMLSelectElement;
 const sortClearBtn = document.getElementById("sort-clear-btn") as HTMLButtonElement;
+const sortManyNote = document.getElementById("sort-many-note") as HTMLParagraphElement;
 const formatPopover = document.getElementById("format-popover") as HTMLDivElement;
 const valuesPopover = document.getElementById("values-popover") as HTMLDivElement;
 const valuesTitle = document.getElementById("values-title") as HTMLParagraphElement;
@@ -560,6 +580,12 @@ async function onLoad(message: LoadMessage): Promise<void> {
     byteLength: message.bytes?.byteLength,
     defaultDelimiter: message.defaultDelimiter,
     headers: [],
+    indexByHeader: new Map(),
+    headersLower: null,
+    visibleByIndex: null,
+    columnLists: null,
+    sortPopoverKey: null,
+    allFieldsRows: new Set<number>(),
     totalRows: 0,
     view,
     defaultTableColumns: message.defaultTableColumns,
@@ -612,6 +638,7 @@ function reparseFromText(options: { resetPage: boolean }): void {
   pendingPageAfterQuery = options.resetPage ? 1 : state.page;
   // Row ids are re-tokenized on re-parse, so expanded and focused ids no longer match the same rows.
   state.expanded = new Set<number>();
+  state.allFieldsRows = new Set<number>();
   state.focusedRowId = null;
   // Only a clean document re-tokenizes, and the host forgets its records when the format changes.
   state.recordFloors.clear();
@@ -640,9 +667,27 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   postToWorker({ type: "init", requestId, text, byteLength: state?.byteLength, options, floors });
 }
 
+function columnLists(): { table: string[]; detailOnly: string[] } {
+  const s = state!;
+  s.columnLists ??= {
+    table: visibleColumns(s.headers, s.view.columnVisibility, s.visibleByIndex),
+    detailOnly: detailOnlyColumns(s.headers, s.view.columnVisibility, s.visibleByIndex),
+  };
+  return s.columnLists;
+}
+
+function tableColumns(): string[] {
+  return columnLists().table;
+}
+
+// Call after changing state.view.columnVisibility or state.headers.
+function invalidateColumnLists(): void {
+  if (state) state.columnLists = null;
+}
+
 function renderColumnsButton(): void {
   if (!state) return;
-  const visible = visibleColumns(state.headers, state.view.columnVisibility).length;
+  const visible = tableColumns().length;
   const total = state.headers.length;
   columnsBtn.textContent = `Columns ${visible}/${total}`;
   columnsBtn.title = `Columns in table: ${visible} of ${total}`;
@@ -650,7 +695,7 @@ function renderColumnsButton(): void {
 
 function activeFilterRuleCount(): number {
   if (!state) return 0;
-  return state.view.filterRules.filter((r) => r.enabled && isRuleActive(r, state!.headers) && !state!.timedOutRuleIds.has(r.id)).length;
+  return state.view.filterRules.filter((r) => r.enabled && isRuleActive(r, state!.headers, state!.indexByHeader) && !state!.timedOutRuleIds.has(r.id)).length;
 }
 
 function renderFiltersButton(): void {
@@ -696,7 +741,7 @@ function renderFormatButton(): void {
 
 function renderHintBanner(): void {
   if (!state) return;
-  const n = detailOnlyColumns(state.headers, state.view.columnVisibility).length;
+  const n = columnLists().detailOnly.length;
   const show = n > 0 && !state.hintsSeen.has("rowDetails");
   hintBanner.hidden = !show;
   if (!show) return;
@@ -763,7 +808,12 @@ function saveState(): void {
 
 function notifyRendered(): void {
   if (!state || !state.testHooksEnabled) return;
-  vscode.postMessage({ type: "rendered", rowCount: state.filteredCount, headers: state.headers });
+  vscode.postMessage({
+    type: "rendered",
+    rowCount: state.filteredCount,
+    headers: state.headers.length > MANY_COLUMNS ? state.headers.slice(0, MANY_COLUMNS) : state.headers,
+    headerCount: state.headers.length,
+  });
 }
 
 function recordQuerySent(): void {
@@ -817,6 +867,10 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   if (msg.requestId !== pendingInitRequestId) return;
 
   state.headers = msg.headers;
+  const indexByHeader = new Map<string, number>();
+  for (let i = 0; i < msg.headers.length; i++) indexByHeader.set(msg.headers[i], i);
+  state.indexByHeader = indexByHeader;
+  state.headersLower = null;
   state.detectedDelimiter = msg.detectedDelimiter;
   state.quoteProblems = msg.quoteProblems;
   state.totalRows = msg.totalRows;
@@ -828,8 +882,15 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   const reconciled = reconcileVisibility(msg.headers, previousVisibility, state.defaultTableColumns, msg.columnProfiles);
   const visibilityChanged = !sameColumnVisibility(previousVisibility, reconciled);
   state.view.columnVisibility = reconciled;
-  state.numericColumns = new Set(msg.headers.filter((_h, i) => isNumericColumn(msg.columnProfiles[i])));
-  state.autoMarkdownColumns = new Set(msg.headers.filter((_h, i) => isAutoMarkdownColumn(msg.columnProfiles[i])));
+  state.sortPopoverKey = null;
+  const verdicts = msg.profileVerdicts;
+  state.visibleByIndex =
+    msg.headers.length > MANY_COLUMNS
+      ? defaultVisibleFlags(msg.headers, reconciled, state.defaultTableColumns, verdicts ? (i) => (verdicts[i] & PROFILE_SHORT) !== 0 : msg.columnProfiles)
+      : null;
+  invalidateColumnLists();
+  state.numericColumns = new Set(msg.headers.filter((_h, i) => (verdicts ? (verdicts[i] & PROFILE_NUMERIC) !== 0 : isNumericColumn(msg.columnProfiles[i]))));
+  state.autoMarkdownColumns = new Set(msg.headers.filter((_h, i) => (verdicts ? (verdicts[i] & PROFILE_MARKDOWN) !== 0 : isAutoMarkdownColumn(msg.columnProfiles[i]))));
 
   renderColumnsPopover();
   renderColumnsButton();
@@ -866,7 +927,7 @@ function sendQueryNow(): { requestId: number; rulesSent: FilterRule[] } {
 function buildQueryKey(): string {
   if (!state) return "";
   const activeRules = state.view.filterRules
-    .filter((r) => r.enabled && isRuleActive(r, state!.headers) && !state!.timedOutRuleIds.has(r.id))
+    .filter((r) => r.enabled && isRuleActive(r, state!.headers, state!.indexByHeader) && !state!.timedOutRuleIds.has(r.id))
     // `values` only matters to `in`; undefined is dropped by JSON.stringify.
     .map((r) => ({
       column: r.column,
@@ -957,7 +1018,7 @@ async function handleRegexTimeout(rulesSent: FilterRule[]): Promise<void> {
 
 function renderTableHead(): void {
   if (!state) return;
-  const columns = visibleColumns(state.headers, state.view.columnVisibility);
+  const columns = tableColumns();
 
   // Rebuilding the row drops focus; restore it by column name so keyboard sort cycling keeps working.
   let previousFocus: { column: string; kind: "sort" | "filter" } | null = null;
@@ -1062,7 +1123,7 @@ function renderTableHead(): void {
 
 function columnHasActiveValuesRule(column: string): boolean {
   if (!state) return false;
-  return state.view.filterRules.some((r) => r.operator === "in" && r.column === column && r.enabled && isRuleActive(r, state!.headers));
+  return state.view.filterRules.some((r) => r.operator === "in" && r.column === column && r.enabled && isRuleActive(r, state!.headers, state!.indexByHeader));
 }
 
 function syncFunnelStates(): void {
@@ -1115,7 +1176,7 @@ function renderTableBody(): void {
   const hadRowFocus = document.activeElement instanceof HTMLElement && document.activeElement.classList.contains("data-row");
 
   tableBody.innerHTML = "";
-  const columns = visibleColumns(state.headers, state.view.columnVisibility);
+  const columns = tableColumns();
   const fragment = document.createDocumentFragment();
 
   if (state.totalRows === 0) {
@@ -1227,7 +1288,7 @@ function buildRowTr(row: WorkerRow, columns: string[], rovingRowId: number | nul
   chevronTd.appendChild(twisty);
   tr.appendChild(chevronTd);
 
-  const indexByHeader = new Map(state!.headers.map((h, i) => [h, i]));
+  const indexByHeader = state!.indexByHeader;
   for (const column of columns) {
     const td = document.createElement("td");
     if (state!.numericColumns.has(column)) td.classList.add("numeric-cell");
@@ -1321,8 +1382,9 @@ function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, co
   if (!wrap) return;
   wrap.innerHTML = "";
 
-  const indexByHeader = new Map(state.headers.map((h, i) => [h, i]));
-  const detailOnly = detailOnlyColumns(state.headers, state.view.columnVisibility);
+  const indexByHeader = state.indexByHeader;
+  const detailOnly = columnLists().detailOnly;
+  const showAll = state.allFieldsRows.has(row.id);
   const alsoInTable = columns.filter((c) => {
     if (clippedColumns.has(c)) return true;
     const value = row.cells[indexByHeader.get(c)!] ?? "";
@@ -1334,15 +1396,15 @@ function populateDetailContent(row: WorkerRow, detailTr: HTMLTableRowElement, co
   const pending: PendingDetailValue[] = [];
 
   if (detailOnly.length === 0 && alsoInTable.length === 0) {
-    wrap.appendChild(buildDetailFieldList(row, state.headers, indexByHeader, pending));
+    wrap.appendChild(buildDetailFields(row, state.headers, indexByHeader, pending, showAll));
   } else {
-    if (detailOnly.length > 0) wrap.appendChild(buildDetailFieldList(row, detailOnly, indexByHeader, pending));
+    if (detailOnly.length > 0) wrap.appendChild(buildDetailFields(row, detailOnly, indexByHeader, pending, showAll));
     if (alsoInTable.length > 0) {
       const heading = document.createElement("p");
       heading.className = "detail-group-heading";
       heading.textContent = "Also in table";
       wrap.appendChild(heading);
-      wrap.appendChild(buildDetailFieldList(row, alsoInTable, indexByHeader, pending));
+      wrap.appendChild(buildDetailFields(row, alsoInTable, indexByHeader, pending, showAll));
     }
   }
 
@@ -1357,14 +1419,44 @@ interface PendingDetailValue {
 
 const detailFieldInfo = new WeakMap<HTMLElement, { column: string; value: string }>();
 
+// A row of a file with very many columns lists the first MANY_COLUMNS fields and a button for the rest; the rest are built by the same code, so
+// editing, copying and the context menu work on them alike.
+function buildDetailFields(
+  row: WorkerRow,
+  fields: string[],
+  indexByHeader: Map<string, number>,
+  pending: PendingDetailValue[],
+  showAll: boolean,
+): Node {
+  if (showAll || fields.length <= MANY_COLUMNS) return buildDetailFieldList(row, fields, indexByHeader, pending);
+
+  const fragment = document.createDocumentFragment();
+  const dl = buildDetailFieldList(row, fields.slice(0, MANY_COLUMNS), indexByHeader, pending);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "link-btn detail-show-all-fields";
+  button.textContent = `Show all ${fields.length.toLocaleString()} fields`;
+  button.addEventListener("click", () => {
+    if (!state) return;
+    state.allFieldsRows.add(row.id);
+    const rest: PendingDetailValue[] = [];
+    buildDetailFieldList(row, fields.slice(MANY_COLUMNS), indexByHeader, rest, dl);
+    button.remove();
+    for (const { dd, column, value } of rest) populateDetailValue(dd, column, value);
+  });
+  fragment.append(dl, button);
+  return fragment;
+}
+
 function buildDetailFieldList(
   row: WorkerRow,
   fields: string[],
   indexByHeader: Map<string, number>,
   pending: PendingDetailValue[],
+  into?: HTMLDListElement,
 ): HTMLDListElement {
-  const dl = document.createElement("dl");
-  dl.className = "detail-fields";
+  const dl = into ?? document.createElement("dl");
+  if (!into) dl.className = "detail-fields";
 
   for (const field of fields) {
     const columnIndex = indexByHeader.get(field)!;
@@ -1595,7 +1687,7 @@ function toggleExpanded(rowId: number): void {
     // Unhide before populating: the height-clamp measurement needs layout, which display: none lacks.
     detailTr.hidden = !opening;
     if (opening && rowTr) {
-      const columns = visibleColumns(state.headers, state.view.columnVisibility);
+      const columns = tableColumns();
       const row = state.currentPageRows.find((r) => r.id === rowId);
       if (row) populateDetailContent(row, detailTr, columns, clippedVisibleColumnsForRow(rowTr, columns));
     }
@@ -1663,9 +1755,9 @@ function onRowKeyDown(ev: KeyboardEvent): void {
       break;
     case "F2": {
       ev.preventDefault();
-      const first = visibleColumns(state.headers, state.view.columnVisibility)[0];
+      const first = tableColumns()[0];
       if (first === undefined) break;
-      const columnIndex = state.headers.indexOf(first);
+      const columnIndex = state.indexByHeader.get(first)!;
       requestEdit(() => startInlineEdit(rowId, columnIndex));
       break;
     }
@@ -1988,6 +2080,10 @@ expandCollapseBtn.addEventListener("click", () => {
 
 function renderSortPopover(): void {
   if (!state) return;
+  // Its column list can be a thousand options, so a render that changed neither the keys nor the headers (onInitResult clears the key) leaves it be.
+  const popoverKey = JSON.stringify(state.view.sortKeys);
+  if (state.sortPopoverKey === popoverKey) return;
+  state.sortPopoverKey = popoverKey;
   sortKeysList.innerHTML = "";
 
   state.view.sortKeys.forEach((key, i) => {
@@ -2046,16 +2142,29 @@ function renderSortPopover(): void {
   placeholder.value = "";
   placeholder.textContent = "Add sort column…";
   sortAddSelect.appendChild(placeholder);
+  let listed = 0;
   for (const header of state.headers) {
     if (usedColumns.has(header)) continue;
+    if (listed === MANY_COLUMNS) break;
+    listed++;
     const option = document.createElement("option");
     option.value = header;
     option.textContent = header;
     sortAddSelect.appendChild(option);
   }
+  const unlisted = state.headers.length - listed - [...usedColumns].filter((c) => state!.indexByHeader.has(c)).length;
+  if (unlisted > 0) sortAddSelect.appendChild(moreColumnsOption(unlisted));
+  sortManyNote.hidden = state.headers.length <= MANY_COLUMNS;
   sortAddSelect.value = "";
 
   sortClearBtn.hidden = state.view.sortKeys.length === 0;
+}
+
+function moreColumnsOption(count: number): HTMLOptionElement {
+  const option = document.createElement("option");
+  option.disabled = true;
+  option.textContent = `… ${count.toLocaleString()} more columns`;
+  return option;
 }
 
 sortAddSelect.addEventListener("change", () => {
@@ -2194,21 +2303,36 @@ formatBtn.addEventListener("click", () => {
   openFormatPopover(formatBtn);
 });
 
+// Lists at most MANY_COLUMNS of the headers that match the search, in file order; "All in Table" and "All in Details" still cover every header.
 function renderColumnsPopover(): void {
   if (!state) return;
   const filter = columnsSearch.value.trim().toLowerCase();
   columnsList.innerHTML = "";
 
-  for (const header of state.headers) {
-    if (filter !== "" && !header.toLowerCase().includes(filter)) continue;
+  const many = state.headers.length > MANY_COLUMNS;
+  const lower = many && filter !== "" ? (state.headersLower ??= state.headers.map((h) => h.toLowerCase())) : null;
+  let matches = 0;
+  for (let index = 0; index < state.headers.length; index++) {
+    const header = state.headers[index];
+    if (filter !== "" && !(lower ? lower[index] : header.toLowerCase()).includes(filter)) continue;
+    matches++;
+    if (matches > MANY_COLUMNS) {
+      // Unfiltered, every header matches, so the rest need not be counted.
+      if (filter === "") {
+        matches = state.headers.length;
+        break;
+      }
+      continue;
+    }
     const label = document.createElement("label");
     label.className = "column-row";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = getVisibility(state.view.columnVisibility, header) !== false;
+    checkbox.checked = isColumnInTable(header, index, state.view.columnVisibility, state.visibleByIndex);
     checkbox.addEventListener("change", () => {
       if (!state) return;
       setVisibility(state.view.columnVisibility, header, checkbox.checked);
+      invalidateColumnLists();
       renderLocalOnly();
       saveState();
     });
@@ -2217,6 +2341,12 @@ function renderColumnsPopover(): void {
     span.textContent = header;
     label.appendChild(span);
     columnsList.appendChild(label);
+  }
+  if (matches > MANY_COLUMNS) {
+    const more = document.createElement("div");
+    more.className = "column-row column-row-more";
+    more.textContent = `Showing ${MANY_COLUMNS.toLocaleString()} of ${matches.toLocaleString()} columns — type to narrow`;
+    columnsList.appendChild(more);
   }
 }
 
@@ -2234,6 +2364,7 @@ columnsSearch.addEventListener("input", renderColumnsPopover);
 columnsShowAll.addEventListener("click", () => {
   if (!state) return;
   for (const header of state.headers) setVisibility(state.view.columnVisibility, header, true);
+  invalidateColumnLists();
   renderColumnsPopover();
   renderLocalOnly();
   saveState();
@@ -2242,6 +2373,7 @@ columnsShowAll.addEventListener("click", () => {
 columnsHideAll.addEventListener("click", () => {
   if (!state) return;
   for (const header of state.headers) setVisibility(state.view.columnVisibility, header, false);
+  invalidateColumnLists();
   renderColumnsPopover();
   renderLocalOnly();
   saveState();
@@ -2356,13 +2488,23 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
   anyOption.value = "";
   anyOption.textContent = "Any column";
   columnSelect.appendChild(anyOption);
-  for (const header of state!.headers) {
+  const headers = state!.headers;
+  const selectedIndex = rule.column === null ? undefined : state!.indexByHeader.get(rule.column);
+  const selectedBeyond = selectedIndex !== undefined && selectedIndex >= MANY_COLUMNS;
+  for (let i = 0; i < Math.min(headers.length, MANY_COLUMNS); i++) {
     const option = document.createElement("option");
-    option.value = header;
-    option.textContent = header;
+    option.value = headers[i];
+    option.textContent = headers[i];
     columnSelect.appendChild(option);
   }
-  if (rule.column !== null && !state!.headers.includes(rule.column)) {
+  if (selectedBeyond) {
+    const option = document.createElement("option");
+    option.value = rule.column!;
+    option.textContent = rule.column!;
+    columnSelect.appendChild(option);
+  }
+  if (headers.length > MANY_COLUMNS) columnSelect.appendChild(moreColumnsOption(headers.length - MANY_COLUMNS - (selectedBeyond ? 1 : 0)));
+  if (rule.column !== null && selectedIndex === undefined) {
     const missingOption = document.createElement("option");
     missingOption.value = rule.column;
     missingOption.textContent = `${rule.column} (missing)`;
@@ -2491,13 +2633,13 @@ function buildRuleRow(rule: FilterRule): HTMLDivElement {
     if (!state) return;
     const timedOut = state.timedOutRuleIds.has(rule.id);
     const regexInvalid = !timedOut && !isValidRule(rule);
-    const columnMissing = !timedOut && !regexInvalid && rule.column !== null && state.headers.indexOf(rule.column) === -1;
+    const columnMissing = !timedOut && !regexInvalid && rule.column !== null && !state.indexByHeader.has(rule.column);
     const usable = !timedOut && !regexInvalid && !columnMissing;
     const isIn = rule.operator === "in";
     const needsValue = usable && !isIn && rule.operator !== "isEmpty" && rule.value === "";
     const needsColumn = usable && isIn && rule.column === null;
     const needsValues = usable && isIn && rule.column !== null && ruleValues(rule).length === 0;
-    const inactive = timedOut || !isRuleActive(rule, state.headers);
+    const inactive = timedOut || !isRuleActive(rule, state.headers, state.indexByHeader);
     row.classList.toggle("rule-error", inactive && (timedOut || regexInvalid || columnMissing));
     row.classList.toggle("rule-hint", inactive && (needsValue || needsColumn || needsValues));
     error.innerHTML = "";
@@ -3363,7 +3505,7 @@ function moveAfterEdit(rowId: number, columnIndex: number, after: AfterEdit): vo
     focusRowById(rowId);
     return;
   }
-  const visible = visibleColumns(state.headers, state.view.columnVisibility).map((c) => state!.headers.indexOf(c));
+  const visible = tableColumns().map((c) => state!.indexByHeader.get(c)!);
   const at = visible.indexOf(columnIndex);
   const target = visible[at + (after === "next" ? 1 : -1)];
   if (at === -1 || target === undefined) focusRowById(rowId);
@@ -3525,7 +3667,7 @@ function refreshRow(rowId: number): void {
   const oldTr = tableBody.querySelector<HTMLTableRowElement>(`tr.data-row[data-row-id="${rowId}"]`);
   const detailTr = document.getElementById(`detail-row-${rowId}`) as HTMLTableRowElement | null;
   if (!row || !oldTr || !detailTr) return;
-  const columns = visibleColumns(state.headers, state.view.columnVisibility);
+  const columns = tableColumns();
   const editorHere = openEditor !== null && openEditor.rowId === rowId ? openEditor : null;
 
   if (editorHere) {
@@ -3612,7 +3754,7 @@ function onCellContextMenu(ev: MouseEvent, column: string, value: string, row: W
   contextMenu.innerHTML = "";
   contextMenuInvoker = null;
 
-  const columnIndex = state ? state.headers.indexOf(column) : -1;
+  const columnIndex = state ? (state.indexByHeader.get(column) ?? -1) : -1;
   const reason = effectiveReadOnlyReason();
   if (reason !== "setting" && columnIndex !== -1) {
     const editItem = menuItem("Edit Value", () => {

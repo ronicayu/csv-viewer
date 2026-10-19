@@ -3,6 +3,9 @@ import { looksLikeMarkdown } from "./markdownDetect";
 import { parseNumber } from "./number";
 import type { ColumnFlagMap, ColumnVisibilityMap } from "./types";
 
+// Past this many columns the UI lists only the first ones and stops pinning a visibility key per header; see reconcileVisibility.
+export const MANY_COLUMNS = 1000;
+
 export function createVisibilityMap(): ColumnVisibilityMap {
   return {};
 }
@@ -95,7 +98,7 @@ export function profileColumns(headers: string[], rows: string[][], sampleSize: 
   });
 }
 
-function isShortColumn(profile: ColumnProfile | undefined): boolean {
+export function isShortColumn(profile: ColumnProfile | undefined): boolean {
   if (!profile) return true;
   if (profile.medianLength > SHORT_MEDIAN_LENGTH_MAX) return false;
   if (profile.multilineShare >= SHORT_MULTILINE_SHARE_MAX) return false;
@@ -111,7 +114,71 @@ export function isAutoMarkdownColumn(profile: ColumnProfile | undefined): boolea
   return (profile?.markdownShare ?? 0) >= MARKDOWN_SHARE_THRESHOLD;
 }
 
+// What the profiles say about each column, one byte apiece: structured-cloning two million profile objects out of the worker takes seconds.
+export const PROFILE_SHORT = 1;
+export const PROFILE_NUMERIC = 2;
+export const PROFILE_MARKDOWN = 4;
+
+export function profileVerdicts(profiles: ColumnProfile[]): Uint8Array {
+  const verdicts = new Uint8Array(profiles.length);
+  profiles.forEach((profile, i) => {
+    verdicts[i] = (isShortColumn(profile) ? PROFILE_SHORT : 0) | (isNumericColumn(profile) ? PROFILE_NUMERIC : 0) | (isAutoMarkdownColumn(profile) ? PROFILE_MARKDOWN : 0);
+  });
+  return verdicts;
+}
+
+// Whether each column is in the table by default (1) or only in the row details (0). A stored entry for the header decides that header
+// and counts against the budget; the rest are taken in file order while the budget lasts. The profiles may come as the column's `short` verdict instead.
+export function defaultVisibleFlags(
+  headers: string[],
+  previous: ColumnVisibilityMap,
+  defaultTableColumns: number,
+  profiles?: ColumnProfile[] | ((index: number) => boolean),
+): Uint8Array {
+  const flags = new Uint8Array(headers.length);
+  const anyStored = Object.keys(previous).length > 0;
+  const stored = (h: string): boolean | undefined => (anyStored ? getVisibility(previous, h) : undefined);
+  const isShort = typeof profiles === "function" ? profiles : (i: number) => isShortColumn(profiles?.[i]);
+
+  if (!profiles) {
+    headers.forEach((h, i) => {
+      const value = stored(h);
+      flags[i] = (value !== undefined ? value : i < defaultTableColumns) ? 1 : 0;
+    });
+    return flags;
+  }
+
+  let anyStoredForCurrentHeaders = false;
+  let visibleBudget = defaultTableColumns;
+  let anyVisible = false;
+  headers.forEach((h, i) => {
+    const value = stored(h);
+    if (value === undefined) return;
+    anyStoredForCurrentHeaders = true;
+    flags[i] = value ? 1 : 0;
+    if (value) {
+      visibleBudget--;
+      anyVisible = true;
+    }
+  });
+
+  headers.forEach((h, i) => {
+    if (stored(h) !== undefined) return;
+    const visible = isShort(i) && visibleBudget > 0;
+    flags[i] = visible ? 1 : 0;
+    if (visible) {
+      visibleBudget--;
+      anyVisible = true;
+    }
+  });
+
+  if (!anyVisible && !anyStoredForCurrentHeaders && defaultTableColumns > 0 && headers.length > 0) flags[0] = 1;
+  return flags;
+}
+
 // Stored entries for headers absent from this parse are kept, so they return if the headers do.
+// With more than MANY_COLUMNS headers no key is added per header: the map holds only what the user toggled, and the defaults come from
+// defaultVisibleFlags on every load, so they are not pinned across reloads (a documented limit).
 export function reconcileVisibility(
   headers: string[],
   previous: ColumnVisibilityMap,
@@ -122,50 +189,38 @@ export function reconcileVisibility(
   for (const key of Object.keys(previous)) {
     setVisibility(map, key, getVisibility(previous, key) as boolean);
   }
+  if (headers.length > MANY_COLUMNS) return map;
 
-  if (!profiles) {
-    headers.forEach((h, i) => {
-      setVisibility(map, h, hasVisibility(previous, h) ? (getVisibility(previous, h) as boolean) : i < defaultTableColumns);
-    });
-    return map;
-  }
-
-  const anyStoredForCurrentHeaders = headers.some((h) => hasVisibility(previous, h));
-  let visibleBudget = defaultTableColumns;
-  let anyVisible = false;
-  headers.forEach((h) => {
-    if (hasVisibility(previous, h) && getVisibility(previous, h) === true) {
-      visibleBudget--;
-      anyVisible = true;
-    }
-  });
-
+  const flags = defaultVisibleFlags(headers, previous, defaultTableColumns, profiles);
   headers.forEach((h, i) => {
-    if (hasVisibility(previous, h)) return;
-    const visible = isShortColumn(profiles[i]) && visibleBudget > 0;
-    setVisibility(map, h, visible);
-    if (visible) {
-      visibleBudget--;
-      anyVisible = true;
-    }
+    if (!hasVisibility(previous, h)) setVisibility(map, h, flags[i] === 1);
   });
-
-  if (!anyVisible && !anyStoredForCurrentHeaders && defaultTableColumns > 0 && headers.length > 0) {
-    setVisibility(map, headers[0], true);
-  }
-
   return map;
 }
 
-export function visibleColumns(headers: string[], visibility: ColumnVisibilityMap): string[] {
-  return headers.filter((h) => getVisibility(visibility, h) !== false);
+// A stored entry decides; otherwise the default flag for the column (in the table when there are none).
+export function isColumnInTable(header: string, index: number, visibility: ColumnVisibilityMap, defaults?: Uint8Array | null): boolean {
+  const stored = getVisibility(visibility, header);
+  if (stored !== undefined) return stored;
+  return defaults ? defaults[index] === 1 : true;
 }
 
-export function detailOnlyColumns(headers: string[], visibility: ColumnVisibilityMap): string[] {
-  return headers.filter((h) => getVisibility(visibility, h) === false);
+// With nothing stored (the usual case with very many columns) the defaults alone decide, without a property lookup per header.
+function inTable(visibility: ColumnVisibilityMap, defaults?: Uint8Array | null): (header: string, index: number) => boolean {
+  if (Object.keys(visibility).length > 0) return (h, i) => isColumnInTable(h, i, visibility, defaults);
+  return defaults ? (_h, i) => defaults[i] === 1 : () => true;
 }
 
-export function detailFieldsFor(headers: string[], visibility: ColumnVisibilityMap): string[] {
-  const detailOnly = detailOnlyColumns(headers, visibility);
+export function visibleColumns(headers: string[], visibility: ColumnVisibilityMap, defaults?: Uint8Array | null): string[] {
+  return headers.filter(inTable(visibility, defaults));
+}
+
+export function detailOnlyColumns(headers: string[], visibility: ColumnVisibilityMap, defaults?: Uint8Array | null): string[] {
+  const included = inTable(visibility, defaults);
+  return headers.filter((h, i) => !included(h, i));
+}
+
+export function detailFieldsFor(headers: string[], visibility: ColumnVisibilityMap, defaults?: Uint8Array | null): string[] {
+  const detailOnly = detailOnlyColumns(headers, visibility, defaults);
   return detailOnly.length > 0 ? detailOnly : headers;
 }

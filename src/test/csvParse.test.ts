@@ -3,7 +3,7 @@ import { join } from "path";
 import fc from "fast-check";
 import Papa from "papaparse";
 import { describe, expect, it, vi } from "vitest";
-import { effectiveQuoting, guessDelimiter, guessDelimiterFull, normalizeLineEndings, parseCsv, stripBom } from "../core/csvParse";
+import { dedupeNames, effectiveQuoting, guessDelimiter, guessDelimiterFull, normalizeLineEndings, parseCsv, stripBom } from "../core/csvParse";
 
 describe("stripBom", () => {
   it("removes a leading BOM", () => {
@@ -348,5 +348,48 @@ describe("line-ending normalization is skipped when there is no CR", () => {
       }),
       { numRuns: 3000 },
     );
+  });
+});
+
+// The three-structure version this replaced, as the reference.
+function dedupeNamesOld(names: string[]): string[] {
+  const rawNameSet = new Set(names);
+  const firstIndexOf = new Map<string, number>();
+  names.forEach((name, i) => {
+    if (!firstIndexOf.has(name)) firstIndexOf.set(name, i);
+  });
+  const used = new Set<string>();
+  return names.map((name, i) => {
+    if (firstIndexOf.get(name) === i) {
+      used.add(name);
+      return name;
+    }
+    let suffix = 2;
+    let candidate = `${name}_${suffix}`;
+    while (rawNameSet.has(candidate) || used.has(candidate)) {
+      suffix++;
+      candidate = `${name}_${suffix}`;
+    }
+    used.add(candidate);
+    return candidate;
+  });
+}
+
+describe("dedupeNames", () => {
+  it("gives the same names as the three-set version on lists full of duplicates and clashing suffixes (property)", () => {
+    const name = fc.constantFrom("a", "a_2", "a_3", "b", "b_2", "a_2_2", "", "__proto__", "constructor", "a_");
+    fc.assert(
+      fc.property(fc.array(name, { maxLength: 40 }), (names) => {
+        const result = dedupeNames(names);
+        expect(result).toEqual(dedupeNamesOld(names));
+        expect(new Set(result).size).toBe(result.length);
+      }),
+      { numRuns: 5000 },
+    );
+  });
+
+  it("renames a repeated name around literal names later in the list", () => {
+    expect(dedupeNames(["a", "a", "a_2"])).toEqual(["a", "a_3", "a_2"]);
+    expect(dedupeNames(["a", "a", "a"])).toEqual(["a", "a_2", "a_3"]);
   });
 });

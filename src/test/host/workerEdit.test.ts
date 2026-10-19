@@ -169,6 +169,23 @@ describe("worker edit refusals", () => {
   });
 });
 
+describe("worker column profiles", () => {
+  it("come as profiles up to 1,000 columns and as one verdict byte per column beyond", async () => {
+    await worker();
+    const csv = (columns: number) => Array.from({ length: columns }, (_, i) => `c${i}`).join(",") + "\n" + Array.from({ length: columns }, (_, i) => (i % 3 === 0 ? String(i) : "text")).join(",") + "\n";
+    const few = init(csv(1000));
+    expect(few.columnProfiles).toHaveLength(1000);
+    expect(few.profileVerdicts).toBeUndefined();
+
+    const many = init(csv(1001));
+    expect(many.columnProfiles).toEqual([]);
+    expect(many.profileVerdicts).toHaveLength(1001);
+    expect(many.profileVerdicts[0] & 2).toBe(2);
+    expect(many.profileVerdicts[1] & 2).toBe(0);
+    expect(many.profileVerdicts[1] & 1).toBe(1);
+  });
+});
+
 describe("worker spans for large files", () => {
   it("byte offsets stay exact past an 8 MB ASCII prefix, before and after the background span pass finishes", async () => {
     await worker();

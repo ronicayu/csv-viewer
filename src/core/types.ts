@@ -236,7 +236,9 @@ export interface HintSeenMessage {
 export interface RenderedMessage {
   type: "rendered";
   rowCount: number;
+  // Only the first MANY_COLUMNS headers of a file with more.
   headers: string[];
+  headerCount: number;
 }
 
 export interface EditMessage {

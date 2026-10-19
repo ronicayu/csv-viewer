@@ -48,27 +48,23 @@ export function guessDelimiter(text: string, quoteChar: string): string {
   return guessDelimiterFull(prefix.includes('"') ? text : prefix, quoteChar);
 }
 
-function dedupeNames(names: string[]): string[] {
+export function dedupeNames(names: string[]): string[] {
   // Check against every literal name, not just assigned ones: "a,a,a_2" must become a, a_3, a_2.
-  const rawNameSet = new Set(names);
   const firstIndexOf = new Map<string, number>();
   names.forEach((name, i) => {
     if (!firstIndexOf.has(name)) firstIndexOf.set(name, i);
   });
 
-  const used = new Set<string>();
+  const generated = new Set<string>();
   return names.map((name, i) => {
-    if (firstIndexOf.get(name) === i) {
-      used.add(name);
-      return name;
-    }
+    if (firstIndexOf.get(name) === i) return name;
     let suffix = 2;
     let candidate = `${name}_${suffix}`;
-    while (rawNameSet.has(candidate) || used.has(candidate)) {
+    while (firstIndexOf.has(candidate) || generated.has(candidate)) {
       suffix++;
       candidate = `${name}_${suffix}`;
     }
-    used.add(candidate);
+    generated.add(candidate);
     return candidate;
   });
 }
