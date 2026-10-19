@@ -34,7 +34,9 @@ Four test suites, in increasing order of cost:
   regression in the code itself, so a `test:perf` failure under load isn't
   necessarily a finding. It isn't part of the normal edit/test loop above —
   reach for it specifically when you need to check a performance-sensitive
-  change.
+  change. The **Perf** workflow (Actions → Perf → Run workflow, manual only) runs it
+  alongside the large-file integration tests and compares the 200k × 30 timings with
+  `docs/perf-baseline.json`, failing only above twice the baseline.
 
 A sample file with quoted commas, embedded newlines, numbers, and empty cells is at
 `samples/people.csv` for manual testing.
