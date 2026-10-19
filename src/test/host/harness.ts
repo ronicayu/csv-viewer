@@ -1,5 +1,5 @@
 import { applyTextPatches } from "../../core/csvEdit";
-import type { HostToWebviewMessage, PendingRecordEdit, WebviewToHostMessage } from "../../core/types";
+import type { ChunkedLoadMessage, HostToWebviewMessage, LoadMessage, PendingRecordEdit, WebviewToHostMessage } from "../../core/types";
 import * as fake from "./fakeVscode";
 
 // Must be set before extension.ts is first imported.
@@ -167,6 +167,8 @@ export class Session {
         cspSource: "csp",
         asWebviewUri: (u: unknown) => u,
         postMessage: async (m: HostToWebviewMessage) => {
+          if (Session.wire) await Session.wire(m);
+          if (m.type === "loadChunk" && this.chunkGate) await this.chunkGate;
           this.messages.push(m);
           this.onHostMessage(m);
           return true;
@@ -227,17 +229,47 @@ export class Session {
     return workerReply({ type: "init", bytes, options, floors }, "initResult");
   }
 
+  // Runs for every message before the "webview" takes it, for models of what VS Code does on the way (copying the attachments, say).
+  static wire: ((message: HostToWebviewMessage) => Promise<void> | void) | null = null;
+
+  // While set, chunks of a chunked load are not taken by the "webview" until it resolves.
+  chunkGate: Promise<void> | null = null;
+
+  // A chunked load whose bytes are still arriving, as the webview holds it.
+  private incoming: { header: ChunkedLoadMessage; buffer: Uint8Array; received: number } | null = null;
+
+  // What the webview does once it has a load's bytes.
+  private applyLoad(m: Omit<LoadMessage, "bytes">, bytes: Uint8Array): void {
+    this.baseVersion = m.baseVersion;
+    const delimiter = m.state.delimiter || m.defaultDelimiter || this.options.delimiter || undefined;
+    this.options = { delimiter, firstRowIsHeader: m.state.firstRowIsHeader, quotes: m.state.quotes };
+    this.recordFloors = new Map((m.recordFloors ?? []).map((f) => [f.recordIndex, f.floor]));
+    const init = this.init(bytes, this.options);
+    this.headers = init.headers;
+    this.restore(m.pendingEdits);
+    this.send({ type: "synced", baseVersion: m.baseVersion });
+  }
+
   private onHostMessage(m: HostToWebviewMessage): void {
     switch (m.type) {
-      case "load": {
-        this.baseVersion = m.baseVersion;
-        const delimiter = m.state.delimiter || m.defaultDelimiter || this.options.delimiter || undefined;
-        this.options = { delimiter, firstRowIsHeader: m.state.firstRowIsHeader, quotes: m.state.quotes };
-        this.recordFloors = new Map((m.recordFloors ?? []).map((f) => [f.recordIndex, f.floor]));
-        const init = this.init(loadBytes(m), this.options);
-        this.headers = init.headers;
-        this.restore(m.pendingEdits);
-        this.send({ type: "synced", baseVersion: m.baseVersion });
+      case "load":
+        if ("chunked" in m) this.incoming = { header: m, buffer: new Uint8Array(m.byteLength), received: 0 };
+        else {
+          this.incoming = null;
+          this.applyLoad(m, loadBytes(m));
+        }
+        break;
+      case "loadChunk": {
+        const incoming = this.incoming;
+        // Of a load that a newer one replaced.
+        if (!incoming || m.loadId !== incoming.header.loadId) break;
+        if (m.offset !== incoming.received || m.offset + m.bytes.byteLength > incoming.buffer.byteLength) throw new Error("chunk out of order");
+        incoming.buffer.set(m.bytes, m.offset);
+        incoming.received += m.bytes.byteLength;
+        if (incoming.received === incoming.buffer.byteLength) {
+          this.incoming = null;
+          this.applyLoad(incoming.header, incoming.buffer);
+        }
         break;
       }
       case "saved":

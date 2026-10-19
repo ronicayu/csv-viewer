@@ -198,6 +198,25 @@ async function postLoad(page: Page, envelope: LoadEnvelope, file: { text: string
   );
 }
 
+// The two halves of a chunked load as the host sends them (a header, then chunks of exact-size arrays), for specs that interleave other messages.
+export async function postLoadHeader(page: Page, data: Omit<TextLoad, "text">, loadId: number, byteLength: number): Promise<void> {
+  const message = { type: "load" as const, ...toTextLoadMessage(data), chunked: true as const, loadId, byteLength };
+  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
+}
+
+export async function postLoadChunk(page: Page, loadId: number, offset: number, bytes: Uint8Array): Promise<void> {
+  await page.evaluate(
+    ({ id, at, values }) => window.postMessage({ type: "loadChunk", loadId: id, offset: at, bytes: Uint8Array.from(values) }, "*"),
+    { id: loadId, at: offset, values: Array.from(bytes) },
+  );
+}
+
+export async function pushLoadChunked(page: Page, data: Omit<TextLoad, "text"> & { bytes: Uint8Array }, chunkBytes: number, loadId = 1): Promise<void> {
+  const { bytes, ...rest } = data;
+  await postLoadHeader(page, rest, loadId, bytes.length);
+  for (let offset = 0; offset < bytes.length; offset += chunkBytes) await postLoadChunk(page, loadId, offset, bytes.subarray(offset, offset + chunkBytes));
+}
+
 export async function pushLoad(page: Page, data: FixtureLoad): Promise<void> {
   await postLoad(page, toLoadMessage(data), { text: Papa.unparse({ fields: data.headers, data: data.rows }) });
 }
