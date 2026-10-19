@@ -1,0 +1,19 @@
+{
+  "machine": "4-core shared container, Linux 6.18, Node 22, Playwright Chromium 1194; wall-clock noise about +-20%",
+  "measured": "0.8.1, five runs of scale.spec.ts with PERF_TESTS=0, medians in ms",
+  "scale200kx30": {
+    "inPageFirstRenderMs": 769,
+    "sortMs": 388,
+    "filterMs": 283,
+    "nextPageMs": 127,
+    "separatorMs": 456
+  },
+  "v0.8.0": {
+    "note": "From the Baseline table in docs/spec.md (in-page, five alternating runs), for reference; not compared against",
+    "inPageFirstRenderMs": 909,
+    "sortMs": 375,
+    "filterMs": 325,
+    "nextPageMs": 95,
+    "separatorMs": 404
+  }
+}

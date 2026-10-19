@@ -1,0 +1,51 @@
+name: Perf
+
+# Run by hand from the Actions tab. Timing on shared runners is noisy, so nothing here gates a push; the numbers are for reading,
+# and the job fails only when a 200k x 30 median is more than twice docs/perf-baseline.json.
+on:
+  workflow_dispatch:
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright's Chromium (with OS deps)
+        run: npx playwright install --with-deps chromium
+
+      - name: Strict timing targets (webview scale spec and vitest stress suite)
+        run: npm run test:perf 2>&1 | tee perf-strict.log
+        # The strict bounds are targets for a quiet machine; the comparison below is what can fail the job
+        continue-on-error: true
+
+      - name: 200k x 30 timing table, three runs
+        run: |
+          for run in 1 2 3; do
+            PERF_TESTS=0 npx playwright test src/test/webview-e2e/stress/scale.spec.ts --workers=1 --retries=0 2>&1 | tee -a perf-scale.log
+          done
+
+      - name: Large files in a real VS Code Extension Host
+        run: xvfb-run -a npm run test:integration 2>&1 | tee perf-large-files.log
+        env:
+          ITEST_GREP: Large files
+        continue-on-error: true
+
+      - name: Compare with the baseline
+        run: node scripts/perf-compare.mjs perf-scale.log docs/perf-baseline.json | tee perf-compare.log
+
+      - name: Upload the timing tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-tables
+          path: perf-*.log
+          if-no-files-found: warn

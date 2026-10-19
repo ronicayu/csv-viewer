@@ -1,0 +1,49 @@
+// Compares the timing tables that scale.spec.ts prints (one or more runs, concatenated) with docs/perf-baseline.json.
+// Usage: node scripts/perf-compare.mjs <scale-log> [baseline.json]. Exits 1 only when a median is more than twice its baseline.
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import path from "path";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const [logPath, baselinePath = path.join(here, "..", "docs", "perf-baseline.json")] = process.argv.slice(2);
+if (!logPath) {
+  console.error("usage: node scripts/perf-compare.mjs <scale-log> [baseline.json]");
+  process.exit(2);
+}
+
+const LABELS = [
+  ["inPageFirstRenderMs", /^first render \(in-page/],
+  ["sortMs", /^sort by /],
+  ["filterMs", /^filter:/],
+  ["nextPageMs", /^pagination: Next page/],
+  ["separatorMs", /^separator:/],
+];
+
+const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+
+const samples = Object.fromEntries(LABELS.map(([key]) => [key, []]));
+for (const line of readFileSync(logPath, "utf8").split("\n")) {
+  const match = /^\s+(\S.*?)\s{2,}(\d+)\s*$/.exec(line);
+  if (!match) continue;
+  const hit = LABELS.find(([, pattern]) => pattern.test(match[1]));
+  if (hit) samples[hit[0]].push(Number(match[2]));
+}
+
+const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
+const FACTOR = 2;
+let failed = false;
+console.log(`200k x 30 timing medians against ${baselinePath} (${baseline.machine})`);
+for (const [key] of LABELS) {
+  const runs = samples[key];
+  if (runs.length === 0) {
+    console.log(`  ${key.padEnd(22)} no samples in ${logPath}`);
+    failed = true;
+    continue;
+  }
+  const measured = median(runs);
+  const reference = baseline.scale200kx30[key];
+  const over = measured > FACTOR * reference;
+  if (over) failed = true;
+  console.log(`  ${key.padEnd(22)} median ${String(measured).padStart(5)} ms of ${runs.length} run(s), baseline ${String(reference).padStart(5)} ms${over ? `  <-- over ${FACTOR}x` : ""}`);
+}
+process.exit(failed ? 1 : 0);
