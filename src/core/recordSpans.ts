@@ -206,6 +206,8 @@ export function splitRecords(text: string, options: SplitOptions): RecordSpan[] 
 
 // Records are rarely shorter than this many characters, so sizing for it up front avoids the doubling copies on a large text.
 const MIN_RECORD_CHARS = 48;
+// Long records mean far fewer than one per 48 characters; this bounds what a guess can over-allocate (13 MB) before doubling takes over.
+const MAX_PRESIZED_RECORDS = 1 << 20;
 
 // Accumulates scan results into typed arrays; usable across several scanRecords calls.
 export class SpanTableBuilder {
@@ -217,7 +219,7 @@ export class SpanTableBuilder {
   private length = 0;
 
   constructor(textLength = 0) {
-    this.capacity = Math.max(1024, Math.floor(textLength / MIN_RECORD_CHARS));
+    this.capacity = Math.min(MAX_PRESIZED_RECORDS, Math.max(1024, Math.floor(textLength / MIN_RECORD_CHARS)));
     this.start = new Uint32Array(this.capacity);
     this.end = new Uint32Array(this.capacity);
     this.fieldCount = new Uint32Array(this.capacity);

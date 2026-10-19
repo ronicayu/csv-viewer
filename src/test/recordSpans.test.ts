@@ -191,6 +191,17 @@ describe("span table sizing and byte lengths", () => {
     }
   });
 
+  it("does not presize for more than a million records, however long the text", () => {
+    const before = process.memoryUsage().arrayBuffers;
+    const builder = new SpanTableBuilder(512 * 1024 * 1024);
+    const allocated = process.memoryUsage().arrayBuffers - before;
+    // 512 MB / 48 would be 11 M records and 145 MB.
+    expect(allocated).toBeLessThan(20 * 1024 * 1024);
+    const text = Array.from({ length: 2_000_000 }, () => "a").join("\n");
+    scanRecords(text, { delimiter: ",", quotes: true }, builder.push);
+    expect(builder.finish().length).toBe(2_000_000);
+  });
+
   it("does not keep a mostly empty buffer alive", () => {
     const builder = new SpanTableBuilder(10_000_000);
     scanRecords("a,b\n1,2", { delimiter: ",", quotes: true }, builder.push);
