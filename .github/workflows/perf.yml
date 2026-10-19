@@ -27,6 +27,10 @@ jobs:
         # The strict bounds are targets for a quiet machine; the comparison below is what can fail the job
         continue-on-error: true
 
+      - name: Build the webview for the timing runs
+        # test:perf builds too, but its step is allowed to fail; this one is not
+        run: npm run compile
+
       - name: 200k x 30 timing table, three runs
         run: |
           for run in 1 2 3; do
