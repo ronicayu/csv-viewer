@@ -208,17 +208,20 @@ describe("worker spans for large files", () => {
     expect(next.change.record.byteStart).toBe(utf8Length(patched, 0, next.change.record.charStart));
   }, 60000);
 
-  it("the background span pass finishes in slices and agrees with the one-shot split", async () => {
+  it("the parse finishes in slices, with spans that agree with the one-shot split", async () => {
     await worker();
     const text = "id,v\n" + "1,aaaaaaaaaa\n".repeat(700_000) + "2,é\n" + "3,x\r\n4,y";
     const result = init(text);
     expect(result.spansOk).toBeUndefined();
     const seen = workerMessages().length;
     const deadline = Date.now() + 30_000;
-    while (!workerMessages().slice(seen).some((m) => m.type === "spansReady") && Date.now() < deadline) {
+    while (!workerMessages().slice(seen).some((m) => m.type === "parseDone") && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    expect(workerMessages().slice(seen).filter((m) => m.type === "spansReady")).toEqual([{ type: "spansReady", requestId: result.requestId, spansOk: true }]);
+    const done = workerMessages().slice(seen).filter((m) => m.type === "parseDone");
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ requestId: result.requestId, spansOk: true, totalRows: 700_003, rebuilt: false });
+    expect(done[0].headers).toBeUndefined();
     const last = 700_000 + 2;
     const record = edit(last, 1, "Z").change.record;
     const spans = splitRecords(text, { delimiter: ",", quotes: true });

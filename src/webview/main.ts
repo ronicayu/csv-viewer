@@ -4,6 +4,7 @@ import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
 import {
   MANY_COLUMNS,
+  type ColumnProfile,
   createVisibilityMap,
   PROFILE_MARKDOWN,
   PROFILE_NUMERIC,
@@ -21,7 +22,7 @@ import {
   setVisibility,
   visibleColumns,
 } from "../core/columns";
-import { applyTextPatches } from "../core/csvEdit";
+import { spliceByteReplacements } from "../core/csvEdit";
 import { formatJsonText, tryParseJsonValue } from "../core/json";
 import { MARKDOWN_MAX_CHARS, looksLikeMarkdown } from "../core/markdownDetect";
 import { renderMarkdown } from "../core/markdownRender";
@@ -46,7 +47,7 @@ import type {
   WebviewToHostMessage,
 } from "../core/types";
 import { REGEX_TIMEOUT_MS, WORKING_INDICATOR_DELAY_MS } from "./workerProtocol";
-import type { ParseOptionsMsg, WorkerRequest, WorkerResponse, WorkerRow } from "./workerProtocol";
+import type { FirstPageRequest, ParseOptionsMsg, ParseTuning, WorkerRequest, WorkerResponse, WorkerRow } from "./workerProtocol";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: WebviewToHostMessage): void;
@@ -74,9 +75,12 @@ function delimiterDisplay(d: string): string {
 
 interface AppState {
   fileKey: string;
-  text: string;
-  // The text's size in UTF-8 bytes while it is the file as loaded; unknown (undefined) once a save has patched it.
-  byteLength: number | undefined;
+  // The file as bytes, kept for a respawned worker and updated by each save. null while the worker holds the buffer it was sent.
+  bytes: ArrayBuffer | null;
+  // The request whose init the buffer went out with; its result brings it back.
+  bytesOutFor: number;
+  // True from an init result that left rows unparsed until its parseDone: the rows, count and headers so far are partial.
+  parsing: boolean;
   defaultDelimiter: string;
   headers: string[];
   // Header -> column index, built once per parse (headers are unique); every lookup by name goes through it.
@@ -406,8 +410,8 @@ async function respawnWorker(): Promise<Worker> {
   return worker;
 }
 
-function postToWorker(message: WorkerRequest): void {
-  worker?.postMessage(message);
+function postToWorker(message: WorkerRequest, transfer: Transferable[] = []): void {
+  worker?.postMessage(message, transfer);
 }
 
 let nextRequestId = 1;
@@ -568,7 +572,7 @@ function yieldFrame(): Promise<void> {
   });
 }
 
-// Under testHooks, the timing spec reads these two marks: the load's arrival and the first render after it.
+// Under testHooks, the timing spec reads these marks: the load's arrival, the first render after it, and (when the parse outlasts it) parseDone.
 let firstRenderMarkPending = false;
 
 async function onLoad(message: LoadMessage): Promise<void> {
@@ -593,13 +597,14 @@ async function onLoad(message: LoadMessage): Promise<void> {
   await yieldFrame();
   await ensureWorker();
 
-  // Not fatal: for valid UTF-8 this is the string the host decoded, and a file the host found invalid is read-only anyway.
-  const text = message.text ?? new TextDecoder("utf-8", { ignoreBOM: true }).decode(new Uint8Array(message.bytes!));
+  // The worker decodes the bytes. Harnesses that post text get the same path.
+  const bytes = message.bytes ?? (new TextEncoder().encode(message.text!).buffer as ArrayBuffer);
 
   state = {
     fileKey: message.fileKey,
-    text,
-    byteLength: message.bytes?.byteLength,
+    bytes,
+    bytesOutFor: -1,
+    parsing: false,
     defaultDelimiter: message.defaultDelimiter,
     headers: [],
     indexByHeader: new Map(),
@@ -645,7 +650,7 @@ async function onLoad(message: LoadMessage): Promise<void> {
 
   pendingPageAfterQuery = previousPage;
   const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
-  beginInit(text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader, quotes: view.quotes }, true);
+  beginInit("init", { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader, quotes: view.quotes }, true);
   const initDone = new Promise<void>((resolve) => {
     initWaiter = resolve;
   });
@@ -664,7 +669,7 @@ function reparseFromText(options: { resetPage: boolean }): void {
   state.focusedRowId = null;
   // Only a clean document re-tokenizes, and the host forgets its records when the format changes.
   state.recordFloors.clear();
-  beginInit(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, true);
+  beginInit("reparse", { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, true);
 }
 
 // Resolved when the init the last load started has been answered and its edits restored.
@@ -676,7 +681,16 @@ function settleInitWaiter(): void {
   waiter?.();
 }
 
-function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean): void {
+// The first page can ride with the init result only when it is the unsorted, unfiltered first page and nothing is waiting to be applied to rows.
+function firstPageRequest(): FirstPageRequest | undefined {
+  if (!state) return undefined;
+  const { sortKeys, filterRules, quickSearch, pageSize } = state.view;
+  const idle = sortKeys.length === 0 && filterRules.length === 0 && quickSearch === "" && state.editedCells.size === 0 && state.pendingEdits.length === 0;
+  return idle && (pendingPageAfterQuery ?? state.page) === 1 ? { page: 1, pageSize } : undefined;
+}
+
+// "init" sends the file (transferred, so main keeps nothing until the result hands it back); "reparse" asks the worker to parse what it holds.
+function beginInit(mode: "init" | "reparse", options: ParseOptionsMsg, isFreshParse: boolean): void {
   settleInitWaiter();
   const requestId = nextRequestId++;
   pendingInitRequestId = requestId;
@@ -685,8 +699,23 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   resetRegexWatchdogState();
   // Timeout recovery re-parses identical text, so only a fresh parse discards the values picker.
   if (isFreshParse) discardValuesPicker();
+  if (state) state.parsing = false;
   const floors = state ? [...state.recordFloors].map(([recordIndex, floor]) => ({ recordIndex, floor })) : [];
-  postToWorker({ type: "init", requestId, text, byteLength: state?.byteLength, options, floors });
+  const firstPage = firstPageRequest();
+  const tuning = state?.testHooksEnabled ? (window as unknown as { __csvParseTuning?: ParseTuning }).__csvParseTuning : undefined;
+  if (mode === "reparse") {
+    postToWorker({ type: "reparse", requestId, options, floors, firstPage, tuning });
+    return;
+  }
+  const bytes = state?.bytes;
+  if (!state || !bytes) {
+    // eslint-disable-next-line no-console
+    console.error("csv-viewer: the file's bytes are not here to send to the worker");
+    return;
+  }
+  state.bytes = null;
+  state.bytesOutFor = requestId;
+  postToWorker({ type: "init", requestId, bytes, options, floors, firstPage, tuning }, [bytes]);
 }
 
 function columnLists(): { table: string[]; detailOnly: string[]; visibleCount: number } {
@@ -842,8 +871,9 @@ function saveState(): void {
   vscode.postMessage({ type: "saveState", state: state.view });
 }
 
+// Until the parse is done the count is partial; the render or the parseDone that follows reports.
 function notifyRendered(): void {
-  if (!state || !state.testHooksEnabled) return;
+  if (!state || !state.testHooksEnabled || state.parsing) return;
   vscode.postMessage({
     type: "rendered",
     rowCount: state.filteredCount,
@@ -862,7 +892,11 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
   const msg = event.data;
   switch (msg.type) {
     case "initResult":
+      takeBytesBack(msg);
       onInitResult(msg);
+      break;
+    case "parseDone":
+      onParseDone(msg);
       break;
     case "queryStarted":
       onQueryStarted(msg.requestId);
@@ -878,9 +912,6 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
       break;
     case "distinctResult":
       onDistinctResult(msg);
-      break;
-    case "spansReady":
-      onSpansReady(msg);
       break;
     case "editResult":
       onEditResult(msg);
@@ -898,21 +929,23 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
   }
 }
 
-function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
-  if (!state) return;
-  if (msg.requestId !== pendingInitRequestId) return;
+// The buffer an init carried comes back with its result, even when a later request has made that result stale; one from another load is not ours.
+function takeBytesBack(msg: { type: "initResult" } & WorkerResponse): void {
+  if (!state || !msg.bytes || msg.requestId !== state.bytesOutFor) return;
+  state.bytes = msg.bytes;
+  state.bytesOutFor = -1;
+}
 
+type ColumnsMessage = { headers: string[]; columnProfiles: ColumnProfile[]; profileVerdicts?: Uint8Array };
+
+// Everything that follows from the header list and what the profiles say about the columns.
+function applyColumns(msg: ColumnsMessage): void {
+  if (!state) return;
   state.headers = msg.headers;
   const indexByHeader = new Map<string, number>();
   for (let i = 0; i < msg.headers.length; i++) indexByHeader.set(msg.headers[i], i);
   state.indexByHeader = indexByHeader;
   state.headersLower = null;
-  state.detectedDelimiter = msg.detectedDelimiter;
-  state.quoteProblems = msg.quoteProblems;
-  state.totalRows = msg.totalRows;
-  state.quoting = msg.quoting;
-  state.spansOk = msg.spansOk !== false;
-  if (pendingInitIsFreshParse) state.quoteBannerDismissed = false;
 
   const previousVisibility = state.view.columnVisibility;
   const verdicts = msg.profileVerdicts;
@@ -937,18 +970,81 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   renderColumnsButton();
   renderTableCapBanner();
   renderFilterPanel();
-  renderSeparatorControl();
-  renderFormatButton();
-  renderQuoteWarningBanner();
   renderHintBanner();
 
   if (visibilityChanged) saveState();
+}
+
+function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
+  if (!state) return;
+  if (msg.requestId !== pendingInitRequestId) return;
+
+  state.detectedDelimiter = msg.detectedDelimiter;
+  state.quoteProblems = msg.quoteProblems;
+  state.totalRows = msg.totalRows;
+  state.quoting = msg.quoting;
+  state.spansOk = msg.spansOk !== false;
+  state.parsing = msg.parsing === true;
+  if (pendingInitIsFreshParse) state.quoteBannerDismissed = false;
+
+  applyColumns(msg);
+  renderSeparatorControl();
+  renderFormatButton();
+  renderQuoteWarningBanner();
 
   // A timeout respawn kills the picker's pending distinct request, so ask again.
   if (valuesPicker && valuesPicker.items === null) requestDistinct();
 
-  continueAfterInit();
+  if (msg.firstPage) showFirstPage(msg.firstPage, msg.totalRows);
+  else continueAfterInit();
   settleInitWaiter();
+}
+
+// The first page arrived with the init result, so no query or page round trip is needed; the count and the later pages wait for parseDone.
+function showFirstPage(firstPage: { page: number; rows: WorkerRow[] }, rowsSoFar: number): void {
+  if (!state) return;
+  restoreEditsAfterInit();
+  lastQueryKey = buildQueryKey();
+  queryInFlight = false;
+  latestQueryRequestId = -1;
+  latestPageRequestId = -1;
+  pendingPageAfterQuery = null;
+  state.filteredCount = rowsSoFar;
+  state.page = firstPage.page;
+  state.currentPageRows = firstPage.rows;
+  finishRender();
+}
+
+// The rest of the rows are parsed. Nothing sorted or filtered can have been answered before this, since the worker finishes the parse before it
+// answers anything that needs every row.
+function onParseDone(msg: Extract<WorkerResponse, { type: "parseDone" }>): void {
+  if (!state || msg.requestId !== pendingInitRequestId) return;
+  if (state.testHooksEnabled) performance.mark("csv:parse-done");
+  state.parsing = false;
+  state.totalRows = msg.totalRows;
+  state.quoteProblems = msg.quoteProblems;
+  renderQuoteWarningBanner();
+  if (!msg.spansOk && state.spansOk) {
+    state.spansOk = false;
+    cancelOpenEditor();
+    renderTableBody();
+  }
+  const columnsChanged = msg.headers !== undefined;
+  if (msg.headers) applyColumns({ headers: msg.headers, columnProfiles: msg.columnProfiles ?? [], profileVerdicts: msg.profileVerdicts });
+  if (queryInFlight) return;
+  // What is on screen is the unsorted, unfiltered view of the rows so far, which is now every row.
+  state.filteredCount = msg.totalRows;
+  if (columnsChanged || msg.rebuilt) {
+    // Rows already shown may be narrower than the headers now, or from another parse.
+    startOperation();
+    latestPageRequestId = nextRequestId++;
+    postToWorker({ type: "page", requestId: latestPageRequestId, page: state.page, pageSize: state.view.pageSize });
+    return;
+  }
+  renderStatusBar();
+  renderPagerBar();
+  renderFilteredRow();
+  notifyRendered();
 }
 
 function continueAfterInit(): void {
@@ -1059,7 +1155,7 @@ async function handleRegexTimeout(rulesSent: FilterRule[]): Promise<void> {
   await respawnWorker();
   if (!state) return; // a load may have raced the respawn
   const delimiterOption = resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter);
-  beginInit(state.text, { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, false);
+  beginInit("init", { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, false);
 }
 
 function renderTableHead(): void {
@@ -1858,6 +1954,10 @@ tableBody.addEventListener("keydown", onRowKeyDown);
 
 function renderStatusBar(): void {
   if (!state) return;
+  if (state.parsing) {
+    statusBar.textContent = `Showing the first ${state.filteredCount.toLocaleString()} rows; loading the rest…`;
+    return;
+  }
   statusBar.textContent = `Showing ${state.filteredCount.toLocaleString()} of ${state.totalRows.toLocaleString()} rows`;
 }
 
@@ -1874,6 +1974,13 @@ function renderPagerBar(): void {
   pagerPageInput.max = String(count);
   pagerPageCount.textContent = String(count);
   pagerPageSizeSelect.value = String(size);
+  if (state.parsing) {
+    // The total is not known yet, so there is nothing to page through but the rows on screen.
+    pagerPageCount.textContent = "…";
+    pagerRowRange.textContent = `${(start + 1).toLocaleString()}–${end.toLocaleString()} of … rows (loading)`;
+    for (const control of [pagerFirstBtn, pagerPrevBtn, pagerNextBtn, pagerLastBtn, pagerPageInput]) control.disabled = true;
+    return;
+  }
   const filtered = total !== state.totalRows;
   const suffix = filtered ? ` (filtered from ${state.totalRows.toLocaleString()})` : "";
   pagerRowRange.textContent =
@@ -3349,8 +3456,7 @@ async function onSaved(msg: SavedMessage): Promise<void> {
   for (const record of written ?? []) owner.recordFloors.set(record.recordIndex, record.floor ?? record.fields.length);
   const rebased = await callWorker<Extract<WorkerResponse, { type: "rebased" }>>((requestId) => ({ type: "rebase", requestId, written }));
   if (state !== owner) return;
-  owner.text = applyTextPatches(owner.text, rebased.patches);
-  if (rebased.patches.length > 0) owner.byteLength = undefined;
+  if (rebased.bytePatches.length > 0 && owner.bytes) owner.bytes = spliceByteReplacements(new Uint8Array(owner.bytes), rebased.bytePatches).buffer as ArrayBuffer;
 
   // Cells changed since the write are still edits, now against what was written.
   const headerOffset = owner.view.firstRowIsHeader ? 1 : 0;
@@ -3382,13 +3488,6 @@ async function onFlushEdits(msg: FlushEditsMessage): Promise<void> {
   commitOpenEditor();
   await editsSettled();
   vscode.postMessage({ type: "flushed", baseVersion: msg.baseVersion });
-}
-
-function onSpansReady(msg: Extract<WorkerResponse, { type: "spansReady" }>): void {
-  if (!state || msg.requestId !== pendingInitRequestId || msg.spansOk) return;
-  state.spansOk = false;
-  cancelOpenEditor();
-  renderTableBody();
 }
 
 function onSetEditable(msg: SetEditableMessage): void {

@@ -59,6 +59,8 @@ export interface BootOptions {
   onWorkerRequest?: () => void;
   // Fails this many worker-script requests before letting one through.
   failWorkerRequests?: number;
+  // Cuts the worker's parse into slices of this many records and waits this long between them (with testHooks on), so a test can act mid-parse.
+  parseTuning?: { sliceRecords?: number; sliceDelayMs?: number };
 }
 
 export async function bootShell(page: Page, options: BootOptions = {}): Promise<void> {
@@ -88,6 +90,7 @@ export async function bootShell(page: Page, options: BootOptions = {}): Promise<
   await page.addStyleTag({ content: codiconCss() });
   await page.addStyleTag({ path: outFile("webview", "main.css") });
   await page.addScriptTag({ content: VSCODE_API_STUB });
+  if (options.parseTuning) await page.addScriptTag({ content: `window.__csvParseTuning = ${JSON.stringify(options.parseTuning)};` });
   await page.addScriptTag({ path: outFile("webview", "main.js") });
   await awaitPosted(page, "ready");
   await clearPosted(page);
