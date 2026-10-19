@@ -28,8 +28,9 @@
   the file rather than all of it, and the first page is drawn without an extra layout
   pass. Expanding a row with hundreds of fields takes a fraction of a second instead of
   several.
-- The extension host no longer makes a second, temporary copy of a large file when it
-  opens one: the bytes it read are handed to the viewer as they are.
+- Files read through a remote or virtual file system are no longer copied once more in
+  the extension host before they are sent to the viewer. (Local files were not affected,
+  and the extension host's memory for them is unchanged.)
 - Changing the sort of a filtered or searched file no longer filters it again, and
   building a column's sort order skips a string copy per cell.
 
