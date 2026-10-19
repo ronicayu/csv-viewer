@@ -1,23 +1,24 @@
 {
   "machine": "4-core shared container, Linux 6.18, Node 22, Playwright Chromium 1194; wall-clock noise about +-20%",
-  "measured": "0.8.1 part 2, five runs of scale.spec.ts with PERF_TESTS=0 (a text load and a bytes load per run), medians in ms",
+  "measured": "0.8.1 part 3, five runs of scale.spec.ts with PERF_TESTS=0 (the file posted as bytes, a view at offset 9), medians in ms",
   "scale200kx30": {
-    "inPageFirstRenderMs": 365,
-    "sortMs": 390,
-    "filterMs": 356,
-    "nextPageMs": 123,
-    "separatorMs": 321
+    "inPageFirstRenderMs": 92,
+    "sortMs": 338,
+    "sortInPageMs": 224,
+    "filterMs": 358,
+    "nextPageMs": 108,
+    "separatorMs": 302
   },
-  "scale200kx30Bytes": {
+  "logged": {
+    "parseDoneMs": 621
+  },
+  "v0.8.1 part 2": {
+    "note": "The bytes variant of the previous baseline, same harness, medians of five runs; the text variant was retired in part 3",
     "inPageFirstRenderMs": 108,
     "sortMs": 375,
     "filterMs": 359,
     "nextPageMs": 126,
     "separatorMs": 306
-  },
-  "logged": {
-    "parseDoneMsText": 904,
-    "parseDoneMsBytes": 746
   },
   "v0.8.1 before part 2": {
     "note": "Same harness, text load, medians of five runs",
