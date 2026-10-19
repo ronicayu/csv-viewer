@@ -10,6 +10,8 @@ const CI_SLACK = process.env.CI ? 2 : 1;
 const STRICT = process.env.PERF_TESTS === "1";
 const FIRST_RENDER_BOUND_MS = STRICT ? 2_000 * CI_SLACK : 20_000;
 const IN_PAGE_FIRST_RENDER_BOUND_MS = STRICT ? 400 * CI_SLACK : 20_000;
+// The sort's own share of the step below: from the query being posted to the sorted page being drawn, without the click and the test's polling.
+const IN_PAGE_SORT_BOUND_MS = STRICT ? 400 * CI_SLACK : 10_000;
 const FILTER_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
 const SORT_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
 const NEXT_PAGE_BOUND_MS = STRICT ? 300 * CI_SLACK : 30_000 * CI_SLACK;
@@ -53,6 +55,14 @@ async function postGeneratedLoad(page: Page, opts: { fileKey: string; state: Vie
     window.postMessage(message, "*", [bytes.buffer]);
     delete w.__scaleBytes;
   }, opts);
+}
+
+// From the last query posted to the render that followed it (testHooks marks).
+async function inPageQueryMs(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const at = (name: string): number => performance.getEntriesByName(name).slice(-1)[0].startTime;
+    return at("csv:render") - at("csv:query");
+  });
 }
 
 // The webview marks parseDone when the parse outlasts the first page.
@@ -119,6 +129,9 @@ test("200k rows x 30 columns: timing table for first render and each interaction
     await page.locator("th", { hasText: "col_2" }).click();
     await expect(page.locator("th", { hasText: "col_2" })).toHaveAttribute("aria-sort", "ascending");
   });
+  const sortInPageMs = Math.round(await inPageQueryMs(page));
+  timings.push({ step: "sort (in-page, query posted -> sorted page drawn)", ms: sortInPageMs });
+  expect(sortInPageMs).toBeLessThan(IN_PAGE_SORT_BOUND_MS);
 
   await page.locator("#filters-btn").click();
   await page.locator("#add-rule-btn").click();

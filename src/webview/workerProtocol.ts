@@ -92,7 +92,8 @@ export type WorkerResponse =
     }
   | { type: "queryStarted"; requestId: number }
   | { type: "filterDone"; requestId: number }
-  | { type: "queryResult"; requestId: number; filteredCount: number }
+  // `filterCached`: the filter was not run again, the ids of the last query with the same search and rules were used.
+  | { type: "queryResult"; requestId: number; filteredCount: number; filterCached?: boolean }
   | { type: "pageResult"; requestId: number; rows: WorkerRow[] }
   | { type: "distinctResult"; requestId: number; column: string; values: DistinctValue[]; truncated: boolean }
   | { type: "editResult"; requestId: number; ok: true; change: CellChange | null }

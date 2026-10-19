@@ -121,6 +121,15 @@ function rowPredicate(headers: string[], quickSearch: string, rules: FilterRule[
   };
 }
 
+// What decides which rows pass: the quick search and the rules that take part, nothing about the sort. Two calls with the same key over the same rows
+// return the same ids, so the worker can keep the last result.
+export function filterCacheKey(headers: string[], quickSearch: string, rules: FilterRule[]): string {
+  const active = rules
+    .filter((r) => r.enabled && isRuleActive(r, headers))
+    .map((r) => [r.column, r.operator, r.value, r.operator === "in" ? r.values : undefined, r.mode, r.caseSensitive]);
+  return JSON.stringify([quickSearch, active]);
+}
+
 // The indexes of the rows that pass, so the worker need not map filtered rows back to their ids.
 export function filterRowIds(headers: string[], rows: string[][], quickSearch: string, rules: FilterRule[]): number[] {
   const passes = rowPredicate(headers, quickSearch, rules);

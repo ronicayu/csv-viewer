@@ -4,7 +4,7 @@ import { parseCsv } from "../core/csvParse";
 import { PARSE_SLICE_RECORDS, ProgressiveParse } from "../core/progressiveParse";
 import { isWellFormedUtf16, serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
-import { filterRowIds } from "../core/filter";
+import { filterCacheKey, filterRowIds } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
 import { EOL_TEXT, addByteOffsets, type SpanTable } from "../core/recordSpans";
@@ -18,6 +18,8 @@ let currentView: number[] | null = null;
 let columnIndexByName: Map<string, number> | null = null;
 let sortKeyCache = new Map<string, ResolvedCellSortKey[]>();
 let distinctCache = new Map<string, DistinctResult>();
+// The ids that passed the last query's filter, so a sort-only change does not filter again. Never mutated: sorting works on a copy.
+let filterCache: { key: string; ids: number[] } | null = null;
 
 // Kept for the document's lifetime: span slicing and the per-commit re-parse need the text the spans describe.
 let text = "";
@@ -113,6 +115,7 @@ function beginParse(
   columnIndexByName = null;
   sortKeyCache = new Map();
   distinctCache = new Map();
+  filterCache = null;
 
   let page: { page: number; rows: WorkerRow[] } | undefined;
   if (parse.done) {
@@ -188,6 +191,7 @@ function stepParseJob(job: ParseJob): void {
   do {
     done = job.parse.step();
   } while (!done && sliceDelayMs === 0 && performance.now() < deadline);
+  filterCache = null;
   if (done) finishParseJob(job);
   else scheduleStep(job);
 }
@@ -195,6 +199,7 @@ function stepParseJob(job: ParseJob): void {
 function finishParseJob(job: ParseJob): void {
   const { parse } = job;
   endParseJob();
+  filterCache = null;
   rawRows = parse.rows;
   const finalHeaders = parse.headers();
   const changed = parse.rebuilt || finalHeaders.length !== job.reportedHeaders.length || finalHeaders.some((h, i) => h !== job.reportedHeaders[i]);
@@ -240,7 +245,10 @@ function onQuery(requestId: number, quickSearch: string, filterRules: FilterRule
   ensureParsed();
   // queryStarted/filterDone bracket only the filter phase, which is what the regex watchdog times.
   post({ type: "queryStarted", requestId });
-  const ids = filterRowIds(headers, rawRows, quickSearch, filterRules);
+  const key = filterCacheKey(headers, quickSearch, filterRules);
+  const filterCached = filterCache?.key === key;
+  if (!filterCached) filterCache = { key, ids: filterRowIds(headers, rawRows, quickSearch, filterRules) };
+  const ids = filterCache!.ids;
   post({ type: "filterDone", requestId });
 
   const sortColumns: { direction: SortDirection; keys: ResolvedCellSortKey[] }[] = [];
@@ -253,7 +261,7 @@ function onQuery(requestId: number, quickSearch: string, filterRules: FilterRule
 
   const sortedIds = sortRowIdsByCachedKeys(ids, sortColumns);
   currentView = sortedIds;
-  post({ type: "queryResult", requestId, filteredCount: sortedIds.length });
+  post({ type: "queryResult", requestId, filteredCount: sortedIds.length, filterCached });
 }
 
 function onDistinct(requestId: number, column: string): void {
@@ -300,7 +308,9 @@ function noteBaseline(rowId: number, columnIndex: number, previous: string, next
   changed.set(columnIndex, baseline);
 }
 
+// A cell changed: the keys and distinct values of its column are stale, and so are the ids that passed a filter.
 function invalidateColumn(columnIndex: number): void {
+  filterCache = null;
   const name = headers[columnIndex];
   sortKeyCache.delete(name);
   distinctCache.delete(name);
@@ -451,6 +461,7 @@ function editedRecords(): WrittenRecord[] {
 // The host says what it wrote; cells edited since are still edits against that file.
 function onRebase(requestId: number, written: WrittenRecord[] | undefined): void {
   ensureSpans(true);
+  filterCache = null;
   const records: EditedRecord[] = (written ?? editedRecords()).map((w) => ({ index: w.recordIndex, fields: w.fields })).sort((a, b) => a.index - b.index);
   let patches: ReturnType<typeof textPatches> = [];
   let bytePatches: ByteReplacement[] = [];

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { buildColumnSortKeys, cellSortKey, compareCellSortKeys, cycleSortForColumn, sortRowIdsByCachedKeys, sortRows } from "../core/sort";
+import { buildColumnSortKeys, cellSortKey, isBlank, compareCellSortKeys, cycleSortForColumn, sortRowIdsByCachedKeys, sortRows } from "../core/sort";
+import { parseNumber } from "../core/number";
 import type { SortDirection, SortKey } from "../core/types";
 
 const headers = ["name", "age", "score"];
@@ -273,5 +274,64 @@ describe("mostly-unique text columns (index-sort ranking path)", () => {
     expect(a).toBeGreaterThan(-1);
     expect(b).toBeGreaterThan(-1);
     expect(keys[a].rank).toBe(keys[b].rank);
+  });
+});
+
+describe("the blank test and the rank assignment behind the sort keys", () => {
+  it("isBlank agrees with trim() === \"\" for every UTF-16 code unit on its own and padded", () => {
+    for (let code = 0; code <= 0xffff; code++) {
+      const c = String.fromCharCode(code);
+      expect(isBlank(c), `U+${code.toString(16)}`).toBe(c.trim() === "");
+      expect(isBlank(`${c}x`)).toBe(false);
+    }
+    expect(isBlank("")).toBe(true);
+  });
+
+  it("isBlank agrees with trim() === \"\" and cellSortKey with the trim-based classification for whitespace-heavy strings (property)", () => {
+    const unit = fc.constantFrom(" ", "\t", "\n", "\r", "\v", "\f", "\u00a0", "\u1680", "\u2003", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff", "\u180e", "\u200b", "\u0085", "0", "a", "-", ".", "1e1");
+    fc.assert(
+      fc.property(fc.array(unit, { maxLength: 8 }).map((u) => u.join("")), (value) => {
+        expect(isBlank(value)).toBe(value.trim() === "");
+        const reference = value.trim() === "" ? "empty" : parseNumber(value) !== null ? "numeric" : "text";
+        expect(cellSortKey(value).kind).toBe(reference);
+      }),
+      { numRuns: 3000 },
+    );
+  });
+
+  // The ranks as defined before the two paths were tuned: position among the collator's equivalence classes of the text cells.
+  function referenceRanks(values: string[]): number[] {
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    const keys = values.map(cellSortKey);
+    const texts = [...new Set(keys.filter((k) => k.kind === "text").map((k) => k.text))];
+    const representatives: string[] = [];
+    for (const t of texts) if (!representatives.some((r) => collator.compare(r, t) === 0)) representatives.push(t);
+    return keys.map((k) => (k.kind === "text" ? representatives.filter((r) => collator.compare(r, k.text) < 0).length : 0));
+  }
+
+  it("ranks are the collator class positions, whichever of the two paths builds them (property)", () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom("a", "A", "b", "B", "b2", "b10", "B10", "é", "e", "1", "2", " ", "", "x y", "Zed"), { maxLength: 30 }), (values) => {
+        const rows = values.map((v) => [v]);
+        expect(buildColumnSortKeys(rows, 0).map((k) => k.rank)).toEqual(referenceRanks(values));
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  it("ranks past the distinct-value limit (index sort path) equal the ranks of the same column in the small-set path", () => {
+    // 20,001 distinct strings forces the index sort; each is also ranked on its own by sorting with the collator directly.
+    const values = Array.from({ length: 20_001 }, (_, i) => (i % 3 === 0 ? `Item ${i}` : i % 3 === 1 ? `item ${i}` : `ITEM ${i - 1}`));
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    const order = values.map((_, i) => i).sort((x, y) => collator.compare(values[x], values[y]) || x - y);
+    const expected = new Array<number>(values.length);
+    let rank = 0;
+    order.forEach((index, j) => {
+      if (j > 0 && collator.compare(values[order[j - 1]], values[index]) !== 0) rank++;
+      expected[index] = rank;
+    });
+    const actual = buildColumnSortKeys(values.map((v) => [v]), 0).map((k) => k.rank);
+    expect(actual).toEqual(expected);
+    expect(new Set(values).size).toBeGreaterThan(20_000);
   });
 });

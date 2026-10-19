@@ -576,7 +576,8 @@ function yieldFrame(): Promise<void> {
   });
 }
 
-// Under testHooks, the timing spec reads these marks: the load's arrival, the first render after it, and (when the parse outlasts it) parseDone.
+// Under testHooks, the timing spec reads these marks: the load's arrival, the first render after it, and (when the parse outlasts it) parseDone;
+// each query as it is posted and each render as it finishes.
 let firstRenderMarkPending = false;
 
 async function onLoad(message: LoadMessage): Promise<void> {
@@ -1086,6 +1087,7 @@ function sendQueryNow(): { requestId: number; rulesSent: FilterRule[] } {
   if (!state) return { requestId: -1, rulesSent: [] };
   const rulesSent = state.view.filterRules.filter((r) => !state!.timedOutRuleIds.has(r.id));
   const requestId = nextRequestId++;
+  if (state.testHooksEnabled) performance.mark("csv:query");
   postToWorker({ type: "query", requestId, quickSearch: state.view.quickSearch, filterRules: rulesSent, sortKeys: state.view.sortKeys });
   recordQuerySent();
   return { requestId, rulesSent };
@@ -1164,6 +1166,7 @@ function finishRender(): void {
   renderFilteredRow();
   endOperation();
   notifyRendered();
+  if (state?.testHooksEnabled) performance.mark("csv:render");
   if (firstRenderMarkPending) {
     firstRenderMarkPending = false;
     performance.mark("csv:first-render");
