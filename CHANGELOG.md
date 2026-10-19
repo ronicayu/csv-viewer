@@ -17,6 +17,8 @@
   defaults are no longer pinned (those columns follow the default rule), and "All in
   Table" / "All in Details" replace any per-column choices, including ones made under
   another separator.
+- A pasted value containing an unpaired surrogate character is refused with a message
+  instead of being written to the file as a replacement character.
 
 **Changed**
 - Large files show their first page as soon as it is parsed; the row count follows.
