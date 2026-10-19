@@ -118,6 +118,15 @@ suite("Large files", function () {
     assert.strictEqual(m.outcome, "rendered");
     assert.ok(m.rowCount! > 0, "expected at least one parsed row");
 
+    // Generous bounds; the targets are logged, not gated, because shared runners are slow and noisy.
+    const rssGrowthMb = m.memAfterRssMb - m.memBeforeRssMb;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[largeFiles] 120MB open: ${m.elapsedMs}ms (target 4000), extHost RSS grew ${rssGrowthMb}MB = ${Math.round((rssGrowthMb / mb(bytes)) * 100) / 100}x the file (target 1.5x)`,
+    );
+    assert.ok(m.elapsedMs < 15000, `opening took ${m.elapsedMs}ms`);
+    assert.ok(rssGrowthMb < 2 * mb(bytes), `the extension host's RSS grew ${rssGrowthMb}MB for a ${mb(bytes)}MB file`);
+
     await vscode.commands.executeCommand("workbench.action.files.saveAll");
   });
 
@@ -170,12 +179,14 @@ suite("Large files", function () {
     assert.strictEqual(m.rowCount, 1, "expected exactly one data row");
   });
 
-  // Skipped: a 20MB single line renders far slower than linearly and can hang the whole test host.
-  test.skip("single line, 20MB long: one row (SKIPPED — see BUG comment above; risks hanging the whole test host)", async function () {
-    const { filePath } = await writeSingleLongLineCsv("longline-20mb.csv", 20 * 1024 * 1024);
+  // About two million columns: the Columns, Sort and Filter lists and the row details cap what they build, so this is linear in the file.
+  test("single line, 20MB long: one row, renders within the bound", async function () {
+    this.timeout(60000);
+    const { filePath, bytes } = await writeSingleLongLineCsv("longline-20mb.csv", 20 * 1024 * 1024);
     const uri = vscode.Uri.file(filePath);
-    await openInViewer(uri);
-    const api = await getTestApi();
-    await waitFor(() => api.getMessages(fileKeyFor(uri)).some((m) => m.type === "rendered"), { timeoutMs: 120000 });
+
+    const m = await measure("20MB single line", uri, bytes, { expectRender: true, timeoutMs: 30000 });
+    assert.strictEqual(m.rowCount, 1, "expected exactly one data row");
+    assert.ok(m.elapsedMs < 30000, `rendering took ${m.elapsedMs}ms`);
   });
 });
