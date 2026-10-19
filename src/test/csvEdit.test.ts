@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { fieldsForWrite, isRecordEdited, rebaseSpanTable, rebaseSpans, spliceBytes, spliceText } from "../core/csvEdit";
+import { fieldsForWrite, isRecordEdited, rebaseSpanTable, rebaseSpans, spliceByteReplacements, spliceBytes, spliceText } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
 import { addByteOffsets, spansFromTable, splitRecords, splitRecordsToTable, type SplitOptions } from "../core/recordSpans";
 
@@ -242,5 +242,24 @@ describe("edit properties", () => {
       }),
       { numRuns: 3000 },
     );
+  });
+});
+
+describe("spliceByteReplacements", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+
+  it("replaces byte ranges and keeps every other byte", () => {
+    const out = spliceByteReplacements(enc("a,b\n1,2\n3,4\n"), [
+      { byteStart: 4, byteEnd: 7, bytes: enc("é,€") },
+      { byteStart: 8, byteEnd: 11, bytes: enc("") },
+    ]);
+    expect(new TextDecoder().decode(out)).toBe("a,b\né,€\n\n");
+  });
+
+  it("does nothing without replacements, and refuses overlapping or out-of-range ones", () => {
+    const bytes = enc("abc");
+    expect(Array.from(spliceByteReplacements(bytes, []))).toEqual(Array.from(bytes));
+    expect(() => spliceByteReplacements(bytes, [{ byteStart: 1, byteEnd: 2, bytes: enc("x") }, { byteStart: 1, byteEnd: 3, bytes: enc("y") }])).toThrow();
+    expect(() => spliceByteReplacements(bytes, [{ byteStart: 2, byteEnd: 9, bytes: enc("x") }])).toThrow();
   });
 });

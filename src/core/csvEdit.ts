@@ -122,6 +122,37 @@ export function spliceBytes(bytes: Uint8Array, records: readonly ByteEditedRecor
   return out;
 }
 
+export interface ByteReplacement {
+  byteStart: number;
+  byteEnd: number;
+  bytes: Uint8Array;
+}
+
+// The file with each byte range replaced by the given bytes; the ranges ascend and do not overlap.
+export function spliceByteReplacements(bytes: Uint8Array, replacements: readonly ByteReplacement[]): Uint8Array {
+  let total = bytes.length;
+  let cursor = 0;
+  for (const r of replacements) {
+    if (r.byteStart < cursor || r.byteEnd < r.byteStart || r.byteEnd > bytes.length) {
+      throw new Error("spliceByteReplacements: ranges must be ascending, non-overlapping and inside the file");
+    }
+    total += r.bytes.length - (r.byteEnd - r.byteStart);
+    cursor = r.byteEnd;
+  }
+  const out = new Uint8Array(total);
+  let written = 0;
+  cursor = 0;
+  for (const r of replacements) {
+    out.set(bytes.subarray(cursor, r.byteStart), written);
+    written += r.byteStart - cursor;
+    out.set(r.bytes, written);
+    written += r.bytes.length;
+    cursor = r.byteEnd;
+  }
+  out.set(bytes.subarray(cursor), written);
+  return out;
+}
+
 // The span table of the spliced output, without re-splitting it.
 export function rebaseSpanTable(table: SpanTable, records: readonly EditedRecord[], delimiter: string, quotes: boolean): SpanTable {
   const hasBytes = table.byteStart !== undefined && table.byteEnd !== undefined;
