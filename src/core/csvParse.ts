@@ -69,7 +69,7 @@ export function dedupeNames(names: string[]): string[] {
   });
 }
 
-function quoteErrorDataRows(errors: Papa.ParseError[], firstRowIsHeader: boolean): { row: number }[] {
+export function quoteErrorDataRows(errors: Papa.ParseError[], firstRowIsHeader: boolean): { row: number }[] {
   const rows: { row: number }[] = [];
   const seen = new Set<number>();
   for (const e of errors) {
