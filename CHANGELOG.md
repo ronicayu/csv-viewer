@@ -19,6 +19,8 @@
   another separator.
 
 **Changed**
+- Large files show their first page as soon as it is parsed; the row count follows.
+- The viewer keeps the file as bytes, so very large files use less memory in the window.
 - Large files open faster and use less memory in the extension host: the file is handed
   to the viewer as bytes instead of text, the separator is detected from the start of
   the file rather than all of it, and the first page is drawn without an extra layout

@@ -373,3 +373,32 @@ Profiled on `f31d81b` (the 0.8.1 build) with the part-1 tooling: cross-thread ti
 **What cannot reasonably be cut further.** Papa's parse (≈ 360–400 ms worker CPU at 200k × 30) plus V8's scavenges of the 6 M cell strings it creates are within 25 % of a bare `split`; a custom tokenizer or a flat cell store would rewrite every consumer of `string[][]` for at most that margin, so item 1 moves the cost off the first paint instead of shrinking it. The remaining fixed costs are the ≈ 90 ms it takes a 60 MB string or buffer to cross into the worker (item 2 removes the main-thread half), four message hops (≈ 20–30 ms), the 15 ms render, and Playwright's own visibility poll. The separator re-parse keeps its 149 ms: Papa does not expose its line split for reuse, and the result is one column per row anyway.
 
 **Revised targets.** With items 1–3: in-page first render at 200k × 30 **< 400 ms strict** (expected 200–250 here; the 0.8.1 target of 800 stays as the generous×2 CI bound's base); separator/header/quote re-parse **< 500 ms strict** (expected ≈ 250–300 including the test driver); the full parse (`parseDone`) is logged, not bounded (≈ 600–700 ms of worker CPU is the floor above). With item 2 alone: ≈ 650 ms first render, ≈ 300 separator. CHANGELOG (**Changed**): "Large files show their first page as soon as it is parsed; the row count follows." and "The viewer keeps the file as bytes, so very large files use less memory in the window."
+
+#### As built (part 2)
+Medians of eight interleaved runs of the part-1 build (`3035d95`) and this one on the same machine, 200k × 30, in-page numbers observed from outside (a `MutationObserver` on the first row and on the final `Showing 200,000 of 200,000 rows`); noise about ±20 %.
+
+| | before | after |
+|---|---|---|
+| in-page first row, text load (harness) | 740 | 376 |
+| painted (double rAF), text load | 772 | 420 |
+| in-page first row, bytes load (what VS Code sends) | 799 | 110 |
+| painted, bytes load | 833 | 152 |
+| all rows parsed (`parseDone`), text / bytes | 740 / 799 (same instant as first row) | 970 / 727 |
+| separator → `;` (text / bytes) | 430 / 417 | 276 / 275 |
+| worker CPU in node, parse + span table, unquoted 200k × 30 | 675–740 | 693–718 |
+| same, a fifth of the cells quoted | 901 | 1,089 |
+| first slice in node (guess, scan, Papa) | | 21 (quoted: 58) |
+
+The first row now shows at about half the planned 200–250 ms for the text path and at 110 ms for bytes: the 90 ms transfer and the main-thread clone are gone for bytes, and the harness's `postMessage` of a 60 M-character string is what the text path still pays. The worker does about the same total work unquoted and about a fifth more with quoted fields (Papa's quote-aware path per slice, plus the slice bookkeeping); the cost moved behind the first page. The scale spec's main-thread JS heap figure is quantized by the browser and did not move; the 60 MB string is gone from the main thread by construction.
+
+What the implementation settled:
+- **`ProgressiveParse`** (`src/core/progressiveParse.ts`) is the class the worker steps; `parseProgressive` runs it to the end for tests. Slice size is a constructor argument and, through `init`/`reparse` `tuning` (read from `window.__csvParseTuning` under testHooks), a delay between slices too.
+- **Fallbacks to the whole-text `parseCsv`:** a slice whose Papa record count differs from the scan's; a quote delimiter with quoting off; and a text that starts with two U+FEFF (Papa drops the second, the scan keeps it, and the first slice could be cut where Papa would not cut: found by the property test). Delimiters Papa cannot use become `,` as in Papa. Later slices start with a blank line so a leading U+FEFF is not taken for a byte order mark. Error rows are Papa's unfiltered row indexes, offset by the rows of the slices before.
+- **The delimiter guess** on a CR-containing text normalizes only the first ten lines unless a quote is among them; a text with no CR is searched once, and the scan reuses that answer.
+- **First page:** only when the view has no sort, filter, search, edits or pending edits, page 1 is wanted, the parse did not finish in slice 1 and the rows so far fill the page. A file parsed in one slice (most small files) keeps the query/page round trip, so those tests are unchanged.
+- **While parsing** the pager shows `…` for the page count and `1–100 of … rows (loading)`, its buttons are disabled, the status line says how many rows are shown, and the test-hook `rendered` message waits for the count (sent at `parseDone`). Sort, filter, search, the values picker, an edit, `setCells`, `rebase`, and a page size too large for the rows so far all make the worker finish the parse first, so their answers cover every row. A ragged file's headers and profiles are sent again at `parseDone` when its widest row came late (or when the first slice held fewer rows than the profiles sample), and the page is fetched again.
+- **Bytes:** the main thread keeps `state.bytes` (null while the worker holds the buffer; the init result hands it back, matched by the request that sent it so a stale result of the same load still returns it). Harnesses that post text are encoded on the main thread, so the e2e suite runs the bytes path; a lone surrogate in such a text becomes U+FFFD. `rebased` carries `bytePatches`; the worker's byte length stays known after a save.
+- `spansReady` is gone: `parseDone` carries `spansOk`. The 20 MB single-line file parses in its one slice as before.
+- **Tests changed:** the part-1 worker test that waited for `spansReady` waits for `parseDone` (the message the spec removes). The scale spec waits for the final row count before timing the sort, since a sort asked for earlier correctly includes the rest of the parse; it gains a bytes variant and a `parseDone` row, and its strict bounds are 400 ms in-page first render and 500 ms separator.
+- **The 373-vs-374 Playwright count** from the last round could not be reproduced: eight full runs of the existing suite (three plain, three at `--repeat-each=3 --workers=3`, two at `--repeat-each=2 --workers=8`, all with retries off) passed every test. The earlier figure came from reading only the last line of the report, which hides a "1 flaky" line above it. The flaky tests found were two new ones of this pass (a mid-parse window that closed under load, and an assertion that raced the edit message); both are fixed, and the new specs pass 264 of 264 runs at 8 workers.
+
