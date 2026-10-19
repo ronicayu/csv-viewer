@@ -5,7 +5,7 @@ import { parseCsv } from "../../core/csvParse";
 import { bootHost, callWorker, workerMessages, workerReply } from "./harness";
 
 const OPTIONS = { firstRowIsHeader: true, quotes: true };
-const encode = (text: string): ArrayBuffer => new TextEncoder().encode(text).buffer as ArrayBuffer;
+const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
 const decode = (bytes: Uint8Array): string => new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
 
 // A worker with its parse cut into slices of `sliceRecords` records, so even a small file is still parsing when the next message arrives.
@@ -127,9 +127,8 @@ describe("worker: progressive parse", () => {
   it("hands the bytes back and decodes them like a non-fatal TextDecoder", async () => {
     await bootHost();
     const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0x61, 0x2c, 0x62, 0x0a, 0x63, 0xff, 0x2c, 0x64, 0x0a]);
-    const buffer = bytes.buffer.slice(0) as ArrayBuffer;
-    const result = callWorker({ type: "init", bytes: buffer, options: OPTIONS }).find((m) => m.type === "initResult")!;
-    expect(result.bytes).toBe(buffer);
+    const result = callWorker({ type: "init", bytes, options: OPTIONS }).find((m) => m.type === "initResult")!;
+    expect(result.bytes).toBe(bytes);
     expect(result.headers).toEqual(["a", "b"]);
     expect(workerReply({ type: "page", page: 1, pageSize: 10 }, "pageResult").rows[0].cells).toEqual(["c�", "d"]);
   });
@@ -147,7 +146,7 @@ describe("worker: byte patches mirror the text patches", () => {
       fc.property(textArb, fc.array(fc.tuple(fc.nat(), fc.nat({ max: 3 }), valueArb), { minLength: 1, maxLength: 4 }), (text, picks) => {
         if (text.startsWith("﻿﻿")) return;
         const bytes = new TextEncoder().encode(text);
-        const init = callWorker({ type: "init", bytes: bytes.buffer.slice(0), options: OPTIONS }).find((m) => m.type === "initResult")!;
+        const init = callWorker({ type: "init", bytes, options: OPTIONS }).find((m) => m.type === "initResult")!;
         if (init.spansOk === false || init.totalRows === 0) return;
         const written: { recordIndex: number; fields: string[] }[] = [];
         for (const [pick, column, value] of picks) {
@@ -170,5 +169,55 @@ describe("worker: byte patches mirror the text patches", () => {
       { numRuns: 1500 },
     );
     expect(rebases).toBeGreaterThan(50);
+  });
+});
+
+describe("worker: the file as a view into a larger buffer", () => {
+  const ALPHABET = ["a", "b", "1", ",", ";", '"', " ", "\n", "\r\n", "é", "😀", "€", "\t", "﻿"];
+  const textArb = fc.array(fc.constantFrom(...ALPHABET), { maxLength: 40 }).map((c) => c.join(""));
+  const valueArb = fc.array(fc.constantFrom("a", ",", '"', " ", "\n", "é", "😀", "€", ""), { maxLength: 6 }).map((c) => c.join(""));
+
+  // Everything observable about a load: what the worker decodes, the offsets it reports, and the bytes it gives back after patching them.
+  function observe(bytes: Uint8Array, picks: [number, number, string][]) {
+    const init = callWorker({ type: "init", bytes, options: OPTIONS }).find((m) => m.type === "initResult")!;
+    const out: Record<string, unknown> = { headers: init.headers, totalRows: init.totalRows, spansOk: init.spansOk, handedBack: init.bytes === bytes };
+    if (init.spansOk === false || init.totalRows === 0) return out;
+    out.rows = workerReply({ type: "page", page: 1, pageSize: 1000 }, "pageResult").rows;
+    const changes: unknown[] = [];
+    for (const [pick, column, value] of picks) {
+      const result = workerReply({ type: "editCell", rowId: pick % init.totalRows, columnIndex: column % init.headers.length, value }, "editResult");
+      changes.push(result.ok ? result.change : result.reason);
+    }
+    out.changes = changes;
+    const rebased = workerReply({ type: "rebase" }, "rebased");
+    out.patches = rebased.patches;
+    out.bytePatches = rebased.bytePatches;
+    out.spliced = decode(spliceByteReplacements(bytes, rebased.bytePatches));
+    return out;
+  }
+
+  it("decodes the same text and reports the same byte offsets as a plain buffer, whatever surrounds the view (property)", async () => {
+    await bootHost();
+    fc.assert(
+      fc.property(
+        textArb,
+        fc.array(fc.tuple(fc.nat(), fc.nat({ max: 3 }), valueArb), { minLength: 1, maxLength: 4 }),
+        fc.nat({ max: 40 }),
+        fc.nat({ max: 40 }),
+        fc.nat({ max: 255 }),
+        (text, picks, before, after, fill) => {
+          if (text.startsWith("﻿﻿")) return;
+          const bytes = new TextEncoder().encode(text);
+          const plain = observe(bytes, picks);
+          const backing = new Uint8Array(before + bytes.length + after).fill(fill);
+          backing.set(bytes, before);
+          const view = backing.subarray(before, before + bytes.length);
+          expect(observe(view, picks)).toEqual(plain);
+          // The worker never writes through the view it was handed.
+          expect(Array.from(view)).toEqual(Array.from(bytes));
+        },
+      ),
+      { numRuns: 1000 },
+    );
   });
 });

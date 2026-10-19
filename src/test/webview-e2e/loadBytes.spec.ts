@@ -11,18 +11,26 @@ const load = { fileKey: FILE_KEY, state: defaultViewState(), defaultTableColumns
 const renderedRows = (page: Page): Promise<string[]> => page.locator("tr.data-row").evaluateAll((rows) => rows.map((r) => r.textContent ?? ""));
 
 test.describe("a load that carries bytes", () => {
-  test("renders the same table as a load that carries the text", async ({ page }) => {
+  test("renders the same table from a view into a larger buffer as from a plain ArrayBuffer", async ({ page }) => {
+    await bootShell(page);
+    await page.evaluate(
+      ({ values, base }) => window.postMessage({ type: "load", ...base, bytes: Uint8Array.from(values).buffer }, "*"),
+      { values: Array.from(encode(FILE)), base: { ...load, defaultDelimiter: "", hintsSeen: [], baseVersion: 1, editable: true, pendingEdits: [] } },
+    );
+    await expect(page.locator("tr.data-row")).toHaveCount(3);
+    const fromBuffer = await renderedRows(page);
+
     await bootShell(page);
     await pushLoadText(page, { ...load, text: FILE });
     await expect(page.locator("tr.data-row")).toHaveCount(3);
-    const fromText = await renderedRows(page);
+    expect(await renderedRows(page)).toEqual(fromBuffer);
 
     await bootShell(page);
     await pushLoadBytes(page, { ...load, bytes: encode(FILE) });
     await expect(page.locator("tr.data-row")).toHaveCount(3);
-    expect(await renderedRows(page)).toEqual(fromText);
-    expect(fromText.join("|")).toContain("Åsa");
-    expect(fromText.join("|")).toContain("naïve, café");
+    expect(await renderedRows(page)).toEqual(fromBuffer);
+    expect(fromBuffer.join("|")).toContain("Åsa");
+    expect(fromBuffer.join("|")).toContain("naïve, café");
     await expect(page.locator("#table-head th.sortable").first()).toHaveAttribute("data-column", "name");
   });
 

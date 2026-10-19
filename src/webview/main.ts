@@ -77,7 +77,7 @@ function delimiterDisplay(d: string): string {
 interface AppState {
   fileKey: string;
   // The file as bytes, kept for a respawned worker and updated by each save. null while the worker holds the buffer it was sent.
-  bytes: ArrayBuffer | null;
+  bytes: Uint8Array | null;
   // The request whose init the buffer went out with; its result brings it back.
   bytesOutFor: number;
   // True from an init result that left rows unparsed until its parseDone: the rows, count and headers so far are partial.
@@ -601,8 +601,8 @@ async function onLoad(message: LoadMessage): Promise<void> {
   await yieldFrame();
   await ensureWorker();
 
-  // The worker decodes the bytes. Harnesses that post text get the same path.
-  const bytes = message.bytes ?? (new TextEncoder().encode(message.text!).buffer as ArrayBuffer);
+  // The worker decodes the bytes. A view is kept as it is: the offset it sits at is part of what the worker is sent.
+  const bytes = ArrayBuffer.isView(message.bytes) ? (message.bytes as Uint8Array) : new Uint8Array(message.bytes);
 
   state = {
     fileKey: message.fileKey,
@@ -725,7 +725,7 @@ function beginInit(mode: "init" | "reparse", options: ParseOptionsMsg, isFreshPa
   const bytes = state.bytes;
   state.bytes = null;
   state.bytesOutFor = requestId;
-  postToWorker({ type: "init", requestId, bytes, options, floors, firstPage, tuning }, [bytes]);
+  postToWorker({ type: "init", requestId, bytes, options, floors, firstPage, tuning }, [bytes.buffer]);
 }
 
 function columnLists(): { table: string[]; detailOnly: string[]; visibleCount: number } {
@@ -3494,7 +3494,7 @@ async function onSaved(msg: SavedMessage): Promise<void> {
   for (const record of written ?? []) owner.recordFloors.set(record.recordIndex, record.floor ?? record.fields.length);
   const rebased = await callWorker<Extract<WorkerResponse, { type: "rebased" }>>((requestId) => ({ type: "rebase", requestId, written }));
   if (state !== owner) return;
-  if (rebased.bytePatches.length > 0 && owner.bytes) owner.bytes = spliceByteReplacements(new Uint8Array(owner.bytes), rebased.bytePatches).buffer as ArrayBuffer;
+  if (rebased.bytePatches.length > 0 && owner.bytes) owner.bytes = spliceByteReplacements(owner.bytes, rebased.bytePatches);
 
   // Cells changed since the write are still edits, now against what was written.
   const headerOffset = owner.view.firstRowIsHeader ? 1 : 0;

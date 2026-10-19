@@ -30,7 +30,7 @@ test("200k x 30: a commit updates its cell within 100 ms and the edit message fo
       {
         type: "load",
         fileKey: "file:///edit-scale.csv",
-        text: lines.join("\n"),
+        bytes: new TextEncoder().encode(lines.join("\n")),
         state: { columnVisibility: {}, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: "", quotes: true, markdownColumns: {} },
         defaultTableColumns: 8,
         defaultDelimiter: "",

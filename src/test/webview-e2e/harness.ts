@@ -142,7 +142,7 @@ export interface TextLoad {
   recordFloors?: RecordFloor[];
 }
 
-function editingFields(data: FixtureLoad | TextLoad): Pick<LoadMessage, "baseVersion" | "editable" | "readOnlyReason" | "pendingEdits" | "recordFloors"> {
+function editingFields(data: FixtureLoad | Omit<TextLoad, "text">): Pick<LoadMessage, "baseVersion" | "editable" | "readOnlyReason" | "pendingEdits" | "recordFloors"> {
   const editable = data.editable ?? true;
   return {
     baseVersion: data.baseVersion ?? 1,
@@ -153,11 +153,12 @@ function editingFields(data: FixtureLoad | TextLoad): Pick<LoadMessage, "baseVer
   };
 }
 
-function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
-  const text = Papa.unparse({ fields: data.headers, data: data.rows });
+// A load message without its file: the page encodes the text itself, so the encoding happens before any clock a spec might have started.
+type LoadEnvelope = Omit<LoadMessage, "type" | "bytes">;
+
+function toLoadMessage(data: FixtureLoad): LoadEnvelope {
   return {
     fileKey: data.fileKey,
-    text,
     state: data.state,
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
@@ -167,10 +168,9 @@ function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
   };
 }
 
-function toTextLoadMessage(data: TextLoad): Omit<LoadMessage, "type"> {
+function toTextLoadMessage(data: Omit<TextLoad, "text">): LoadEnvelope {
   return {
     fileKey: data.fileKey,
-    text: data.text,
     state: data.state,
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
@@ -185,24 +185,30 @@ export async function postFromHost(page: Page, message: HostToWebviewMessage): P
   await page.evaluate((msg) => window.postMessage(msg, "*"), message);
 }
 
+// Plays the host as it really is: the file crosses as bytes, a view that sits inside a larger buffer (readFile's result is not at offset 0).
+async function postLoad(page: Page, envelope: LoadEnvelope, file: { text: string } | { values: number[] }): Promise<void> {
+  await page.evaluate(
+    ({ msg, source }) => {
+      const encoded = "text" in source ? new TextEncoder().encode(source.text) : Uint8Array.from(source.values);
+      const backing = new Uint8Array(encoded.length + 9);
+      backing.set(encoded, 9);
+      window.postMessage({ type: "load", ...msg, bytes: backing.subarray(9) }, "*");
+    },
+    { msg: envelope, source: file },
+  );
+}
+
 export async function pushLoad(page: Page, data: FixtureLoad): Promise<void> {
-  const message = { type: "load" as const, ...toLoadMessage(data) };
-  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
+  await postLoad(page, toLoadMessage(data), { text: Papa.unparse({ fields: data.headers, data: data.rows }) });
 }
 
 export async function pushLoadText(page: Page, data: TextLoad): Promise<void> {
-  const message = { type: "load" as const, ...toTextLoadMessage(data) };
-  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
+  await postLoad(page, toTextLoadMessage(data), { text: data.text });
 }
 
-// Plays the host as it really is: the file's bytes cross as an ArrayBuffer and the webview decodes them.
 export async function pushLoadBytes(page: Page, data: Omit<TextLoad, "text"> & { bytes: Uint8Array }): Promise<void> {
   const { bytes, ...rest } = data;
-  const message = { type: "load" as const, ...toTextLoadMessage({ ...rest, text: "" }), text: undefined };
-  await page.evaluate(
-    ({ msg, values }) => window.postMessage({ ...msg, bytes: new Uint8Array(values).buffer }, "*"),
-    { msg: message, values: Array.from(bytes) },
-  );
+  await postLoad(page, toTextLoadMessage(rest), { values: Array.from(bytes) });
 }
 
 export async function bootAndLoad(page: Page, data: FixtureLoad): Promise<void> {

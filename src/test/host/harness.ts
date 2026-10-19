@@ -79,9 +79,16 @@ export function workerReply(request: WorkerRequest, type: string): WorkerRespons
   return callWorker(request).find((m) => m.type === type)!;
 }
 
+// The bytes of a load message as the webview sees them: a view stays a view over its own buffer (postMessage clones the whole buffer, offset and all).
+export function loadBytes(message: { bytes: Uint8Array | ArrayBuffer }): Uint8Array {
+  const { bytes } = message;
+  if (!ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.slice(0));
+  return new Uint8Array(bytes.buffer.slice(0), bytes.byteOffset, bytes.byteLength);
+}
+
 // The string the webview makes of a load message, decoding its bytes as the webview does.
-export function loadText(message: { text?: string; bytes?: ArrayBuffer }): string {
-  return message.text ?? new TextDecoder("utf-8", { ignoreBOM: true }).decode(new Uint8Array(message.bytes!));
+export function loadText(message: { bytes: Uint8Array | ArrayBuffer }): string {
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(message.bytes);
 }
 
 export const token = new fake.CancellationTokenSource().token;
@@ -214,10 +221,10 @@ export class Session {
     this.doc.dispose();
   }
 
-  private init(text: string, byteLength: number | undefined, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): WorkerResponse {
-    this.text = text;
+  private init(bytes: Uint8Array, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): WorkerResponse {
+    this.text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
     const floors = [...this.recordFloors].map(([recordIndex, floor]) => ({ recordIndex, floor }));
-    return workerReply({ type: "init", text, byteLength, options, floors }, "initResult");
+    return workerReply({ type: "init", bytes, options, floors }, "initResult");
   }
 
   private onHostMessage(m: HostToWebviewMessage): void {
@@ -227,7 +234,7 @@ export class Session {
         const delimiter = m.state.delimiter || m.defaultDelimiter || this.options.delimiter || undefined;
         this.options = { delimiter, firstRowIsHeader: m.state.firstRowIsHeader, quotes: m.state.quotes };
         this.recordFloors = new Map((m.recordFloors ?? []).map((f) => [f.recordIndex, f.floor]));
-        const init = this.init(loadText(m), m.bytes?.byteLength, this.options);
+        const init = this.init(loadBytes(m), this.options);
         this.headers = init.headers;
         this.restore(m.pendingEdits);
         this.send({ type: "synced", baseVersion: m.baseVersion });

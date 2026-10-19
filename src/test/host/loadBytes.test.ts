@@ -2,7 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 import { parseCsv } from "../../core/csvParse";
 import * as fake from "./fakeVscode";
-import { loadText, openSession } from "./harness";
+import { loadBytes, loadText, openSession } from "./harness";
 
 // What the host used to send as the load message's text.
 function hostDecode(bytes: Uint8Array): { text: string; lossy: boolean } {
@@ -29,8 +29,7 @@ describe("the load message carries the file's bytes", () => {
         const message = s.of("load")[0];
         const old = hostDecode(bytes);
 
-        expect(message.text).toBeUndefined();
-        expect(Array.from(new Uint8Array(message.bytes))).toEqual(Array.from(bytes));
+        expect(Array.from(loadBytes(message))).toEqual(Array.from(bytes));
         expect(loadText(message)).toBe(old.text);
         expect(s.text).toBe(old.text);
         expect(message.editable).toBe(!old.lossy);
@@ -41,21 +40,33 @@ describe("the load message carries the file's bytes", () => {
     );
   });
 
-  it("is exactly the file even when readFile returns a view into a larger buffer", async () => {
+  it("posts the host's own view of the file, whatever buffer it sits in, without copying it", async () => {
     const original = "id,name\r\n1,é\r\n";
     const data = new TextEncoder().encode(original);
-    const pool = new Uint8Array(data.length + 100);
+    const pool = new Uint8Array(data.length + 100).fill(0x41);
     pool.set(data, 50);
     const spy = vi.spyOn(fake.workspace.fs, "readFile").mockImplementation(async () => pool.subarray(50, 50 + data.length));
     try {
       const s = await openSession(nextPath(), original);
-      const bytes: ArrayBuffer = s.of("load")[0].bytes;
-      expect(bytes.byteLength).toBe(data.length);
+      const bytes = s.of("load")[0].bytes as Uint8Array;
+      expect(ArrayBuffer.isView(bytes)).toBe(true);
+      expect(bytes.buffer).toBe(pool.buffer);
+      expect([bytes.byteOffset, bytes.byteLength]).toEqual([50, data.length]);
       expect(loadText(s.of("load")[0])).toBe(original);
+      expect(s.text).toBe(original);
       s.dispose();
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it("is offset in the buffer by default, so every host test runs against a view", async () => {
+    const s = await openSession(nextPath(), "a,b\n1,2\n");
+    const bytes = s.of("load")[0].bytes as Uint8Array;
+    expect(ArrayBuffer.isView(bytes)).toBe(true);
+    expect(bytes.byteOffset).toBeGreaterThan(0);
+    expect(bytes.buffer.byteLength).toBeGreaterThan(bytes.byteLength);
+    s.dispose();
   });
 
   it("keeps a BOM, non-ASCII text and CRLF as cells exactly as before", async () => {

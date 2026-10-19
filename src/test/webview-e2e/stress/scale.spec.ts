@@ -9,10 +9,7 @@ const CI_SLACK = process.env.CI ? 2 : 1;
 // Strict wall-clock bounds apply only when PERF_TESTS=1; a shared full-suite run gets generous ones.
 const STRICT = process.env.PERF_TESTS === "1";
 const FIRST_RENDER_BOUND_MS = STRICT ? 2_000 * CI_SLACK : 20_000;
-// A text load pays the harness's own clone of 60 M characters (about 50 ms) before the worker sees it and had 5-15% of headroom at 400 ms; VS Code
-// delivers bytes, which are held to the tighter bound.
-const IN_PAGE_FIRST_RENDER_TEXT_BOUND_MS = STRICT ? 600 * CI_SLACK : 20_000;
-const IN_PAGE_FIRST_RENDER_BYTES_BOUND_MS = STRICT ? 400 * CI_SLACK : 20_000;
+const IN_PAGE_FIRST_RENDER_BOUND_MS = STRICT ? 400 * CI_SLACK : 20_000;
 const FILTER_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
 const SORT_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
 const NEXT_PAGE_BOUND_MS = STRICT ? 300 * CI_SLACK : 30_000 * CI_SLACK;
@@ -36,28 +33,25 @@ async function generateLoadText(page: Page, opts: { rowCount: number; colCount: 
   }, opts);
 }
 
-// As VS Code delivers a file: bytes, encoded before the clock starts.
+// As VS Code delivers a file: bytes, encoded before the clock starts, as a view that does not start at its buffer's start.
 async function encodeLoadText(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const w = window as unknown as { __scaleText?: string; __scaleBytes?: ArrayBuffer };
-    w.__scaleBytes = new TextEncoder().encode(w.__scaleText).buffer as ArrayBuffer;
+    const w = window as unknown as { __scaleText?: string; __scaleBytes?: Uint8Array };
+    const encoded = new TextEncoder().encode(w.__scaleText);
+    const backing = new Uint8Array(encoded.length + 9);
+    backing.set(encoded, 9);
+    w.__scaleBytes = backing.subarray(9);
     delete w.__scaleText;
   });
 }
 
-async function postGeneratedLoad(page: Page, opts: { fileKey: string; state: ViewState; defaultTableColumns: number; asBytes: boolean }): Promise<void> {
+async function postGeneratedLoad(page: Page, opts: { fileKey: string; state: ViewState; defaultTableColumns: number }): Promise<void> {
   await page.evaluate((o) => {
-    const w = window as unknown as { __scaleText?: string; __scaleBytes?: ArrayBuffer };
-    const message = { type: "load", fileKey: o.fileKey, state: o.state, defaultTableColumns: o.defaultTableColumns, defaultDelimiter: "", testHooks: true };
-    if (o.asBytes) {
-      const bytes = w.__scaleBytes!;
-      window.postMessage({ ...message, bytes }, "*", [bytes]);
-      delete w.__scaleBytes;
-    } else {
-      window.postMessage({ ...message, text: w.__scaleText }, "*");
-      // The post has cloned it; keeping 60 MB reachable would inflate the heap figures.
-      delete w.__scaleText;
-    }
+    const w = window as unknown as { __scaleBytes?: Uint8Array };
+    const bytes = w.__scaleBytes!;
+    const message = { type: "load", fileKey: o.fileKey, state: o.state, defaultTableColumns: o.defaultTableColumns, defaultDelimiter: "", testHooks: true, bytes };
+    window.postMessage(message, "*", [bytes.buffer]);
+    delete w.__scaleBytes;
   }, opts);
 }
 
@@ -78,16 +72,8 @@ async function inPageFirstRenderMs(page: Page): Promise<number> {
   });
 }
 
-test("200k rows x 30 columns: timing table for first render and each interaction, plus JS heap", async ({ page }) => {
-  await runScale(page, false);
-});
-
 // The path VS Code takes: the file crosses as bytes and the worker decodes it.
-test("200k rows x 30 columns, posted as bytes: timing table for first render and each interaction, plus JS heap", async ({ page }) => {
-  await runScale(page, true);
-});
-
-async function runScale(page: Page, asBytes: boolean): Promise<void> {
+test("200k rows x 30 columns: timing table for first render and each interaction, plus JS heap", async ({ page }) => {
   test.setTimeout(120_000);
   const consoleErrors = trackConsoleErrors(page);
   const timings: Array<{ step: string; ms: number }> = [];
@@ -104,16 +90,16 @@ async function runScale(page: Page, asBytes: boolean): Promise<void> {
   }
 
   await generateLoadText(page, { rowCount: ROWS, colCount: COLS });
-  if (asBytes) await encodeLoadText(page);
+  await encodeLoadText(page);
   const t0 = Date.now();
-  await postGeneratedLoad(page, { fileKey: "file:///scale.csv", state: defaultViewState(), defaultTableColumns: 8, asBytes });
+  await postGeneratedLoad(page, { fileKey: "file:///scale.csv", state: defaultViewState(), defaultTableColumns: 8 });
   await expect(page.locator("tr.data-row").first()).toBeVisible();
   const firstRenderMs = Date.now() - t0;
   const inPageMs = Math.round(await inPageFirstRenderMs(page));
   timings.push({ step: "first render (post load -> table visible)", ms: firstRenderMs });
   timings.push({ step: "first render (in-page, load -> first row)", ms: inPageMs });
   expect(firstRenderMs).toBeLessThan(FIRST_RENDER_BOUND_MS);
-  expect(inPageMs).toBeLessThan(asBytes ? IN_PAGE_FIRST_RENDER_BYTES_BOUND_MS : IN_PAGE_FIRST_RENDER_TEXT_BOUND_MS);
+  expect(inPageMs).toBeLessThan(IN_PAGE_FIRST_RENDER_BOUND_MS);
 
   // The first page is up before the row count is known; the interactions below are timed on a parsed file.
   await expect(page.locator("#status-bar")).toHaveText(`Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`);
@@ -160,11 +146,11 @@ async function runScale(page: Page, asBytes: boolean): Promise<void> {
   timings.push({ step: "JS heap after all interactions (MB)", ms: Math.round(heapAfterInteractions) });
 
   // eslint-disable-next-line no-console
-  console.log(`\n[stress] 200k x 30 timing table${asBytes ? " (bytes)" : ""}:`);
+  console.log("\n[stress] 200k x 30 timing table:");
   // eslint-disable-next-line no-console
   console.log(
     timings.map((t) => `  ${t.step.padEnd(55)} ${String(t.ms).padStart(8)}`).join("\n"),
   );
 
   expect(consoleErrors).toEqual([]);
-}
+});

@@ -61,7 +61,7 @@ const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
 interface InitSource {
   text?: string;
-  bytes?: ArrayBuffer;
+  bytes?: Uint8Array;
   byteLength?: number;
 }
 
@@ -74,7 +74,7 @@ function onInit(
   tuning: ParseTuning | undefined,
 ): void {
   // Not fatal: the host has already decided whether the file is valid UTF-8, and this is the string it would have sent.
-  text = source.text ?? decoder.decode(new Uint8Array(source.bytes!));
+  text = source.text ?? decoder.decode(source.bytes!);
   textBytes = source.bytes ? source.bytes.byteLength : source.byteLength;
   beginParse(requestId, options, initialFloors, firstPage, tuning, source.bytes);
 }
@@ -90,7 +90,7 @@ function beginParse(
   initialFloors: RecordFloor[] | undefined,
   firstPage: FirstPageRequest | undefined,
   tuning: ParseTuning | undefined,
-  bytes: ArrayBuffer | undefined,
+  bytes: Uint8Array | undefined,
 ): void {
   endParseJob();
   sliceRecords = tuning?.sliceRecords ?? PARSE_SLICE_RECORDS;
@@ -143,7 +143,7 @@ function beginParse(
         firstPage: page,
         bytes,
       },
-      bytes ? [bytes] : [],
+      bytes ? [bytes.buffer as ArrayBuffer] : [],
     );
     if (parseJob) scheduleStep(parseJob);
   };

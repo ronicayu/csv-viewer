@@ -120,10 +120,10 @@ export interface RecordFloor {
 export interface LoadMessage {
   type: "load";
   fileKey: string;
-  // Unparsed on purpose: the webview parses it. Exactly one is present. The host sends `bytes`, because VS Code ships an ArrayBuffer as a binary
-  // attachment but JSON-escapes a string; the webview decodes it as UTF-8, replacing invalid sequences. `text` is for harnesses that post a string.
-  text?: string;
-  bytes?: ArrayBuffer;
+  // Unparsed on purpose: the webview parses it. The host sends the file as bytes, because VS Code ships binary data as an attachment but
+  // JSON-escapes a string; the webview decodes it as UTF-8, replacing invalid sequences. The host posts its own view of the file (readFile can
+  // return a view into a larger buffer), so a receiver honours byteOffset and byteLength and never copies it into a fresh array.
+  bytes: Uint8Array | ArrayBuffer;
   state: ViewState;
   defaultTableColumns: number;
   defaultDelimiter: string;

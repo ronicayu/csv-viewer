@@ -22,7 +22,7 @@ async function pushGeneratedSingleLine(page: Page, bytes: number): Promise<numbe
   const start = Date.now();
   await page.evaluate((state) => {
     const w = window as unknown as { __lineText?: string };
-    window.postMessage({ type: "load", fileKey: "file:///line.csv", text: w.__lineText, state, defaultTableColumns: 8, defaultDelimiter: "" }, "*");
+    window.postMessage({ type: "load", fileKey: "file:///line.csv", bytes: new TextEncoder().encode(w.__lineText), state, defaultTableColumns: 8, defaultDelimiter: "" }, "*");
     delete w.__lineText;
   }, defaultViewState());
   await expect(page.locator("tr.data-row").first()).toBeVisible({ timeout: 60_000 });

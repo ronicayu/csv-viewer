@@ -347,11 +347,6 @@ function notify(level: "warning" | "error", message: string): void {
   else void vscode.window.showWarningMessage(message);
 }
 
-// What postMessage can ship as a binary attachment; a readFile result can be a view into a larger pooled buffer.
-function arrayBufferOf(bytes: Uint8Array): ArrayBuffer {
-  return (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer) as ArrayBuffer;
-}
-
 function decodeText(bytes: Uint8Array): { text: string; lossy: boolean } {
   try {
     return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), lossy: false };
@@ -661,7 +656,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     document.send({
       type: "load",
       fileKey,
-      bytes: arrayBufferOf(document.bytes),
+      bytes: document.bytes,
       state,
       defaultTableColumns: this.defaultTableColumns(),
       defaultDelimiter: this.delimiterFor(document.uri) ?? "",

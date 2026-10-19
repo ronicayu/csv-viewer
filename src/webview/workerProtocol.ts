@@ -28,7 +28,7 @@ export interface ParseTuning {
 export type WorkerRequest =
   // The file is `bytes` (transferred, and handed back in the init result) or, from tests, `text`. `byteLength` is the text's UTF-8 size when
   // the sender knows it, which lets the worker skip checking for non-ASCII.
-  | { type: "init"; requestId: number; text?: string; bytes?: ArrayBuffer; byteLength?: number; options: ParseOptionsMsg; floors?: RecordFloor[]; firstPage?: FirstPageRequest; tuning?: ParseTuning }
+  | { type: "init"; requestId: number; text?: string; bytes?: Uint8Array; byteLength?: number; options: ParseOptionsMsg; floors?: RecordFloor[]; firstPage?: FirstPageRequest; tuning?: ParseTuning }
   // Parses the text the worker already holds under new options.
   | { type: "reparse"; requestId: number; options: ParseOptionsMsg; floors?: RecordFloor[]; firstPage?: FirstPageRequest; tuning?: ParseTuning }
   | { type: "query"; requestId: number; quickSearch: string; filterRules: FilterRule[]; sortKeys: SortKey[] }
@@ -74,8 +74,8 @@ export type WorkerResponse =
       parsing?: boolean;
       // The first page of the unsorted, unfiltered rows, when asked for and the rows so far fill it.
       firstPage?: { page: number; rows: WorkerRow[] };
-      // The buffer an `init` carried, handed back.
-      bytes?: ArrayBuffer;
+      // The bytes an `init` carried, handed back (the same view over the same transferred buffer).
+      bytes?: Uint8Array;
     }
   | {
       type: "parseDone";

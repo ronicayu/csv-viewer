@@ -191,7 +191,7 @@ test.describe("messages that follow a load", () => {
         {
           type: "load",
           fileKey: "file:///races.csv",
-          text: t,
+          bytes: new TextEncoder().encode(t),
           state: { columnVisibility: {}, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: ",", quotes: true, markdownColumns: {} },
           defaultTableColumns: 3,
           defaultDelimiter: "",
@@ -239,7 +239,7 @@ test.describe("host messages", () => {
     });
     await page.evaluate(() => {
       // no `state`: onLoad throws after the queue has handed it the message
-      window.postMessage({ type: "load", fileKey: "file:///broken.csv", text: "a\n1\n", baseVersion: 1 }, "*");
+      window.postMessage({ type: "load", fileKey: "file:///broken.csv", bytes: new TextEncoder().encode("a\n1\n"), baseVersion: 1 }, "*");
       window.postMessage({ type: "fileDeleted", name: "races.csv" }, "*");
     });
     await expect(page.locator("#file-deleted-banner")).toBeVisible();

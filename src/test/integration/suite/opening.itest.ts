@@ -104,7 +104,7 @@ suite("Opening", () => {
     assert.strictEqual(render.rowCount, 0);
   });
 
-  test("a file with a BOM, non-ASCII text and CRLF endings renders the same cells whether its bytes or its text crossed over", async () => {
+  test("a file with a BOM, non-ASCII text and CRLF endings renders the cells its bytes decode to", async () => {
     const uri = fixture("bom-nonascii-crlf.csv");
     await openInViewer(uri);
     const api = await getTestApi();
@@ -118,8 +118,7 @@ suite("Opening", () => {
     );
     const load = api.getOutgoing(key).find((m) => m.type === "load");
     assert.ok(load && load.type === "load");
-    assert.strictEqual(load.text, undefined);
-    assert.strictEqual(load.bytes?.byteLength, fs.statSync(path.join(WORKSPACE_ROOT, "bom-nonascii-crlf.csv")).size);
+    assert.strictEqual(load.bytes.byteLength, fs.statSync(path.join(WORKSPACE_ROOT, "bom-nonascii-crlf.csv")).size);
     assert.strictEqual(load.editable, true);
   });
 

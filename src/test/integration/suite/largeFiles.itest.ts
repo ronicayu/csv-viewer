@@ -65,6 +65,18 @@ async function measure(label: string, uri: vscode.Uri, bytes: number, opts: { ex
   return m;
 }
 
+// The lowest RSS seen once a second for `seconds` after the render: what is left when the transient copies (the RPC message VS Code builds for the
+// load, ours before it was a view) have been collected. `external` and `arrayBuffers` are what the live backing stores account for.
+async function settledRss(seconds: number): Promise<{ rssMb: number; externalMb: number; arrayBuffersMb: number }> {
+  let lowest = process.memoryUsage();
+  for (let i = 0; i < seconds; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const now = process.memoryUsage();
+    if (now.rss < lowest.rss) lowest = now;
+  }
+  return { rssMb: mb(lowest.rss), externalMb: mb(lowest.external), arrayBuffersMb: mb(lowest.arrayBuffers) };
+}
+
 suite("Large files", function () {
   this.timeout(300000);
 
@@ -118,14 +130,24 @@ suite("Large files", function () {
     assert.strictEqual(m.outcome, "rendered");
     assert.ok(m.rowCount! > 0, "expected at least one parsed row");
 
-    // Generous bounds; the targets are logged, not gated, because shared runners are slow and noisy.
+    // Generous bounds; the time target is logged, not gated, because shared runners are slow and noisy.
     const rssGrowthMb = m.memAfterRssMb - m.memBeforeRssMb;
+    const ratio = (growthMb: number): number => Math.round((growthMb / mb(bytes)) * 100) / 100;
+    // eslint-disable-next-line no-console
+    console.log(`[largeFiles] 120MB open: ${m.elapsedMs}ms (target 4000), extHost RSS grew ${rssGrowthMb}MB = ${ratio(rssGrowthMb)}x the file right after render`);
+    assert.ok(m.elapsedMs < 15000, `opening took ${m.elapsedMs}ms`);
+    // Right after render the RPC message VS Code builds to ship the file (a second copy, not ours) is still waiting to be collected: about 2x.
+    assert.ok(rssGrowthMb < 3 * mb(bytes), `the extension host's RSS grew ${rssGrowthMb}MB for a ${mb(bytes)}MB file`);
+
+    // Settled, the host holds the file once (document.bytes, posted as it is): about 1.1x. The gate is 1.5x, so a slow collection on a shared runner
+    // does not fail the run but a second retained copy (2x) does.
+    const settled = await settledRss(5);
+    const settledGrowthMb = settled.rssMb - m.memBeforeRssMb;
     // eslint-disable-next-line no-console
     console.log(
-      `[largeFiles] 120MB open: ${m.elapsedMs}ms (target 4000), extHost RSS grew ${rssGrowthMb}MB = ${Math.round((rssGrowthMb / mb(bytes)) * 100) / 100}x the file (target 1.5x)`,
+      `[largeFiles] 120MB open, settled: extHost RSS grew ${settledGrowthMb}MB = ${ratio(settledGrowthMb)}x the file (gate 1.5x), external ${settled.externalMb}MB, arrayBuffers ${settled.arrayBuffersMb}MB`,
     );
-    assert.ok(m.elapsedMs < 15000, `opening took ${m.elapsedMs}ms`);
-    assert.ok(rssGrowthMb < 3 * mb(bytes), `the extension host's RSS grew ${rssGrowthMb}MB for a ${mb(bytes)}MB file`);
+    assert.ok(settledGrowthMb < 1.5 * mb(bytes), `the extension host's settled RSS grew ${settledGrowthMb}MB for a ${mb(bytes)}MB file`);
 
     await vscode.commands.executeCommand("workbench.action.files.saveAll");
   });
