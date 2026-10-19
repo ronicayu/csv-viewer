@@ -347,6 +347,12 @@ function notify(level: "warning" | "error", message: string): void {
   else void vscode.window.showWarningMessage(message);
 }
 
+// The same memory as a plain Uint8Array. readFile returns a Node Buffer in the extension host, and VS Code's message serializer runs inside
+// JSON.stringify, which calls Buffer.prototype.toJSON first: a Buffer goes out as {"type":"Buffer","data":[...]}, not as a binary attachment.
+function plainView(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
 function decodeText(bytes: Uint8Array): { text: string; lossy: boolean } {
   try {
     return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), lossy: false };
@@ -656,7 +662,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     document.send({
       type: "load",
       fileKey,
-      bytes: document.bytes,
+      bytes: plainView(document.bytes),
       state,
       defaultTableColumns: this.defaultTableColumns(),
       defaultDelimiter: this.delimiterFor(document.uri) ?? "",

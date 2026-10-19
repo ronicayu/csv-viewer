@@ -33,6 +33,11 @@ const expand = (page: Page, rowId: number) => page.locator(`tr.data-row[data-row
 const detail = (page: Page, rowId: number) => page.locator(`#detail-row-${rowId}`);
 const editBtn = (page: Page, rowId: number, field: string) => detail(page, rowId).locator("dt", { hasText: new RegExp(`^${field}$`) }).locator(".field-edit-btn");
 const editedMessages = async (page: Page) => (await posted(page)).filter((m) => m.type === "edit");
+// The cell shows the new value as soon as the editor closes; the `edit` message follows the worker's answer. Wait for it, then check no more came.
+async function expectEdits(page: Page, count: number): Promise<void> {
+  await expect.poll(async () => (await editedMessages(page)).length, { message: `waiting for ${count} "edit" message(s)` }).toBe(count);
+  expect(await editedMessages(page)).toHaveLength(count);
+}
 
 test("every field has an edit button after its copy button; a detail-only field opens a textarea with the raw value", async ({ page }) => {
   await boot(page);
@@ -93,13 +98,13 @@ test("Apply commits and Cancel discards", async ({ page }) => {
   await detail(page, 1).locator("textarea").fill("applied");
   await detail(page, 1).locator(".field-editor-actions .primary").click();
   await expect(detail(page, 1).locator("dd", { hasText: "applied" })).toBeVisible();
-  expect(await editedMessages(page)).toHaveLength(1);
+  await expectEdits(page, 1);
 
   await editBtn(page, 1, "notes").click();
   await detail(page, 1).locator("textarea").fill("discarded");
   await detail(page, 1).getByRole("button", { name: "Cancel" }).click();
   await expect(detail(page, 1).locator("dd", { hasText: "applied" })).toBeVisible();
-  expect(await editedMessages(page)).toHaveLength(1);
+  await expectEdits(page, 1);
 });
 
 test("Escape cancels", async ({ page }) => {
@@ -120,13 +125,13 @@ test("blur outside commits; clicking Apply does not commit twice", async ({ page
   await detail(page, 1).locator("textarea").fill("blurred");
   await page.locator("#quick-search").click();
   await expect(detail(page, 1).locator("dd", { hasText: "blurred" })).toBeVisible();
-  expect(await editedMessages(page)).toHaveLength(1);
+  await expectEdits(page, 1);
 
   await editBtn(page, 1, "notes").click();
   await detail(page, 1).locator("textarea").fill("via apply");
   await detail(page, 1).locator(".field-editor-actions .primary").click();
   await expect(detail(page, 1).locator("dd", { hasText: "via apply" })).toBeVisible();
-  expect(await editedMessages(page)).toHaveLength(2);
+  await expectEdits(page, 2);
 });
 
 test("after a commit the copy button copies the new value, JSON re-formats, Markdown re-renders, and focus lands on the edit button", async ({ page }) => {
@@ -220,5 +225,5 @@ test("only one editor is open at a time: opening a second commits the first", as
   await page.locator('tr.data-row[data-row-id="0"] td[data-column-index="1"]').dblclick();
   await expect(page.locator("textarea.field-editor")).toHaveCount(0);
   await expect(page.locator("input.cell-editor")).toHaveCount(1);
-  expect(await editedMessages(page)).toHaveLength(1);
+  await expectEdits(page, 1);
 });

@@ -43,13 +43,13 @@ describe("the load message carries the file's bytes", () => {
   it("posts the host's own view of the file, whatever buffer it sits in, without copying it", async () => {
     const original = "id,name\r\n1,é\r\n";
     const data = new TextEncoder().encode(original);
-    const pool = new Uint8Array(data.length + 100).fill(0x41);
+    const pool = Buffer.alloc(data.length + 100, 0x41);
     pool.set(data, 50);
     const spy = vi.spyOn(fake.workspace.fs, "readFile").mockImplementation(async () => pool.subarray(50, 50 + data.length));
     try {
       const s = await openSession(nextPath(), original);
       const bytes = s.of("load")[0].bytes as Uint8Array;
-      expect(ArrayBuffer.isView(bytes)).toBe(true);
+      expect(bytes.constructor).toBe(Uint8Array);
       expect(bytes.buffer).toBe(pool.buffer);
       expect([bytes.byteOffset, bytes.byteLength]).toEqual([50, data.length]);
       expect(loadText(s.of("load")[0])).toBe(original);
