@@ -7,14 +7,19 @@
   million) no longer hang the viewer: the Columns, Sort and Filter lists show the first
   1,000 columns with a note, and row details show the first 1,000 fields with a **Show
   all fields** button.
-- Sorting, paging or changing the separator right after a large file opens no longer
-  waits on a background pass that could take over a second.
+- The background pass that finishes a large file's row map after it opens is several
+  times faster (a 200,000-row file: 0.9 s to 0.12 s), so sorting and paging right
+  after opening are held up far less.
+- "All in Table" and "All in Details" on a file with thousands of columns no longer
+  freeze the viewer or save a setting per column: the table shows the first 1,000 of the
+  columns chosen for it, with a note, and the rest are in the row details.
 
 **Changed**
 - Large files open faster and use less memory in the extension host: the file is handed
   to the viewer as bytes instead of text, the separator is detected from the start of
   the file rather than all of it, and the first page is drawn without an extra layout
-  pass.
+  pass. Expanding a row with hundreds of fields takes a fraction of a second instead of
+  several.
 
 ## 0.8.0
 

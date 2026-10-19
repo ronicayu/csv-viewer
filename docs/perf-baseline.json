@@ -9,7 +9,7 @@
     "separatorMs": 456
   },
   "v0.8.0": {
-    "note": "From the Baseline table in docs/spec.md (in-page, five alternating runs), for reference; not compared against",
+    "note": "From the Baseline table in docs/spec.md, measured by another harness on another run; not comparable to the numbers above and not compared against. The same-harness comparison is in the As built section of docs/spec.md",
     "inPageFirstRenderMs": 909,
     "sortMs": 375,
     "filterMs": 325,
