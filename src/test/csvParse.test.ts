@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { parseCsv, stripBom } from "../core/csvParse";
+import { readFileSync, readdirSync } from "fs";
+import { join } from "path";
+import fc from "fast-check";
+import Papa from "papaparse";
+import { describe, expect, it, vi } from "vitest";
+import { effectiveQuoting, guessDelimiter, guessDelimiterFull, normalizeLineEndings, parseCsv, stripBom } from "../core/csvParse";
 
 describe("stripBom", () => {
   it("removes a leading BOM", () => {
@@ -247,5 +251,102 @@ describe("quoteProblems", () => {
     const result = parseCsv('a,b\n"line one\nline two, with comma\nline three",2\n3,4\n');
     expect(result.quoteProblems).toEqual([]);
     expect(result.rows).toHaveLength(2);
+  });
+});
+
+const NORMALIZED_TOKENS = ["a", "b", "1", "22", "x y", "", ";", ",", "|", "\t", '"', '5" ', '"q,r"', '"m\n\n\n\n\n\n\n\n\n\n\n\nn"', "é", " ", "||"];
+
+// Many short lines, so the ten-record prefix is shorter than the text and quotes can sit before or after it.
+const linesArb = fc
+  .array(fc.array(fc.constantFrom(...NORMALIZED_TOKENS), { maxLength: 6 }).map((t) => t.join("")), { maxLength: 30 })
+  .map((lines) => lines.join("\n"));
+
+describe("delimiter guess on a prefix equals Papa's guess over the whole text", () => {
+  it("agrees on arbitrary line-ending-normalized texts, with and without quotes (property)", () => {
+    fc.assert(
+      fc.property(linesArb, fc.constantFrom('"', "\u0000"), (text, quoteChar) => {
+        expect(guessDelimiter(text, quoteChar)).toBe(guessDelimiterFull(text, quoteChar));
+      }),
+      { numRuns: 6000 },
+    );
+  });
+
+  it("parseCsv's delimiter, headers and rows equal an auto-detecting Papa parse of the normalized text (property)", () => {
+    const lineEnding = fc.constantFrom("\n", "\r\n", "\r");
+    fc.assert(
+      fc.property(
+        fc.array(fc.array(fc.constantFrom(...NORMALIZED_TOKENS), { maxLength: 6 }).map((t) => t.join("")), { maxLength: 30 }),
+        lineEnding,
+        fc.boolean(),
+        (lines, eol, quotes) => {
+          const text = lines.join(eol);
+          const normalized = text.replace(/\r\n|\r/g, "\n");
+          const quoteChar = effectiveQuoting(normalized, quotes) ? '"' : "\u0000";
+          const old = Papa.parse<string[]>(normalized, {
+            header: false,
+            skipEmptyLines: true,
+            quoteChar,
+            delimiter: undefined,
+            delimitersToGuess: [",", ";", "\t", "|"],
+          });
+          const result = parseCsv(text, { firstRowIsHeader: false, quotes });
+          expect(result.delimiter).toBe(old.meta.delimiter);
+          const width = Math.max(0, ...old.data.map((r) => r.length));
+          expect(result.rows).toEqual(old.data.map((r) => r.concat(Array<string>(width - r.length).fill(""))));
+        },
+      ),
+      { numRuns: 4000 },
+    );
+  });
+
+  it("agrees on a late quote, a quote inside the first ten records, a quoted field spanning past the tenth newline, and fewer than ten newlines", () => {
+    const rows = (n: number) => Array.from({ length: n }, (_, i) => `${i};x,y;z`).join("\n");
+    const longQuoted = `a;b\n"${"p\n".repeat(12)}q";1\n${rows(3)}`;
+    for (const text of [`${rows(40)}\n"late, quote";1`, `"early; quote";1\n${rows(40)}`, longQuoted, `${rows(5)}\n${"w;".repeat(50)}`, rows(11), rows(10), "a;b\n"]) {
+      expect(guessDelimiter(text, '"')).toBe(guessDelimiterFull(text, '"'));
+    }
+  });
+
+  it("agrees with the whole-text guess on samples/*.csv and the generated fixtures of the stress suite", () => {
+    const dir = join(__dirname, "../../samples");
+    const fixtures = readdirSync(dir)
+      .filter((f) => f.endsWith(".csv"))
+      .map((f) => readFileSync(join(dir, f), "utf8"));
+    const grid = (d: string, quoted: boolean) =>
+      Array.from({ length: 200 }, (_, r) => Array.from({ length: 6 }, (_, c) => (quoted && c === 2 ? `"v${r}${d}x\n${c}"` : `v${r}_${c}`)).join(d)).join("\n");
+    for (const d of [",", ";", "\t", "|"]) fixtures.push(grid(d, false), grid(d, true));
+    fixtures.push("header\n" + "xxxxxxxxx,".repeat(10_000), grid(",", false).replace(/\n/g, "\r\n"));
+    for (const raw of fixtures) {
+      const text = normalizeLineEndings(stripBom(raw));
+      expect(guessDelimiter(text, '"')).toBe(guessDelimiterFull(text, '"'));
+      expect(parseCsv(raw).delimiter).toBe(guessDelimiterFull(text, '"'));
+    }
+  });
+
+  it("guesses on the first ten records only: Papa sees the whole text just when it has to", () => {
+    const text = Array.from({ length: 50_000 }, (_, i) => `${i},v${i},x`).join("\n");
+    const spy = vi.spyOn(Papa, "parse");
+    try {
+      expect(parseCsv(text).delimiter).toBe(",");
+      const inputs = spy.mock.calls.map((call) => (call[0] as string).length);
+      expect(inputs).toHaveLength(2);
+      expect(inputs[0]).toBeLessThan(200);
+      expect(inputs[1]).toBe(text.length);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("line-ending normalization is skipped when there is no CR", () => {
+  it("returns the same string when it has no CR, and the regex result otherwise (property)", () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom("a", ",", "\n", "\r", "\r\n", '"', "é", "😀", ""), { maxLength: 30 }).map((c) => c.join("")), (text) => {
+        const expected = text.replace(/\r\n|\r/g, "\n");
+        expect(normalizeLineEndings(text)).toBe(expected);
+        if (!text.includes("\r")) expect(normalizeLineEndings(text)).toBe(text);
+      }),
+      { numRuns: 3000 },
+    );
   });
 });

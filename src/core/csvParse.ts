@@ -2,6 +2,7 @@ import Papa from "papaparse";
 import type { ParseResult } from "./types";
 
 const DELIMITERS_TO_GUESS = [",", ";", "\t", "|"];
+const GUESS_RECORDS = 10;
 
 // Papa cannot disable quoting; a NUL quoteChar makes every " literal unless NUL is in the text.
 const QUOTELESS_SENTINEL = "\u0000";
@@ -25,8 +26,26 @@ export function stripBom(text: string): string {
 }
 
 // Papa sniffs one line-ending style, so mixed CRLF/LF/CR would merge rows; quoted ones become LF too.
-function normalizeLineEndings(text: string): string {
-  return text.replace(/\r\n|\r/g, "\n");
+export function normalizeLineEndings(text: string): string {
+  return text.indexOf("\r") === -1 ? text : text.replace(/\r\n|\r/g, "\n");
+}
+
+// What Papa's own guess would pick, run over the whole text: the reference for guessDelimiter.
+export function guessDelimiterFull(text: string, quoteChar: string): string {
+  return Papa.parse<string[]>(text, { preview: GUESS_RECORDS, skipEmptyLines: true, quoteChar, delimitersToGuess: DELIMITERS_TO_GUESS }).meta.delimiter;
+}
+
+// Papa's guess previews the first ten records of line-ending-normalized text, and with no quote among them each ends at a newline,
+// so everything after the tenth newline cannot change the answer. Papa's own quote char is always `"` in the guess, whatever the parse uses.
+export function guessDelimiter(text: string, quoteChar: string): string {
+  let end = 0;
+  for (let i = 0; i < GUESS_RECORDS; i++) {
+    const newline = text.indexOf("\n", end);
+    if (newline === -1) return guessDelimiterFull(text, quoteChar);
+    end = newline + 1;
+  }
+  const prefix = text.slice(0, end);
+  return guessDelimiterFull(prefix.includes('"') ? text : prefix, quoteChar);
 }
 
 function dedupeNames(names: string[]): string[] {
@@ -80,14 +99,13 @@ export function parseCsv(text: string, options: ParseOptions = {}): ParseResult 
   const useQuoteDelimiterWorkaround =
     !quotesEnabled && requestedDelimiter === '"' && !stripped.includes(QUOTE_DELIMITER_PLACEHOLDER);
   const textToParse = useQuoteDelimiterWorkaround ? stripped.split('"').join(QUOTE_DELIMITER_PLACEHOLDER) : stripped;
-  const delimiterForPapa = useQuoteDelimiterWorkaround ? QUOTE_DELIMITER_PLACEHOLDER : requestedDelimiter;
+  const delimiterForPapa = useQuoteDelimiterWorkaround ? QUOTE_DELIMITER_PLACEHOLDER : (requestedDelimiter ?? guessDelimiter(stripped, quoteChar));
 
   const parsed = Papa.parse<string[]>(textToParse, {
     header: false,
     skipEmptyLines: true,
     quoteChar,
     delimiter: delimiterForPapa,
-    delimitersToGuess: DELIMITERS_TO_GUESS,
   });
 
   const records = parsed.data;
