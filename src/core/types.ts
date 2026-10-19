@@ -137,22 +137,6 @@ export interface LoadMessage {
   recordFloors?: RecordFloor[];
 }
 
-// A load whose bytes follow in `loadChunk` messages, for files too large to ship in one message: VS Code copies each message once on the way out, so one
-// file-sized message is a file-sized copy. Everything else is as in LoadMessage; the webview assembles the chunks and then loads as it would have.
-export interface ChunkedLoadMessage extends Omit<LoadMessage, "bytes"> {
-  chunked: true;
-  loadId: number;
-  byteLength: number;
-}
-
-export interface LoadChunkMessage {
-  type: "loadChunk";
-  // Of the ChunkedLoadMessage these bytes belong to; chunks of a load that a newer one has replaced are ignored.
-  loadId: number;
-  offset: number;
-  bytes: Uint8Array;
-}
-
 // The host declined an edit the webview had accepted (it re-sends the document with a load first).
 export interface EditRefusedMessage {
   type: "editRefused";
@@ -305,8 +289,6 @@ export interface TestCellValueMessage {
 
 export type HostToWebviewMessage =
   | LoadMessage
-  | ChunkedLoadMessage
-  | LoadChunkMessage
   | FileDeletedMessage
   | FileRestoredMessage
   | FileChangedOnDiskMessage

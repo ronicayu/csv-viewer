@@ -117,7 +117,7 @@ suite("Opening", () => {
       ["Åsa", "naïve, café", "日本", "😀"],
     );
     const load = api.getOutgoing(key).find((m) => m.type === "load");
-    assert.ok(load && load.type === "load" && !("chunked" in load));
+    assert.ok(load && load.type === "load");
     assert.strictEqual(load.bytes.byteLength, fs.statSync(path.join(WORKSPACE_ROOT, "bom-nonascii-crlf.csv")).size);
     assert.strictEqual(load.editable, true);
   });

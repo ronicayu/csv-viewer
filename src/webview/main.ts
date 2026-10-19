@@ -31,7 +31,6 @@ import { PAGE_SIZES, clampPage, normalizePageSize, pageCount, pageForRow, pageSl
 import { DETAIL_WARN_CHARS, TABLE_CELL_MAX_CHARS, truncateForDetail, truncateForTable } from "../core/truncate";
 import type {
   ApplyEditsMessage,
-  ChunkedLoadMessage,
   ColumnVisibilityMap,
   FileChangedOnDiskMessage,
   FileDeletedMessage,
@@ -40,7 +39,6 @@ import type {
   FilterRule,
   FlushEditsMessage,
   HostToWebviewMessage,
-  LoadChunkMessage,
   LoadMessage,
   PendingRecordEdit,
   ReadOnlyReason,
@@ -500,62 +498,14 @@ function enqueueHostTask(task: () => void | Promise<void>): void {
   });
 }
 
-// A load whose bytes are still arriving in chunks. What the host sends after its header describes the document the load will create, so it waits here,
-// as it would wait in the queue behind a whole load.
-let incomingLoad: { header: ChunkedLoadMessage; buffer: Uint8Array; received: number; held: HostedMessage[] } | null = null;
-
-type HostedMessage = Exclude<HostToWebviewMessage, LoadMessage | ChunkedLoadMessage | LoadChunkMessage>;
-
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => {
   const message = event.data;
-  if (message.type === "loadChunk") onLoadChunk(message);
-  else if (message.type === "load" && "chunked" in message) beginChunkedLoad(message);
-  else if (message.type === "load") {
-    incomingLoad = null;
-    enqueueHostTask(() => onLoad(message));
-  } else if (incomingLoad) incomingLoad.held.push(message);
-  else dispatchHostMessage(message);
+  if (message.type === "load") enqueueHostTask(() => onLoad(message));
+  else if (hostQueue) enqueueHostTask(() => handleHostMessage(message));
+  else handleHostMessage(message);
 });
 
-function dispatchHostMessage(message: HostedMessage): void {
-  if (hostQueue) enqueueHostTask(() => handleHostMessage(message));
-  else handleHostMessage(message);
-}
-
-function beginChunkedLoad(header: ChunkedLoadMessage): void {
-  incomingLoad = null;
-  let buffer: Uint8Array;
-  try {
-    buffer = new Uint8Array(header.byteLength);
-  } catch (err) {
-    console.error("csv-viewer: could not allocate the file:", err);
-    return;
-  }
-  incomingLoad = { header, buffer, received: 0, held: [] };
-}
-
-// Chunks arrive in order on one channel; anything else means a message went missing and the host is asked for a full load.
-function onLoadChunk(chunk: LoadChunkMessage): void {
-  const incoming = incomingLoad;
-  // Of a load that a newer one replaced (or that never reached us whole): nothing to do.
-  if (!incoming || chunk.loadId < incoming.header.loadId) return;
-  const bytes = ArrayBuffer.isView(chunk.bytes) ? chunk.bytes : new Uint8Array(chunk.bytes as ArrayBuffer);
-  if (chunk.loadId > incoming.header.loadId || chunk.offset !== incoming.received || chunk.offset + bytes.byteLength > incoming.buffer.byteLength) {
-    incomingLoad = null;
-    vscode.postMessage({ type: "resync" });
-    return;
-  }
-  incoming.buffer.set(bytes, chunk.offset);
-  incoming.received += bytes.byteLength;
-  if (incoming.received < incoming.buffer.byteLength) return;
-  incomingLoad = null;
-  const { chunked: _chunked, loadId: _loadId, byteLength: _byteLength, ...rest } = incoming.header;
-  const load: LoadMessage = { ...rest, bytes: incoming.buffer };
-  enqueueHostTask(() => onLoad(load));
-  for (const held of incoming.held) dispatchHostMessage(held);
-}
-
-function handleHostMessage(message: HostedMessage): void {
+function handleHostMessage(message: HostToWebviewMessage): void {
   if (message.type === "fileDeleted") onFileDeleted(message);
   else if (message.type === "fileRestored") onFileRestored();
   else if (message.type === "fileChangedOnDisk") onFileChangedOnDisk(message);

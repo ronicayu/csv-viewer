@@ -28,11 +28,6 @@ const HARD_LIMIT_BYTES = 512 * 1024 * 1024;
 const RELOAD_DEBOUNCE_MS = 300;
 const DELETE_GRACE_MS = 500;
 const FLUSH_TIMEOUT_MS = 500;
-
-// Files above `thresholdBytes` are posted to the webview in chunks of `chunkBytes`, one message at a time: VS Code copies a message when it sends it,
-// and a file-sized message is a file-sized copy. Mutable so tests can use small files.
-export const chunking = { thresholdBytes: 8 * 1024 * 1024, chunkBytes: 4 * 1024 * 1024 };
-let nextLoadId = 1;
 const REASSERT_DIRTY_FALLBACK_MS = 500;
 
 const SUGGEST_DONE_KEY = "csvViewer.suggestOnOpen.done";
@@ -304,10 +299,7 @@ class CsvDocument implements vscode.CustomDocument {
   formatKey = "";
 
   panel: vscode.WebviewPanel | undefined;
-  send: ((message: HostToWebviewMessage) => Thenable<boolean>) | undefined;
-  // The load the webview was last sent, and (while its chunks are still going out) the one that is being sent.
-  loadId = 0;
-  assemblingLoad: number | undefined;
+  send: ((message: HostToWebviewMessage) => void) | undefined;
   // The base the webview last confirmed it reached (`synced`), not the one we last sent.
   syncedBase = 0;
   webviewReady = false;
@@ -506,13 +498,13 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       void this.context.globalState.update(SUGGEST_DONE_KEY, true);
     }
 
-    const send = (message: HostToWebviewMessage): Thenable<boolean> => {
+    const send = (message: HostToWebviewMessage): void => {
       if (TEST_HOOKS_ENABLED) {
         const arr = testHookOutgoing.get(fileKey) ?? [];
         arr.push(message);
         testHookOutgoing.set(fileKey, arr);
       }
-      return webview.postMessage(message);
+      void webview.postMessage(message);
     };
     document.panel = webviewPanel;
     document.send = send;
@@ -667,15 +659,10 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       if (record.floor < record.originalFields.length) recordFloors.push({ recordIndex, floor: record.floor });
     }
 
-    const bytes = plainView(document.bytes);
-    const chunked = bytes.byteLength > chunking.thresholdBytes;
-    const loadId = nextLoadId++;
-    document.loadId = loadId;
-    document.assemblingLoad = undefined;
-    const send = document.send;
-    const load = {
-      type: "load" as const,
+    document.send({
+      type: "load",
       fileKey,
+      bytes: plainView(document.bytes),
       state,
       defaultTableColumns: this.defaultTableColumns(),
       defaultDelimiter: this.delimiterFor(document.uri) ?? "",
@@ -686,32 +673,10 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
       readOnlyReason: reason,
       pendingEdits,
       recordFloors,
-    };
-    if (chunked) {
-      void send({ ...load, chunked: true, loadId, byteLength: bytes.byteLength });
-      void this.sendChunks(document, send, loadId, bytes);
-    } else {
-      void send({ ...load, bytes });
-    }
+    });
 
     if (document.isDeleted) document.send({ type: "fileDeleted", name: document.name });
     if (document.changedOnDisk) document.send({ type: "fileChangedOnDisk", name: document.name });
-  }
-
-  // One chunk at a time, each after the webview has taken the one before, so what is in flight is never more than a chunk. A newer load, a new
-  // panel or a webview that did not take a chunk (hidden, closed) ends it; the webview is sent a full load when it is visible again.
-  private async sendChunks(document: CsvDocument, send: NonNullable<CsvDocument["send"]>, loadId: number, bytes: Uint8Array): Promise<void> {
-    document.assemblingLoad = loadId;
-    try {
-      for (let offset = 0; offset < bytes.byteLength; offset += chunking.chunkBytes) {
-        if (document.loadId !== loadId || document.send !== send) return;
-        // A copy, not a view: VS Code attaches a view's whole underlying buffer to the message, which for a view of the file is the file.
-        const chunk = bytes.slice(offset, Math.min(bytes.byteLength, offset + chunking.chunkBytes));
-        if ((await send({ type: "loadChunk", loadId, offset, bytes: chunk })) === false) return;
-      }
-    } finally {
-      if (document.assemblingLoad === loadId) document.assemblingLoad = undefined;
-    }
   }
 
   // Re-reads a clean document when the file differs from what it holds; true if the bytes were replaced.
@@ -891,8 +856,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
 
   // The webview commits any open editor and answers after posting its edits; messages on one channel arrive in order.
   private async flush(document: CsvDocument): Promise<void> {
-    // A webview still assembling a load has nothing to flush, and the load replaces whatever it was showing.
-    if (!document.send || !document.panel || document.assemblingLoad !== undefined) return;
+    if (!document.send || !document.panel) return;
     const baseVersion = document.baseVersion;
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([

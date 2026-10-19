@@ -139,11 +139,6 @@ suite("Large files", function () {
     // About 2x: document.bytes and the copy of it in the RPC message VS Code builds to ship the file.
     assert.ok(rssGrowthMb < 3 * mb(bytes), `the extension host's RSS grew ${rssGrowthMb}MB for a ${mb(bytes)}MB file`);
 
-    // The file went out in chunks (experimental): the log below says what that did to the settled figure.
-    const outgoing = (await getTestApi()).getOutgoing(fileKeyFor(uri));
-    const chunkCount = outgoing.filter((m) => m.type === "loadChunk").length;
-    assert.ok(chunkCount > 1, "a 120MB file is expected to be sent in chunks");
-
     // A guard against a new retained copy on our side, not a memory target. CI measured 1.96x for this file both right after render and settled
     // (external ~347MB; arrayBuffers reads 0 in this host): document.bytes plus the copy VS Code makes of the outgoing message, which is outside our
     // control and is not freed by a collection. A third file-sized copy would take the growth to about 3x, so the gate sits between.
@@ -151,7 +146,7 @@ suite("Large files", function () {
     const settledGrowthMb = settled.rssMb - m.memBeforeRssMb;
     // eslint-disable-next-line no-console
     console.log(
-      `[largeFiles] 120MB open, settled: extHost RSS grew ${settledGrowthMb}MB = ${ratio(settledGrowthMb)}x the file in ${chunkCount} chunks (1.96x on CI as one message; gate 2.5x), external ${settled.externalMb}MB, arrayBuffers ${settled.arrayBuffersMb}MB`,
+      `[largeFiles] 120MB open, settled: extHost RSS grew ${settledGrowthMb}MB = ${ratio(settledGrowthMb)}x the file (measured 1.96x on CI; gate 2.5x), external ${settled.externalMb}MB, arrayBuffers ${settled.arrayBuffersMb}MB`,
     );
     assert.ok(settledGrowthMb < 2.5 * mb(bytes), `the extension host's settled RSS grew ${settledGrowthMb}MB for a ${mb(bytes)}MB file`);
 
