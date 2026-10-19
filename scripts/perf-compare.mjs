@@ -21,29 +21,41 @@ const LABELS = [
 
 const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 
-const samples = Object.fromEntries(LABELS.map(([key]) => [key, []]));
+// The scale spec prints one table for a text load and one for a bytes load; each is compared with its own baseline.
+const VARIANTS = [
+  ["scale200kx30", "text"],
+  ["scale200kx30Bytes", "bytes"],
+];
+const samples = Object.fromEntries(VARIANTS.map(([key]) => [key, Object.fromEntries(LABELS.map(([label]) => [label, []]))]));
+let current = null;
 for (const line of readFileSync(logPath, "utf8").split("\n")) {
+  const heading = /timing table( \(bytes\))?:/.exec(line);
+  if (heading) current = heading[1] ? "scale200kx30Bytes" : "scale200kx30";
   const match = /^\s+(\S.*?)\s{2,}(\d+)\s*$/.exec(line);
-  if (!match) continue;
+  if (!match || !current) continue;
   const hit = LABELS.find(([, pattern]) => pattern.test(match[1]));
-  if (hit) samples[hit[0]].push(Number(match[2]));
+  if (hit) samples[current][hit[0]].push(Number(match[2]));
 }
 
 const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
 const FACTOR = 2;
 let failed = false;
 console.log(`200k x 30 timing medians against ${baselinePath} (${baseline.machine})`);
-for (const [key] of LABELS) {
-  const runs = samples[key];
-  if (runs.length === 0) {
-    console.log(`  ${key.padEnd(22)} no samples in ${logPath}`);
-    failed = true;
-    continue;
+for (const [key, name] of VARIANTS) {
+  if (!baseline[key]) continue;
+  console.log(` ${name} load`);
+  for (const [label] of LABELS) {
+    const runs = samples[key][label];
+    if (runs.length === 0) {
+      console.log(`  ${label.padEnd(22)} no samples in ${logPath}`);
+      failed = true;
+      continue;
+    }
+    const measured = median(runs);
+    const reference = baseline[key][label];
+    const over = measured > FACTOR * reference;
+    if (over) failed = true;
+    console.log(`  ${label.padEnd(22)} median ${String(measured).padStart(5)} ms of ${runs.length} run(s), baseline ${String(reference).padStart(5)} ms${over ? `  <-- over ${FACTOR}x` : ""}`);
   }
-  const measured = median(runs);
-  const reference = baseline.scale200kx30[key];
-  const over = measured > FACTOR * reference;
-  if (over) failed = true;
-  console.log(`  ${key.padEnd(22)} median ${String(measured).padStart(5)} ms of ${runs.length} run(s), baseline ${String(reference).padStart(5)} ms${over ? `  <-- over ${FACTOR}x` : ""}`);
 }
 process.exit(failed ? 1 : 0);
