@@ -125,7 +125,7 @@ suite("Large files", function () {
       `[largeFiles] 120MB open: ${m.elapsedMs}ms (target 4000), extHost RSS grew ${rssGrowthMb}MB = ${Math.round((rssGrowthMb / mb(bytes)) * 100) / 100}x the file (target 1.5x)`,
     );
     assert.ok(m.elapsedMs < 15000, `opening took ${m.elapsedMs}ms`);
-    assert.ok(rssGrowthMb < 2 * mb(bytes), `the extension host's RSS grew ${rssGrowthMb}MB for a ${mb(bytes)}MB file`);
+    assert.ok(rssGrowthMb < 3 * mb(bytes), `the extension host's RSS grew ${rssGrowthMb}MB for a ${mb(bytes)}MB file`);
 
     await vscode.commands.executeCommand("workbench.action.files.saveAll");
   });

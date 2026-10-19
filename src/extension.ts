@@ -4,6 +4,7 @@ import { isRecordEdited, recordFieldsForWrite, spliceBytes } from "./core/csvEdi
 import { serializeRecord } from "./core/csvSerialize";
 import { normalizePageSize } from "./core/paging";
 import { addByteOffsets, splitRecordsToTable } from "./core/recordSpans";
+import { isValidUtf8 } from "./utf8";
 import {
   createDefaultViewState,
   type EditMessage,
@@ -636,7 +637,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
   private postLoad(document: CsvDocument): void {
     if (!document.send || !document.bytes) return;
     const fileKey = document.uri.toString();
-    document.lossy = decodeText(document.bytes).lossy;
+    document.lossy = !isValidUtf8(document.bytes);
     const reason = this.readOnlyReason(document);
     const state = this.loadOrCreateState(fileKey);
     document.formatKey = JSON.stringify([state.delimiter, state.firstRowIsHeader, state.quotes]);
