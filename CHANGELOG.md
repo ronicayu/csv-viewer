@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.1
+
+**Fixed**
+- Files with a very large number of columns (a 20 MB single-line file has about two
+  million) no longer hang the viewer: the Columns, Sort and Filter lists show the first
+  1,000 columns with a note, and row details show the first 1,000 fields with a **Show
+  all fields** button.
+- Sorting, paging or changing the separator right after a large file opens no longer
+  waits on a background pass that could take over a second.
+
+**Changed**
+- Large files open faster and use less memory in the extension host: the file is handed
+  to the viewer as bytes instead of text, the separator is detected from the start of
+  the file rather than all of it, and the first page is drawn without an extra layout
+  pass.
+
 ## 0.8.0
 
 **Added**

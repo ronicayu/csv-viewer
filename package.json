@@ -2,7 +2,7 @@
   "name": "csv-row-details",
   "displayName": "Wide CSV",
   "description": "Read and edit wide CSV/TSV files without scrolling sideways: key columns in the table, long text and JSON in row details. Filter, sort, edit cells, live reload.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "publisher": "ronica",
   "license": "MIT",
   "icon": "media/icon.png",
