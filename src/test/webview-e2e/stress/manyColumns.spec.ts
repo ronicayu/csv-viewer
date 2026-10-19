@@ -146,6 +146,78 @@ test.describe("a file with a very large number of columns", () => {
     expect(await layouts() - before).toBeLessThan(50);
   });
 
+  test("All in Table on a 20,000-column file renders a capped table and saves one flag, not a key per column", async ({ page }) => {
+    test.setTimeout(120_000);
+    const columns = 20_000;
+    await bootShell(page);
+    await pushLoadText(page, { fileKey: "file:///wide.csv", text: singleLineText(columns), state: defaultViewState(), defaultTableColumns: 8 });
+    await expect(page.locator("tr.data-row")).toHaveCount(1, { timeout: 60_000 });
+
+    await page.locator("#columns-btn").click();
+    await clearPosted(page);
+    await page.locator("#columns-show-all").click();
+    await expect(page.locator("#columns-btn")).toHaveText(`Columns ${columns}/${columns}`);
+    await expect(page.locator("th.sortable")).toHaveCount(MANY_COLUMNS);
+    await expect(page.locator("#table-cap-banner")).toBeVisible();
+    await expect(page.locator("#table-cap-text")).toHaveText("The table shows the first 1,000 of the 20,000 columns chosen for it. The rest are in each row's details.");
+    expect(await elementCount(page)).toBeLessThan(20_000);
+    const saved = (await posted(page)).filter((m) => m.type === "saveState").at(-1) as { state: { columnVisibility: object; columnDefault?: boolean } };
+    expect(saved.state.columnDefault).toBe(true);
+    expect(saved.state.columnVisibility).toEqual({});
+
+    // Columns past the cap are not lost: they lead the row's details.
+    await page.locator("#columns-btn").click();
+    await page.locator("tr.data-row").first().click();
+    await expect(page.locator("tr.detail-row:not([hidden]) dt .detail-field-label").first()).toHaveText("column_1001");
+    // A thousand table columns and a thousand detail fields, both capped: bounded, not small.
+    expect(await elementCount(page)).toBeLessThan(30_000);
+
+    // One toggle on top of the bulk choice is a single key.
+    await page.locator("#columns-btn").click();
+    await page.locator("#columns-search").fill("column_1001");
+    await page.locator("#columns-list label.column-row", { hasText: /^column_1001$/ }).locator("input").uncheck();
+    const toggled = (await posted(page)).filter((m) => m.type === "saveState").at(-1) as { state: { columnVisibility: object; columnDefault?: boolean } };
+    expect(toggled.state.columnVisibility).toEqual({ column_1001: false });
+    expect(toggled.state.columnDefault).toBe(true);
+    await expect(page.locator("#columns-btn")).toHaveText(`Columns ${columns - 1}/${columns}`);
+  });
+
+  test("All in Details on a 20,000-column file saves one flag and leaves no column in the table", async ({ page }) => {
+    test.setTimeout(120_000);
+    await bootShell(page);
+    await pushLoadText(page, { fileKey: "file:///wide.csv", text: singleLineText(20_000), state: defaultViewState(), defaultTableColumns: 8 });
+    await expect(page.locator("tr.data-row")).toHaveCount(1, { timeout: 60_000 });
+    await page.locator("#columns-btn").click();
+    await clearPosted(page);
+    await page.locator("#columns-hide-all").click();
+    await expect(page.locator("#columns-btn")).toHaveText("Columns 0/20000");
+    await expect(page.locator("th.sortable")).toHaveCount(0);
+    await expect(page.locator("#table-cap-banner")).toBeHidden();
+    const saved = (await posted(page)).filter((m) => m.type === "saveState").at(-1) as { state: { columnVisibility: object; columnDefault?: boolean } };
+    expect(saved.state).toMatchObject({ columnVisibility: {}, columnDefault: false });
+  });
+
+  test("a saved bulk choice is applied on the next open, and a state with a key per column is compacted", async ({ page }) => {
+    test.setTimeout(120_000);
+    const columns = 20_000;
+    const text = singleLineText(columns);
+    await bootShell(page);
+    await pushLoadText(page, { fileKey: "file:///wide.csv", text, state: defaultViewState({ columnDefault: true }), defaultTableColumns: 8 });
+    await expect(page.locator("th.sortable")).toHaveCount(MANY_COLUMNS, { timeout: 60_000 });
+    await expect(page.locator("#columns-btn")).toHaveText(`Columns ${columns}/${columns}`);
+
+    // What 0.8.0 saved for this file: a key for every column, the first eight shown.
+    const names = ["header", ...Array.from({ length: columns - 1 }, (_, i) => `column_${i + 2}`)];
+    const pinned = Object.fromEntries(names.map((name, i) => [name, i < 8]));
+    await bootShell(page);
+    await pushLoadText(page, { fileKey: "file:///wide.csv", text, state: defaultViewState({ columnVisibility: pinned }), defaultTableColumns: 8 });
+    await expect(page.locator("tr.data-row")).toHaveCount(1, { timeout: 60_000 });
+    await expect(page.locator("th.sortable")).toHaveCount(8);
+    const saved = (await posted(page)).filter((m) => m.type === "saveState").at(-1) as { state: { columnVisibility: object } } | undefined;
+    expect(saved).toBeDefined();
+    expect(JSON.stringify(saved!.state.columnVisibility).length).toBeLessThan(200);
+  });
+
   test("first render stays linear in the width of a single line", async ({ page }) => {
     test.setTimeout(180_000);
     const timings: Record<string, number> = {};

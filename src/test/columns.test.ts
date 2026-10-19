@@ -400,7 +400,8 @@ describe("reconcileVisibility with more than MANY_COLUMNS headers", () => {
           // Columns past the 60 given profiles are short; a few below them are made long by index.
           const profilesFor = profiles && headers.map((_, i) => (shortProfiles.includes(i) ? profiles[0] : (profiles[i % 60] ?? profiles[0])));
           const stored = reconcileVisibility(headers, previous, budget, profilesFor);
-          expect(Object.keys(stored).sort()).toEqual(Object.keys(previous).sort());
+          // Never a key for a header the user did not toggle: at most the ones that were stored.
+          expect(Object.keys(stored).every((key) => Object.prototype.hasOwnProperty.call(previous, key))).toBe(true);
 
           const flags = defaultVisibleFlags(headers, stored, budget, profilesFor);
           const pinned = reconcileVisibilityPinned(headers, previous, budget, profilesFor);
@@ -411,6 +412,42 @@ describe("reconcileVisibility with more than MANY_COLUMNS headers", () => {
       ),
       { numRuns: 500 },
     );
+  });
+
+  it("drops the keys an older version pinned that equal the defaults, without moving any column (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 40 }),
+        fc.integer({ min: 0, max: 12 }),
+        fc.option(fc.array(profileArb, { minLength: 1, maxLength: 60 }), { nil: undefined }),
+        fc.array(fc.tuple(fc.integer({ min: 0, max: 1039 }), fc.boolean()), { maxLength: 6 }),
+        fc.boolean(),
+        (extra, budget, profiles, toggles, asFunction) => {
+          const headers = headersOf(MANY_COLUMNS + extra);
+          const profilesFor = profiles && headers.map((_, i) => profiles[i % profiles.length]);
+          // What 0.8.0 saved: every header pinned, then a few of the user's own toggles on top.
+          const saved = reconcileVisibilityPinned(headers, {}, budget, profilesFor);
+          for (const [i, value] of toggles) if (i < headers.length) saved[headers[i]] = value;
+          const given = profilesFor && asFunction ? (i: number) => isShortColumn(profilesFor[i]) : profilesFor;
+          const compact = reconcileVisibility(headers, saved, budget, given);
+          const flags = defaultVisibleFlags(headers, compact, budget, given);
+          expect(visibleColumns(headers, compact, flags)).toEqual(visibleColumns(headers, saved));
+          expect(Object.keys(compact).length).toBeLessThanOrEqual(Object.keys(saved).length);
+          if (toggles.length === 0) expect(Object.keys(compact)).toEqual([]);
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("compacts a 200,000-key pinned state to the few keys that say something", () => {
+    const headers = headersOf(200_000);
+    const saved = reconcileVisibilityPinned(headers, {}, 8);
+    saved.h40000 = true;
+    const compact = reconcileVisibility(headers, saved, 8);
+    expect(Object.keys(compact).length).toBeLessThan(20);
+    const flags = defaultVisibleFlags(headers, compact, 8);
+    expect(visibleColumns(headers, compact, flags)).toEqual(visibleColumns(headers, saved));
   });
 
   it("does not pin defaults for a 200,000-column file, and a toggle overrides its default", () => {

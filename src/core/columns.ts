@@ -176,20 +176,49 @@ export function defaultVisibleFlags(
   return flags;
 }
 
+function sameFlags(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+// A state saved by 0.8.0 pins a key per header. Drops the keys that say what the defaults already say, provided every column keeps the
+// visibility it had (stored entries count against the budget, so removing some can move it); tries all of them, then only the hidden ones.
+function dropDefaultedKeys(
+  headers: string[],
+  stored: ColumnVisibilityMap,
+  defaultTableColumns: number,
+  profiles?: ColumnProfile[] | ((index: number) => boolean),
+): ColumnVisibilityMap {
+  if (Object.keys(stored).length === 0) return stored;
+  const effective = defaultVisibleFlags(headers, stored, defaultTableColumns, profiles);
+  const defaults = defaultVisibleFlags(headers, {}, defaultTableColumns, profiles);
+  for (const onlyHidden of [false, true]) {
+    const drop = new Set<string>();
+    headers.forEach((h, i) => {
+      const value = getVisibility(stored, h);
+      if (value !== undefined && (value ? 1 : 0) === defaults[i] && (!onlyHidden || !value)) drop.add(h);
+    });
+    const compact = createVisibilityMap();
+    for (const key of Object.keys(stored)) if (!drop.has(key)) setVisibility(compact, key, getVisibility(stored, key) as boolean);
+    if (sameFlags(defaultVisibleFlags(headers, compact, defaultTableColumns, profiles), effective)) return compact;
+  }
+  return stored;
+}
+
 // Stored entries for headers absent from this parse are kept, so they return if the headers do.
 // With more than MANY_COLUMNS headers no key is added per header: the map holds only what the user toggled, and the defaults come from
-// defaultVisibleFlags on every load, so they are not pinned across reloads (a documented limit).
+// defaultVisibleFlags on every load, so they are not pinned across reloads (a documented limit). Keys an older version pinned that equal
+// those defaults are dropped.
 export function reconcileVisibility(
   headers: string[],
   previous: ColumnVisibilityMap,
   defaultTableColumns: number,
-  profiles?: ColumnProfile[],
+  profiles?: ColumnProfile[] | ((index: number) => boolean),
 ): ColumnVisibilityMap {
   const map = createVisibilityMap();
   for (const key of Object.keys(previous)) {
     setVisibility(map, key, getVisibility(previous, key) as boolean);
   }
-  if (headers.length > MANY_COLUMNS) return map;
+  if (headers.length > MANY_COLUMNS) return dropDefaultedKeys(headers, map, defaultTableColumns, profiles);
 
   const flags = defaultVisibleFlags(headers, previous, defaultTableColumns, profiles);
   headers.forEach((h, i) => {

@@ -59,6 +59,8 @@ export interface ViewState {
   delimiter: string;
   quotes: boolean;
   markdownColumns: ColumnFlagMap;
+  // What "All in Table" / "All in Details" chose for a file with more than MANY_COLUMNS columns, in place of a key per header; absent otherwise.
+  columnDefault?: boolean;
 }
 
 export function createDefaultViewState(): ViewState {

@@ -4,6 +4,7 @@ import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
 import {
   MANY_COLUMNS,
+  createVisibilityMap,
   PROFILE_MARKDOWN,
   PROFILE_NUMERIC,
   PROFILE_SHORT,
@@ -84,8 +85,9 @@ interface AppState {
   headersLower: string[] | null;
   // With more than MANY_COLUMNS columns, which ones the table shows when the user has not toggled them (see reconcileVisibility); else null.
   visibleByIndex: Uint8Array | null;
-  // The table and detail-only columns for the current visibility; dropped whenever visibility or headers change.
-  columnLists: { table: string[]; detailOnly: string[] } | null;
+  // The table and detail-only columns for the current visibility; dropped whenever visibility or headers change. Past MANY_COLUMNS the table
+  // takes the first ones and the rest go to the details; `visibleCount` is how many the user has chosen.
+  columnLists: { table: string[]; detailOnly: string[]; visibleCount: number } | null;
   // What the Sort popover was last built from, so a render that changed neither skips rebuilding its column list.
   sortPopoverKey: string | null;
   // Rows whose details list every field rather than the first MANY_COLUMNS.
@@ -153,6 +155,10 @@ app.innerHTML = `
     <span class="codicon codicon-info" aria-hidden="true"></span>
     <span id="hint-rowdetails-text" class="banner-text"></span>
     <button id="hint-rowdetails-dismiss-btn" type="button" class="icon-btn" aria-label="Dismiss"><span class="codicon codicon-close" aria-hidden="true"></span></button>
+  </div>
+  <div id="table-cap-banner" class="banner banner-info" hidden>
+    <span class="codicon codicon-info" aria-hidden="true"></span>
+    <span id="table-cap-text" class="banner-text"></span>
   </div>
   <div id="readonly-banner" class="banner banner-info" hidden>
     <span class="codicon codicon-info" aria-hidden="true"></span>
@@ -283,6 +289,8 @@ const editStatus = document.getElementById("edit-status") as HTMLDivElement;
 const formatLockedNote = document.getElementById("format-locked-note") as HTMLParagraphElement;
 const hintBanner = document.getElementById("hint-rowdetails-banner") as HTMLDivElement;
 const hintText = document.getElementById("hint-rowdetails-text") as HTMLSpanElement;
+const tableCapBanner = document.getElementById("table-cap-banner") as HTMLDivElement;
+const tableCapText = document.getElementById("table-cap-text") as HTMLSpanElement;
 const hintDismissBtn = document.getElementById("hint-rowdetails-dismiss-btn") as HTMLButtonElement;
 const filteredRow = document.getElementById("filtered-row") as HTMLDivElement;
 const filteredRowText = document.getElementById("filtered-row-text") as HTMLSpanElement;
@@ -568,6 +576,7 @@ async function onLoad(message: LoadMessage): Promise<void> {
   view.delimiter = typeof view.delimiter === "string" ? view.delimiter : "";
   view.quotes = typeof view.quotes === "boolean" ? view.quotes : true;
   view.markdownColumns = normalizeColumnFlags(view.markdownColumns);
+  if (typeof view.columnDefault !== "boolean") delete view.columnDefault;
 
   cancelOpenEditor();
   abandonInflightEdits();
@@ -674,12 +683,18 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   postToWorker({ type: "init", requestId, text, byteLength: state?.byteLength, options, floors });
 }
 
-function columnLists(): { table: string[]; detailOnly: string[] } {
+function columnLists(): { table: string[]; detailOnly: string[]; visibleCount: number } {
   const s = state!;
-  s.columnLists ??= {
-    table: visibleColumns(s.headers, s.view.columnVisibility, s.visibleByIndex),
-    detailOnly: detailOnlyColumns(s.headers, s.view.columnVisibility, s.visibleByIndex),
-  };
+  if (!s.columnLists) {
+    const visible = visibleColumns(s.headers, s.view.columnVisibility, s.visibleByIndex);
+    if (visible.length <= MANY_COLUMNS) {
+      s.columnLists = { table: visible, detailOnly: detailOnlyColumns(s.headers, s.view.columnVisibility, s.visibleByIndex), visibleCount: visible.length };
+    } else {
+      const table = visible.slice(0, MANY_COLUMNS);
+      const inTable = new Set(table);
+      s.columnLists = { table, detailOnly: s.headers.filter((h) => !inTable.has(h)), visibleCount: visible.length };
+    }
+  }
   return s.columnLists;
 }
 
@@ -692,9 +707,17 @@ function invalidateColumnLists(): void {
   if (state) state.columnLists = null;
 }
 
+function renderTableCapBanner(): void {
+  if (!state) return;
+  const { visibleCount } = columnLists();
+  const capped = visibleCount > MANY_COLUMNS;
+  tableCapBanner.hidden = !capped;
+  if (capped) tableCapText.textContent = `The table shows the first ${MANY_COLUMNS.toLocaleString()} of the ${visibleCount.toLocaleString()} columns chosen for it. The rest are in each row's details.`;
+}
+
 function renderColumnsButton(): void {
   if (!state) return;
-  const visible = tableColumns().length;
+  const visible = columnLists().visibleCount;
   const total = state.headers.length;
   columnsBtn.textContent = `Columns ${visible}/${total}`;
   columnsBtn.title = `Columns in table: ${visible} of ${total}`;
@@ -886,21 +909,27 @@ function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
   if (pendingInitIsFreshParse) state.quoteBannerDismissed = false;
 
   const previousVisibility = state.view.columnVisibility;
-  const reconciled = reconcileVisibility(msg.headers, previousVisibility, state.defaultTableColumns, msg.columnProfiles);
+  const verdicts = msg.profileVerdicts;
+  const profiles = verdicts ? (i: number) => (verdicts[i] & PROFILE_SHORT) !== 0 : msg.columnProfiles;
+  const many = msg.headers.length > MANY_COLUMNS;
+  // A bulk choice made for a wide file stands in for the defaults, so there is nothing to reconcile against them.
+  const bulk = many ? state.view.columnDefault : undefined;
+  const reconciled = bulk === undefined ? reconcileVisibility(msg.headers, previousVisibility, state.defaultTableColumns, profiles) : normalizeColumnFlags(previousVisibility);
   const visibilityChanged = !sameColumnVisibility(previousVisibility, reconciled);
   state.view.columnVisibility = reconciled;
   state.sortPopoverKey = null;
-  const verdicts = msg.profileVerdicts;
-  state.visibleByIndex =
-    msg.headers.length > MANY_COLUMNS
-      ? defaultVisibleFlags(msg.headers, reconciled, state.defaultTableColumns, verdicts ? (i) => (verdicts[i] & PROFILE_SHORT) !== 0 : msg.columnProfiles)
-      : null;
+  state.visibleByIndex = !many
+    ? null
+    : bulk !== undefined
+      ? new Uint8Array(msg.headers.length).fill(bulk ? 1 : 0)
+      : defaultVisibleFlags(msg.headers, reconciled, state.defaultTableColumns, profiles);
   invalidateColumnLists();
   state.numericColumns = new Set(msg.headers.filter((_h, i) => (verdicts ? (verdicts[i] & PROFILE_NUMERIC) !== 0 : isNumericColumn(msg.columnProfiles[i]))));
   state.autoMarkdownColumns = new Set(msg.headers.filter((_h, i) => (verdicts ? (verdicts[i] & PROFILE_MARKDOWN) !== 0 : isAutoMarkdownColumn(msg.columnProfiles[i]))));
 
   renderColumnsPopover();
   renderColumnsButton();
+  renderTableCapBanner();
   renderFilterPanel();
   renderSeparatorControl();
   renderFormatButton();
@@ -2400,29 +2429,32 @@ function renderLocalOnly(): void {
   renderTableBody();
   renderExpandCollapseButton();
   renderColumnsButton();
+  renderTableCapBanner();
   renderHintBanner();
   notifyRendered();
 }
 
 columnsSearch.addEventListener("input", renderColumnsPopover);
 
-columnsShowAll.addEventListener("click", () => {
+// Up to MANY_COLUMNS columns every header gets its key; past that a key apiece would be saved on every state change, so the choice is
+// kept as the one default and the keys for single toggles are cleared.
+function setAllColumns(inTable: boolean): void {
   if (!state) return;
-  for (const header of state.headers) setVisibility(state.view.columnVisibility, header, true);
+  if (state.headers.length > MANY_COLUMNS) {
+    state.view.columnVisibility = createVisibilityMap();
+    state.view.columnDefault = inTable;
+    state.visibleByIndex = new Uint8Array(state.headers.length).fill(inTable ? 1 : 0);
+  } else {
+    for (const header of state.headers) setVisibility(state.view.columnVisibility, header, inTable);
+  }
   invalidateColumnLists();
   renderColumnsPopover();
   renderLocalOnly();
   saveState();
-});
+}
 
-columnsHideAll.addEventListener("click", () => {
-  if (!state) return;
-  for (const header of state.headers) setVisibility(state.view.columnVisibility, header, false);
-  invalidateColumnLists();
-  renderColumnsPopover();
-  renderLocalOnly();
-  saveState();
-});
+columnsShowAll.addEventListener("click", () => setAllColumns(true));
+columnsHideAll.addEventListener("click", () => setAllColumns(false));
 
 const OPERATORS: { value: FilterOperator; label: string; needsValue: boolean }[] = [
   { value: "contains", label: "contains", needsValue: true },
