@@ -2,7 +2,7 @@ import { MANY_COLUMNS, PROFILE_SAMPLE_ROWS, profileColumns, profileVerdicts, typ
 import { applyTextPatches, recordFieldsForWrite, type ByteReplacement, rebaseSpanTable, textPatches, type EditedRecord } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
 import { PARSE_SLICE_RECORDS, ProgressiveParse } from "../core/progressiveParse";
-import { serializeField, serializeRecord } from "../core/csvSerialize";
+import { isWellFormedUtf16, serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
 import { filterRowIds } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
@@ -51,6 +51,7 @@ interface ParseJob {
 let parseJob: ParseJob | null = null;
 let sliceRecords = PARSE_SLICE_RECORDS;
 let sliceDelayMs = 0;
+let latestInitRequestId = -1;
 
 function post(message: WorkerResponse, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage(message, transfer);
@@ -94,7 +95,8 @@ function beginParse(
   endParseJob();
   sliceRecords = tuning?.sliceRecords ?? PARSE_SLICE_RECORDS;
   sliceDelayMs = tuning?.sliceDelayMs ?? 0;
-  const parse = new ProgressiveParse(text, options, sliceRecords);
+  latestInitRequestId = requestId;
+  const parse = new ProgressiveParse(text, options, sliceRecords, tuning?.rebuildAfterSlices);
   parse.step();
   delimiter = parse.delimiter;
   quoting = parse.quoting;
@@ -122,26 +124,31 @@ function beginParse(
       page = { page: 1, rows: rawRows.slice(0, firstPage.pageSize).map((cells, id) => ({ id, cells })) };
     }
     job.channel.port1.onmessage = () => stepParseJob(job);
-    scheduleStep(job);
   }
 
-  post(
-    {
-      type: "initResult",
-      requestId,
-      headers,
-      detectedDelimiter: parse.delimiter,
-      quoteProblems: parse.quoteProblems(),
-      totalRows: rawRows.length,
-      ...profilesForMain(),
-      quoting,
-      spansOk: parseJob ? undefined : spansOk,
-      parsing: parseJob ? true : undefined,
-      firstPage: page,
-      bytes,
-    },
-    bytes ? [bytes] : [],
-  );
+  const answer = (): void => {
+    if (latestInitRequestId !== requestId) return;
+    post(
+      {
+        type: "initResult",
+        requestId,
+        headers,
+        detectedDelimiter: parse.delimiter,
+        quoteProblems: parse.quoteProblems(),
+        totalRows: rawRows.length,
+        ...profilesForMain(),
+        quoting,
+        spansOk: parseJob ? undefined : spansOk,
+        parsing: parseJob ? true : undefined,
+        firstPage: page,
+        bytes,
+      },
+      bytes ? [bytes] : [],
+    );
+    if (parseJob) scheduleStep(parseJob);
+  };
+  if (tuning?.initResultDelayMs) setTimeout(answer, tuning.initResultDelayMs);
+  else answer();
 }
 
 function profilesForMain(): { columnProfiles: ColumnProfile[]; profileVerdicts?: Uint8Array } {
@@ -323,10 +330,12 @@ function parseRecord(recordText: string): string[][] {
 }
 
 const NUL = "\u0000";
+const UNPAIRED_SURROGATE_SENTENCE = "a value can't contain an unpaired surrogate character, which a UTF-8 file cannot hold";
 
 // An edit is accepted only if the record's text still parses to its baseline and the new record parses back to what we mean to write.
 function rejectionReason(rowId: number, columnIndex: number, value: string): string | null {
   if (!spans || !spansOk) return "this file's rows couldn't be matched to its text";
+  if (!isWellFormedUtf16(value)) return UNPAIRED_SURROGATE_SENTENCE;
   const recordIndex = rowId + headerOffset;
   if (recordIndex >= spans.length) return "the row's text couldn't be matched exactly";
   const eol = EOL_TEXT[spans.eol[recordIndex]];
@@ -355,7 +364,7 @@ function rejectionReason(rowId: number, columnIndex: number, value: string): str
   return null;
 }
 
-function onEditCell(requestId: number, rowId: number, columnIndex: number, value: string): void {
+function onEditCell(requestId: number, rowId: number, columnIndex: number, value: string, expected: string | undefined): void {
   ensureSpans(true);
   const row = rawRows[rowId];
   if (!row || columnIndex < 0 || columnIndex >= headers.length) {
@@ -363,6 +372,11 @@ function onEditCell(requestId: number, rowId: number, columnIndex: number, value
     return;
   }
   const oldValue = row[columnIndex];
+  // The row the sender saw may not be the row with this id any more (the rows were parsed again under it).
+  if (expected !== undefined && oldValue !== expected) {
+    post({ type: "editResult", requestId, ok: false, reason: "the file was read again while you were editing", stale: true });
+    return;
+  }
   if (oldValue === value) {
     post({ type: "editResult", requestId, ok: true, change: null });
     return;
@@ -503,7 +517,7 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
         onDistinct(msg.requestId, msg.column);
         break;
       case "editCell":
-        onEditCell(msg.requestId, msg.rowId, msg.columnIndex, msg.value);
+        onEditCell(msg.requestId, msg.rowId, msg.columnIndex, msg.value, msg.expected);
         break;
       case "setCells":
         onSetCells(msg.requestId, msg.cells, msg.verify);

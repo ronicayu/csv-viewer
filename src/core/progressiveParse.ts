@@ -44,6 +44,7 @@ export class ProgressiveParse {
   private readonly firstRowIsHeader: boolean;
   private readonly quoteChar: string;
   private readonly sliceRecords: number;
+  private readonly rebuildAfterSlices: number | undefined;
   private readonly builder: SpanTableBuilder;
   private readonly scan: ScanState = freshScanState();
   private readonly errors: Papa.ParseError[] = [];
@@ -58,7 +59,9 @@ export class ProgressiveParse {
   private complete = false;
   private whole: ParseResult | null = null;
 
-  constructor(text: string, options: ParseOptions = {}, sliceRecords = PARSE_SLICE_RECORDS) {
+  // `rebuildAfterSlices` is a test hook: it abandons the slices for the whole-text parse after that many, as a mismatch would.
+  constructor(text: string, options: ParseOptions = {}, sliceRecords = PARSE_SLICE_RECORDS, rebuildAfterSlices?: number) {
+    this.rebuildAfterSlices = rebuildAfterSlices;
     this.text = text;
     this.options = options;
     this.sliceRecords = sliceRecords;
@@ -88,6 +91,10 @@ export class ProgressiveParse {
   // Parses the next slice; returns true once everything is parsed.
   step(): boolean {
     if (this.complete) return true;
+    if (this.rebuildAfterSlices !== undefined && this.slices >= this.rebuildAfterSlices) {
+      this.fallBack();
+      return true;
+    }
     const text = this.text;
     const first = this.slices === 0;
     let emitted = 0;

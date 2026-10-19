@@ -92,6 +92,18 @@ describe("progressive parse equals parseCsv", () => {
     expect(parse.result()).toEqual(parseCsv(text, { delimiter: '"', quotes: false }));
   });
 
+  it("abandoning the slices after a given number (the test hook) gives the whole-text result and says it rebuilt", () => {
+    const text = ["a,b", ...Array.from({ length: 30 }, (_, i) => `${i},x${i}`)].join("\n") + "\n";
+    const parse = new ProgressiveParse(text, {}, 4, 2);
+    expect(parse.step()).toBe(false);
+    expect(parse.step()).toBe(false);
+    expect(parse.step()).toBe(true);
+    expect(parse.fellBack).toBe(true);
+    expect(parse.rebuilt).toBe(true);
+    expect(parse.result()).toEqual(parseCsv(text));
+    expect(spansFromTable(parse.spans())).toEqual(spansFromTable(splitRecordsToTable(text, { delimiter: ",", quotes: true })));
+  });
+
   it("an empty text has no headers, rows or spans", () => {
     const { result, spans } = parseProgressive("", {}, 4);
     expect(result).toEqual(parseCsv(""));

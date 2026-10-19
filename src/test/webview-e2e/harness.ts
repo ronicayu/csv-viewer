@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import Papa from "papaparse";
 import { expect, type Page } from "@playwright/test";
+import type { ParseTuning } from "../../webview/workerProtocol";
 import type { HostToWebviewMessage, LoadMessage, PendingRecordEdit, ReadOnlyReason, RecordFloor, ViewState } from "../../core/types";
 
 export const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -60,7 +61,7 @@ export interface BootOptions {
   // Fails this many worker-script requests before letting one through.
   failWorkerRequests?: number;
   // Cuts the worker's parse into slices of this many records and waits this long between them (with testHooks on), so a test can act mid-parse.
-  parseTuning?: { sliceRecords?: number; sliceDelayMs?: number };
+  parseTuning?: ParseTuning;
 }
 
 export async function bootShell(page: Page, options: BootOptions = {}): Promise<void> {

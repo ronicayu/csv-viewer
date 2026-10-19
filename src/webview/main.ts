@@ -1,4 +1,5 @@
 import { foldCase } from "../core/caseFold";
+import { isWellFormedUtf16 } from "../core/csvSerialize";
 import type { DistinctValue } from "../core/distinct";
 import { isRuleActive, isValidRule, regexErrorMessage } from "../core/filter";
 import { cycleSortForColumn } from "../core/sort";
@@ -81,6 +82,8 @@ interface AppState {
   bytesOutFor: number;
   // True from an init result that left rows unparsed until its parseDone: the rows, count and headers so far are partial.
   parsing: boolean;
+  // Visibility reconciled against the headers so far, still to be saved once they are final.
+  saveWhenParsed: boolean;
   defaultDelimiter: string;
   headers: string[];
   // Header -> column index, built once per parse (headers are unique); every lookup by name goes through it.
@@ -513,6 +516,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
   else if (message.type === "flushEdits") void onFlushEdits(message);
   else if (state?.testHooksEnabled) {
     if (message.type === "testEditCell") submitEdit(message.rowId, message.columnIndex, message.value, currentCellValue(message.rowId, message.columnIndex));
+    else if (message.type === "testReinit") beginInit("init", { delimiter: resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter), firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, false);
     else if (message.type === "testOpenEditor") startInlineEdit(message.rowId, message.columnIndex);
     else if (message.type === "testGetCell") postTestCellValue(message.rowId, message.columnIndex);
   }
@@ -605,6 +609,7 @@ async function onLoad(message: LoadMessage): Promise<void> {
     bytes,
     bytesOutFor: -1,
     parsing: false,
+    saveWhenParsed: false,
     defaultDelimiter: message.defaultDelimiter,
     headers: [],
     indexByHeader: new Map(),
@@ -681,6 +686,9 @@ function settleInitWaiter(): void {
   waiter?.();
 }
 
+// An init that found the file's bytes still out with the worker, waiting for them.
+let deferredInit: { owner: AppState; options: ParseOptionsMsg; isFreshParse: boolean } | null = null;
+
 // The first page can ride with the init result only when it is the unsorted, unfiltered first page and nothing is waiting to be applied to rows.
 function firstPageRequest(): FirstPageRequest | undefined {
   if (!state) return undefined;
@@ -691,6 +699,12 @@ function firstPageRequest(): FirstPageRequest | undefined {
 
 // "init" sends the file (transferred, so main keeps nothing until the result hands it back); "reparse" asks the worker to parse what it holds.
 function beginInit(mode: "init" | "reparse", options: ParseOptionsMsg, isFreshParse: boolean): void {
+  if (mode === "init" && state && !state.bytes) {
+    // The worker still holds the buffer a previous init sent; this one goes out when the result brings it back.
+    deferredInit = { owner: state, options, isFreshParse };
+    return;
+  }
+  deferredInit = null;
   settleInitWaiter();
   const requestId = nextRequestId++;
   pendingInitRequestId = requestId;
@@ -707,12 +721,8 @@ function beginInit(mode: "init" | "reparse", options: ParseOptionsMsg, isFreshPa
     postToWorker({ type: "reparse", requestId, options, floors, firstPage, tuning });
     return;
   }
-  const bytes = state?.bytes;
-  if (!state || !bytes) {
-    // eslint-disable-next-line no-console
-    console.error("csv-viewer: the file's bytes are not here to send to the worker");
-    return;
-  }
+  if (!state?.bytes) return;
+  const bytes = state.bytes;
   state.bytes = null;
   state.bytesOutFor = requestId;
   postToWorker({ type: "init", requestId, bytes, options, floors, firstPage, tuning }, [bytes]);
@@ -934,6 +944,14 @@ function takeBytesBack(msg: { type: "initResult" } & WorkerResponse): void {
   if (!state || !msg.bytes || msg.requestId !== state.bytesOutFor) return;
   state.bytes = msg.bytes;
   state.bytesOutFor = -1;
+  const waiting = deferredInit;
+  if (waiting && waiting.owner === state) {
+    deferredInit = null;
+    // After the result being handled has run, so the new init supersedes it in order.
+    queueMicrotask(() => {
+      if (state === waiting.owner) beginInit("init", waiting.options, waiting.isFreshParse);
+    });
+  }
 }
 
 type ColumnsMessage = { headers: string[]; columnProfiles: ColumnProfile[]; profileVerdicts?: Uint8Array };
@@ -972,7 +990,11 @@ function applyColumns(msg: ColumnsMessage): void {
   renderFilterPanel();
   renderHintBanner();
 
-  if (visibilityChanged) saveState();
+  // Headers still growing (a ragged file) would save a visibility that changes again at parseDone.
+  if (visibilityChanged) {
+    if (state.parsing) state.saveWhenParsed = true;
+    else saveState();
+  }
 }
 
 function onInitResult(msg: { type: "initResult" } & WorkerResponse): void {
@@ -1020,7 +1042,6 @@ function showFirstPage(firstPage: { page: number; rows: WorkerRow[] }, rowsSoFar
 function onParseDone(msg: Extract<WorkerResponse, { type: "parseDone" }>): void {
   if (!state || msg.requestId !== pendingInitRequestId) return;
   if (state.testHooksEnabled) performance.mark("csv:parse-done");
-  state.parsing = false;
   state.totalRows = msg.totalRows;
   state.quoteProblems = msg.quoteProblems;
   renderQuoteWarningBanner();
@@ -1029,8 +1050,16 @@ function onParseDone(msg: Extract<WorkerResponse, { type: "parseDone" }>): void 
     cancelOpenEditor();
     renderTableBody();
   }
+  // Rows already shown may be from another parse: an editor open on one of them would write to a row that is not the one it was opened on.
+  if (msg.rebuilt) cancelOpenEditor();
   const columnsChanged = msg.headers !== undefined;
   if (msg.headers) applyColumns({ headers: msg.headers, columnProfiles: msg.columnProfiles ?? [], profileVerdicts: msg.profileVerdicts });
+  // Still parsing while the columns are applied, so the visibility that follows from the final headers is saved once, here.
+  state.parsing = false;
+  if (state.saveWhenParsed) {
+    state.saveWhenParsed = false;
+    saveState();
+  }
   if (queryInFlight) return;
   // What is on screen is the unsorted, unfiltered view of the rows so far, which is now every row.
   state.filteredCount = msg.totalRows;
@@ -1154,6 +1183,11 @@ async function handleRegexTimeout(rulesSent: FilterRule[]): Promise<void> {
 
   await respawnWorker();
   if (!state) return; // a load may have raced the respawn
+  if (!state.bytes) {
+    // The terminated worker held the file; the host has it, and a fresh load is the way back.
+    vscode.postMessage({ type: "resync" });
+    return;
+  }
   const delimiterOption = resolveDelimiterOption(state.view.delimiter, state.defaultDelimiter);
   beginInit("init", { delimiter: delimiterOption, firstRowIsHeader: state.view.firstRowIsHeader, quotes: state.view.quotes }, false);
 }
@@ -3166,6 +3200,7 @@ function applyValuesPicker(): void {
 }
 
 const TOO_LARGE_SENTENCE = "Too large to edit here (over 1 MB). Use Open as Text to change it.";
+const UNPAIRED_SURROGATE_SENTENCE = "A value can't contain an unpaired surrogate character; a UTF-8 file cannot hold one.";
 const QUOTES_OFF_SENTENCE = "With Quoted fields off, a value can't contain the separator or a line break.";
 const READ_ONLY_SENTENCES: Record<Exclude<ReadOnlyReason, "setting">, string> = {
   encoding: "This file isn't valid UTF-8, so Wide CSV opens it read-only. Use Open as Text to edit it.",
@@ -3290,6 +3325,7 @@ function normalizeNewlines(value: string): string {
 }
 
 function localRejection(value: string): string | null {
+  if (!isWellFormedUtf16(value)) return UNPAIRED_SURROGATE_SENTENCE;
   if (!state || state.quoting) return null;
   return value.includes(state.detectedDelimiter) || value.includes("\n") ? QUOTES_OFF_SENTENCE : null;
 }
@@ -3365,7 +3401,7 @@ function submitEdit(rowId: number, columnIndex: number, value: string, previous:
   const requestId = nextRequestId++;
   inflightEdits.set(requestId, { owner: state, rowId, columnIndex, value, previous, base: state.baseVersion });
   renderFormatLock();
-  postToWorker({ type: "editCell", requestId, rowId, columnIndex, value });
+  postToWorker({ type: "editCell", requestId, rowId, columnIndex, value, expected: previous });
 }
 
 function onEditResult(msg: Extract<WorkerResponse, { type: "editResult" }>): void {
@@ -3379,6 +3415,8 @@ function onEditResult(msg: Extract<WorkerResponse, { type: "editResult" }>): voi
       if (row && pending.previous !== undefined) row.cells[pending.columnIndex] = pending.previous;
       refreshRow(pending.rowId);
       showEditError(`Couldn't edit row ${pending.rowId + 1}: ${msg.reason}.`);
+      // The rows on screen are not the rows the worker holds; the host's copy of the file sets that right.
+      if (msg.stale) vscode.postMessage({ type: "resync" });
       return;
     }
     const change = msg.change;

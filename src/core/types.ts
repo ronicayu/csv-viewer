@@ -205,6 +205,11 @@ export interface TestEditCellMessage {
   value: string;
 }
 
+// Starts the init a worker respawn would, without the respawn.
+export interface TestReinitMessage {
+  type: "testReinit";
+}
+
 export interface TestOpenEditorMessage {
   type: "testOpenEditor";
   rowId: number;
@@ -292,6 +297,7 @@ export type HostToWebviewMessage =
   | EditRefusedMessage
   | FlushEditsMessage
   | TestEditCellMessage
+  | TestReinitMessage
   | TestOpenEditorMessage
   | TestGetCellMessage;
 

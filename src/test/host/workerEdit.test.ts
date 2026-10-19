@@ -169,6 +169,31 @@ describe("worker edit refusals", () => {
   });
 });
 
+describe("worker edits and the rows the sender saw", () => {
+  it("refuse an edit made against a value the cell no longer holds, and accept one made against the value it holds", async () => {
+    await worker();
+    init("a,b\n1,2\n3,4\n");
+    const stale = workerReply({ type: "editCell", rowId: 0, columnIndex: 1, value: "x", expected: "not what is there" }, "editResult");
+    expect(stale).toMatchObject({ ok: false, stale: true });
+    expect(callWorker({ type: "page", page: 1, pageSize: 10 }).find((m) => m.type === "pageResult")!.rows[0].cells).toEqual(["1", "2"]);
+    expect(workerReply({ type: "editCell", rowId: 0, columnIndex: 1, value: "x", expected: "2" }, "editResult")).toMatchObject({ ok: true });
+    // The edit just made is the value the next one is made against.
+    expect(workerReply({ type: "editCell", rowId: 0, columnIndex: 1, value: "y", expected: "x" }, "editResult")).toMatchObject({ ok: true });
+    expect(workerReply({ type: "editCell", rowId: 1, columnIndex: 0, value: "z" }, "editResult")).toMatchObject({ ok: true });
+  });
+
+  it("refuse a value with an unpaired surrogate, which a UTF-8 file cannot hold", async () => {
+    await worker();
+    init("a,b\n1,2\n");
+    for (const value of ["x\ud800", "\udc00y", "\ud83d"]) {
+      const result = edit(0, 1, value);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/unpaired surrogate/);
+    }
+    expect(edit(0, 1, "😀").ok).toBe(true);
+  });
+});
+
 describe("worker column profiles", () => {
   it("come as profiles up to 1,000 columns and as one verdict byte per column beyond", async () => {
     await worker();

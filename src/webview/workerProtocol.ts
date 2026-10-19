@@ -19,6 +19,10 @@ export interface FirstPageRequest {
 export interface ParseTuning {
   sliceRecords?: number;
   sliceDelayMs?: number;
+  // Abandon the slices for the whole-text parse after this many.
+  rebuildAfterSlices?: number;
+  // Hold back the init result (and the slices after it), so the file's bytes stay with the worker for a while.
+  initResultDelayMs?: number;
 }
 
 export type WorkerRequest =
@@ -30,7 +34,8 @@ export type WorkerRequest =
   | { type: "query"; requestId: number; quickSearch: string; filterRules: FilterRule[]; sortKeys: SortKey[] }
   | { type: "page"; requestId: number; page: number; pageSize: number }
   | { type: "distinct"; requestId: number; column: string }
-  | { type: "editCell"; requestId: number; rowId: number; columnIndex: number; value: string }
+  // `expected` is the value the sender saw in the cell; the edit is refused if the cell holds something else now.
+  | { type: "editCell"; requestId: number; rowId: number; columnIndex: number; value: string; expected?: string }
   | { type: "setCells"; requestId: number; cells: CellValue[]; verify?: RowBaseline[] }
   | { type: "rebase"; requestId: number; written?: WrittenRecord[] };
 
@@ -91,7 +96,7 @@ export type WorkerResponse =
   | { type: "pageResult"; requestId: number; rows: WorkerRow[] }
   | { type: "distinctResult"; requestId: number; column: string; values: DistinctValue[]; truncated: boolean }
   | { type: "editResult"; requestId: number; ok: true; change: CellChange | null }
-  | { type: "editResult"; requestId: number; ok: false; reason: string }
+  | { type: "editResult"; requestId: number; ok: false; reason: string; stale?: boolean }
   | { type: "setCellsDone"; requestId: number; rejectedRowIds: number[] }
   | { type: "rebased"; requestId: number; patches: TextPatch[]; bytePatches: ByteReplacement[] }
   | { type: "workerError"; requestId: number; message: string };

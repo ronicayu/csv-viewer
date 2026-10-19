@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { utf8Length } from "../../core/csvSerialize";
+import type { ParseTuning } from "../../webview/workerProtocol";
 import { awaitPosted, bootShell, clearPosted, defaultViewState, postFromHost, posted, pushLoadText } from "./harness";
 
 // A file of 4,000 rows cut into slices of 500 records with a pause between them, so for about three seconds only part of it has been parsed
@@ -11,7 +12,7 @@ const FILE_KEY = "file:///progressive.csv";
 const row = (i: number): string => `${i},${i % 100 === 0 ? "namé" : "name"}${i},g${i % 20},${(i * 7) % 1000}`;
 const fileText = (rows = ROWS): string => ["id,name,group,score", ...Array.from({ length: rows }, (_, i) => row(i))].join("\n") + "\n";
 
-async function load(page: Page, text = fileText(), tuning: { sliceRecords?: number; sliceDelayMs?: number } | undefined = TUNING): Promise<void> {
+async function load(page: Page, text = fileText(), tuning: ParseTuning | undefined = TUNING): Promise<void> {
   await bootShell(page, { parseTuning: tuning });
   await pushLoadText(page, { fileKey: FILE_KEY, text, state: defaultViewState(), defaultTableColumns: 8, testHooks: true });
 }
@@ -167,6 +168,71 @@ test.describe("a file that is still being parsed", () => {
     await expect(page.locator("#columns-btn")).toHaveText("Columns 8/1250", { timeout: 30_000 });
     await expect(page.locator("#columns-list .column-row-more")).toHaveText("Showing 1,000 of 1,250 columns — type to narrow");
     await expect(status(page)).toHaveText("Showing 1,501 of 1,501 rows");
+  });
+
+  test("a parse rebuilt from the whole text closes an editor opened on the partial rows, and the rows come out the same", async ({ page }) => {
+    await load(page, fileText(), { sliceRecords: 500, sliceDelayMs: 400, rebuildAfterSlices: 2 });
+    await expect(page.locator("tr.data-row")).toHaveCount(100);
+    await expect(page.locator("#pager-page-count")).toHaveText("…");
+    await cell(page, 4, 1).dblclick();
+    await expect(page.locator("input.cell-editor")).toHaveCount(1);
+    await expect(status(page)).toHaveText("Showing 4,000 of 4,000 rows", { timeout: 30_000 });
+    await expect(page.locator("input.cell-editor")).toHaveCount(0);
+    await expect(cell(page, 4, 1)).toHaveText("name4");
+    await expect(page.locator("#pager-page-count")).toHaveText("40");
+    expect((await posted(page)).filter((m) => m.type === "edit")).toHaveLength(0);
+  });
+
+  test("an init asked for while the worker still holds the file's bytes waits for them instead of stalling the load", async ({ page }) => {
+    await load(page, fileText(60), { initResultDelayMs: 900 });
+    await expect.poll(async () => (await posted(page)).some((m) => m.type === "synced")).toBe(true);
+    // What a worker respawn would ask for, while the first init's result (and with it the buffer) is still on its way.
+    await postFromHost(page, { type: "testReinit" });
+    await expect(page.locator("tr.data-row")).toHaveCount(60, { timeout: 30_000 });
+    await expect(status(page)).toHaveText("Showing 60 of 60 rows");
+    // Two inits were answered: the second ran once the buffer was back.
+    await expect.poll(async () => (await posted(page)).filter((m) => m.type === "rendered").length, { timeout: 30_000 }).toBe(2);
+    expect((await posted(page)).filter((m) => m.type === "synced")).toHaveLength(1);
+  });
+
+  test("visibility is saved once the headers are final, not for each version of them on the way", async ({ page }) => {
+    const text = "a,b,c\n" + Array.from({ length: 1200 }, (_, i) => `${i},x,y`).join("\n") + "\n1200,x,y,z,w\n";
+    await bootShell(page, { parseTuning: { sliceRecords: 300, sliceDelayMs: 600 } });
+    await pushLoadText(page, { fileKey: FILE_KEY, text, state: defaultViewState(), defaultTableColumns: 2, testHooks: true });
+    await expect(page.locator("tr.data-row")).toHaveCount(100);
+    await expect(page.locator("#pager-page-count")).toHaveText("…");
+    expect((await posted(page)).filter((m) => m.type === "saveState")).toHaveLength(0);
+    await expect(status(page)).toHaveText("Showing 1,201 of 1,201 rows", { timeout: 30_000 });
+    const saves = (await posted(page)).filter((m) => m.type === "saveState") as Array<{ state: { columnVisibility: Record<string, boolean> } }>;
+    expect(saves).toHaveLength(1);
+    expect(Object.keys(saves[0].state.columnVisibility)).toEqual(["a", "b", "c", "column_4", "column_5"]);
+  });
+
+  test("a value with an unpaired surrogate is refused where it is typed, in the table and in the details", async ({ page }) => {
+    await load(page, fileText(60), undefined);
+    await expect(page.locator("tr.data-row")).toHaveCount(60);
+    const refusal = "A value can't contain an unpaired surrogate character; a UTF-8 file cannot hold one.";
+
+    await cell(page, 1, 1).dblclick();
+    await page.locator("input.cell-editor").evaluate((input: HTMLInputElement) => {
+      input.value = `pasted${String.fromCharCode(0xd800)}`;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clearPosted(page);
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#edit-error-text")).toHaveText(refusal);
+    await expect(page.locator("input.cell-editor")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+
+    await page.locator("tr.data-row").nth(2).click();
+    await page.locator("tr.detail-row:not([hidden]) dt", { hasText: "group" }).locator(".field-edit-btn").click();
+    await page.locator("textarea.field-editor").evaluate((area: HTMLTextAreaElement) => {
+      area.value = `${String.fromCharCode(0xdc00)}tail`;
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.keyboard.press("Control+Enter");
+    await expect(page.locator("#edit-error-text")).toHaveText(refusal);
+    expect((await posted(page)).filter((m) => m.type === "edit")).toHaveLength(0);
   });
 
   test("the values picker opened mid-parse lists the values of every row", async ({ page }) => {

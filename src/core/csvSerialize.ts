@@ -34,6 +34,15 @@ export function serializeRecord(fields: readonly string[], delimiter: string, qu
   return parts.join(delimiter);
 }
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+// False for a string with an unpaired surrogate, which UTF-8 cannot hold (TextEncoder writes U+FFFD for it). String.prototype.isWellFormed is
+// newer than the Chromium of the oldest supported VS Code, so it is used only when there.
+export function isWellFormedUtf16(s: string): boolean {
+  const native = (s as { isWellFormed?: () => boolean }).isWellFormed;
+  return typeof native === "function" ? native.call(s) : !LONE_SURROGATE.test(s);
+}
+
 // Exact for well-formed UTF-16; a lone surrogate counts 3, like TextEncoder.
 export function utf8Length(s: string, from = 0, to = s.length): number {
   let bytes = 0;
