@@ -1133,7 +1133,6 @@ function renderTableBody(): void {
   }
 
   tableBody.appendChild(fragment);
-  updateDetailViewportWidth();
   populateExpandedDetails(columns);
 
   if (hadRowFocus && state.currentPageRows.length > 0) focusRowById(state.focusedRowId);
