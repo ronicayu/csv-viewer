@@ -554,7 +554,14 @@ function yieldFrame(): Promise<void> {
   });
 }
 
+// Under testHooks, the timing spec reads these two marks: the load's arrival and the first render after it.
+let firstRenderMarkPending = false;
+
 async function onLoad(message: LoadMessage): Promise<void> {
+  if (message.testHooks) {
+    performance.mark("csv:load");
+    firstRenderMarkPending = true;
+  }
   const view = message.state;
   // Saved state from older versions may lack these fields.
   view.pageSize = normalizePageSize(view.pageSize);
@@ -997,6 +1004,10 @@ function finishRender(): void {
   renderFilteredRow();
   endOperation();
   notifyRendered();
+  if (firstRenderMarkPending) {
+    firstRenderMarkPending = false;
+    performance.mark("csv:first-render");
+  }
 }
 
 async function handleRegexTimeout(rulesSent: FilterRule[]): Promise<void> {

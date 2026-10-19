@@ -9,15 +9,14 @@ const CI_SLACK = process.env.CI ? 2 : 1;
 // Strict wall-clock bounds apply only when PERF_TESTS=1; a shared full-suite run gets generous ones.
 const STRICT = process.env.PERF_TESTS === "1";
 const FIRST_RENDER_BOUND_MS = STRICT ? 2_000 * CI_SLACK : 20_000;
+const IN_PAGE_FIRST_RENDER_BOUND_MS = STRICT ? 800 * CI_SLACK : 20_000;
 const FILTER_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
 const SORT_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
-const GENEROUS_BOUND_MS = 30_000 * CI_SLACK;
+const NEXT_PAGE_BOUND_MS = STRICT ? 300 * CI_SLACK : 30_000 * CI_SLACK;
+const SEPARATOR_BOUND_MS = STRICT ? 800 * CI_SLACK : 30_000 * CI_SLACK;
 
-// Generated in the page; tens of MB through Playwright's arguments would skew the timing.
-async function pushGeneratedLoad(
-  page: Page,
-  opts: { fileKey: string; rowCount: number; colCount: number; state: ViewState; defaultTableColumns: number },
-): Promise<void> {
+// Generated in the page and kept on window, so the timed step is only the post; tens of MB through Playwright's arguments would skew the timing.
+async function generateLoadText(page: Page, opts: { rowCount: number; colCount: number }): Promise<void> {
   await page.evaluate((o) => {
     function wideFixtureText(rowCount: number, colCount: number, delimiter = ","): string {
       const headers: string[] = [];
@@ -30,12 +29,28 @@ async function pushGeneratedLoad(
       }
       return lines.join("\n");
     }
-    const text = wideFixtureText(o.rowCount, o.colCount);
+    (window as unknown as { __scaleText: string }).__scaleText = wideFixtureText(o.rowCount, o.colCount);
+  }, opts);
+}
+
+async function postGeneratedLoad(page: Page, opts: { fileKey: string; state: ViewState; defaultTableColumns: number }): Promise<void> {
+  await page.evaluate((o) => {
+    const text = (window as unknown as { __scaleText: string }).__scaleText;
     window.postMessage(
-      { type: "load", fileKey: o.fileKey, text, state: o.state, defaultTableColumns: o.defaultTableColumns, defaultDelimiter: "" },
+      { type: "load", fileKey: o.fileKey, text, state: o.state, defaultTableColumns: o.defaultTableColumns, defaultDelimiter: "", testHooks: true },
       "*",
     );
+    // The post has cloned it; keeping 60 MB reachable would inflate the heap figures.
+    delete (window as unknown as { __scaleText?: string }).__scaleText;
   }, opts);
+}
+
+// The webview marks the load's arrival and its first render when testHooks is on.
+async function inPageFirstRenderMs(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const at = (name: string): number => performance.getEntriesByName(name).slice(-1)[0].startTime;
+    return at("csv:first-render") - at("csv:load");
+  });
 }
 
 test("200k rows x 30 columns: timing table for first render and each interaction, plus JS heap", async ({ page }) => {
@@ -50,18 +65,16 @@ test("200k rows x 30 columns: timing table for first render and each interaction
     return bytes < 0 ? -1 : bytes / (1024 * 1024);
   }
 
+  await generateLoadText(page, { rowCount: ROWS, colCount: COLS });
   const t0 = Date.now();
-  await pushGeneratedLoad(page, {
-    fileKey: "file:///scale.csv",
-    rowCount: ROWS,
-    colCount: COLS,
-    state: defaultViewState(),
-    defaultTableColumns: 8,
-  });
+  await postGeneratedLoad(page, { fileKey: "file:///scale.csv", state: defaultViewState(), defaultTableColumns: 8 });
   await expect(page.locator("tr.data-row").first()).toBeVisible();
   const firstRenderMs = Date.now() - t0;
-  timings.push({ step: "first render (load -> table visible)", ms: firstRenderMs });
+  const inPageMs = Math.round(await inPageFirstRenderMs(page));
+  timings.push({ step: "first render (post load -> table visible)", ms: firstRenderMs });
+  timings.push({ step: "first render (in-page, load -> first row)", ms: inPageMs });
   expect(firstRenderMs).toBeLessThan(FIRST_RENDER_BOUND_MS);
+  expect(inPageMs).toBeLessThan(IN_PAGE_FIRST_RENDER_BOUND_MS);
 
   const heapAfterLoad = await heapMB();
 
@@ -88,12 +101,12 @@ test("200k rows x 30 columns: timing table for first render and each interaction
     await expect(page.locator("#status-bar")).not.toHaveText(`Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`);
   });
 
-  await timeStep("pagination: Next page", GENEROUS_BOUND_MS, async () => {
+  await timeStep("pagination: Next page", NEXT_PAGE_BOUND_MS, async () => {
     await page.locator("#pager-next-btn").click();
     await expect(page.locator("#pager-page-input")).toHaveValue("2");
   });
 
-  await timeStep("separator: switch to Semicolon (collapses to 1 column)", GENEROUS_BOUND_MS, async () => {
+  await timeStep("separator: switch to Semicolon (collapses to 1 column)", SEPARATOR_BOUND_MS, async () => {
     await page.locator("#format-btn").click();
     await page.locator("#separator-select").selectOption(";");
     await expect(page.locator("th.sortable")).toHaveCount(1);
