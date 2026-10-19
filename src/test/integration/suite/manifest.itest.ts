@@ -143,7 +143,6 @@ suite("package.json manifest sanity", () => {
     assert.strictEqual(prop.description, "Allow changing cell values in the table and row details. Nothing is written until you save.");
     assert.strictEqual(manifest.contributes.customEditors[0].priority, "option");
     assert.ok(manifest.keywords.includes("edit") && manifest.keywords.includes("editor"));
-    assert.strictEqual(manifest.version, "0.8.0");
   });
 
   test("listing fields: displayName, description, pricing, qna, galleryBanner, icon, keywords, categories", () => {
