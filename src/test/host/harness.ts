@@ -64,6 +64,11 @@ export async function bootHost(): Promise<Host> {
   return host!;
 }
 
+// Everything the worker has posted so far, including what its own timers and channels sent between calls.
+export function workerMessages(): WorkerResponse[] {
+  return workerOut;
+}
+
 export function callWorker(request: WorkerRequest): WorkerResponse[] {
   const before = workerOut.length;
   workerHandler!({ data: { requestId: ++requestId, ...request } });

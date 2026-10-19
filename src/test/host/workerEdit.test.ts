@@ -4,7 +4,7 @@ import { applyTextPatches, recordFieldsForWrite, spliceBytes } from "../../core/
 import { parseCsv } from "../../core/csvParse";
 import { splitRecords } from "../../core/recordSpans";
 import { utf8Length } from "../../core/csvSerialize";
-import { bootHost, callWorker, workerReply } from "./harness";
+import { bootHost, callWorker, workerMessages, workerReply } from "./harness";
 
 async function worker(): Promise<void> {
   await bootHost();
@@ -189,6 +189,23 @@ describe("worker spans for large files", () => {
     expect(patched.endsWith("3,x\r\n4,Z")).toBe(true);
     const next = edit(700_001, 1, "ü");
     expect(next.change.record.byteStart).toBe(utf8Length(patched, 0, next.change.record.charStart));
+  }, 60000);
+
+  it("the background span pass finishes in slices and agrees with the one-shot split", async () => {
+    await worker();
+    const text = "id,v\n" + "1,aaaaaaaaaa\n".repeat(700_000) + "2,é\n" + "3,x\r\n4,y";
+    const result = init(text);
+    expect(result.spansOk).toBeUndefined();
+    const seen = workerMessages().length;
+    const deadline = Date.now() + 30_000;
+    while (!workerMessages().slice(seen).some((m) => m.type === "spansReady") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(workerMessages().slice(seen).filter((m) => m.type === "spansReady")).toEqual([{ type: "spansReady", requestId: result.requestId, spansOk: true }]);
+    const last = 700_000 + 2;
+    const record = edit(last, 1, "Z").change.record;
+    const spans = splitRecords(text, { delimiter: ",", quotes: true });
+    expect(record).toMatchObject({ charStart: spans[last + 1].start, charEnd: spans[last + 1].end, fieldCount: 2 });
   }, 60000);
 
   it("an all-ASCII file that gains a multi-byte character reports exact byte offsets afterwards", async () => {

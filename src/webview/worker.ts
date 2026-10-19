@@ -6,7 +6,7 @@ import { distinctValues, type DistinctResult } from "../core/distinct";
 import { applyFilters } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
-import { EOL_TEXT, SpanTableBuilder, addByteOffsets, scanRecords, splitRecordsToTable, type SpanTable } from "../core/recordSpans";
+import { EOL_TEXT, SpanTableBuilder, addByteOffsets, freshScanState, scanRecords, splitRecordsToTable, type ScanState, type SpanTable } from "../core/recordSpans";
 import type { CellChange, FilterRule, RecordFloor, SortDirection, SortKey, WrittenRecord } from "../core/types";
 import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./workerProtocol";
 
@@ -34,12 +34,14 @@ let originals = new Map<number, Map<number, string>>();
 // Past this size the span pass would hold up the first render, so it runs in slices after the initial queries and edits finish it on demand.
 const SYNC_SPANS_MAX_CHARS = 8 * 1024 * 1024;
 const SPAN_SLICE_MS = 8;
-const SPAN_SLICE_RECORDS = 1024;
+const SPAN_SLICE_RECORDS = 4096;
 
 interface SpanJob {
   requestId: number;
   builder: SpanTableBuilder;
   pos: number;
+  scan: ScanState;
+  channel: MessageChannel;
   expectedRecords: number;
 }
 
@@ -60,16 +62,14 @@ function onInit(requestId: number, source: string, options: { delimiter?: string
   headerOffset = options.firstRowIsHeader && parsed.headers.length > 0 ? 1 : 0;
   spans = null;
   spansOk = false;
-  spanJob = null;
+  endSpanJob();
   const expectedRecords = parsed.rows.length + headerOffset;
   if (source.length <= SYNC_SPANS_MAX_CHARS) {
     spans = splitRecordsToTable(source, { delimiter, quotes: quoting });
     spansOk = spans.length === expectedRecords;
     if (!spansOk) reportSpanMismatch(spans.length, expectedRecords);
   } else {
-    const job: SpanJob = { requestId, builder: new SpanTableBuilder(), pos: 0, expectedRecords };
-    spanJob = job;
-    setTimeout(() => stepSpanJob(job), 0);
+    startSpanJob({ requestId, builder: new SpanTableBuilder(), pos: 0, scan: freshScanState(), channel: new MessageChannel(), expectedRecords });
   }
   headers = parsed.headers;
   rawRows = parsed.rows;
@@ -97,10 +97,23 @@ function reportSpanMismatch(found: number, expected: number): void {
   console.error(`csv-viewer: record splitter found ${found} records but the parser found ${expected}; editing is disabled`);
 }
 
+// Slices are chained through a MessageChannel: unlike setTimeout it is not clamped to 4 ms, and unlike a microtask it lets queued requests run between slices.
+function startSpanJob(job: SpanJob): void {
+  spanJob = job;
+  job.channel.port1.onmessage = () => stepSpanJob(job);
+  job.channel.port2.postMessage(null);
+}
+
+function endSpanJob(): void {
+  if (!spanJob) return;
+  spanJob.channel.port1.close();
+  spanJob = null;
+}
+
 function finishSpanJob(job: SpanJob): void {
   spans = job.builder.finish();
   spansOk = spans.length === job.expectedRecords;
-  spanJob = null;
+  endSpanJob();
   if (!spansOk) reportSpanMismatch(spans.length, job.expectedRecords);
   post({ type: "spansReady", requestId: job.requestId, spansOk });
 }
@@ -109,9 +122,9 @@ function stepSpanJob(job: SpanJob): void {
   if (spanJob !== job) return;
   const deadline = performance.now() + SPAN_SLICE_MS;
   do {
-    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos, SPAN_SLICE_RECORDS);
+    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos, SPAN_SLICE_RECORDS, job.scan);
   } while (job.pos < text.length && performance.now() < deadline);
-  if (job.pos < text.length) setTimeout(() => stepSpanJob(job), 0);
+  if (job.pos < text.length) job.channel.port2.postMessage(null);
   else finishSpanJob(job);
 }
 
@@ -119,7 +132,7 @@ function stepSpanJob(job: SpanJob): void {
 function ensureSpans(withBytes: boolean): void {
   const job = spanJob;
   if (job) {
-    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos);
+    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos, Infinity, job.scan);
     finishSpanJob(job);
   }
   if (withBytes && spans && !spans.byteStart) addByteOffsets(spans, text);

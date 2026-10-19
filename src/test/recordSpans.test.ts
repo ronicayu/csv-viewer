@@ -1,7 +1,17 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { effectiveQuoting, parseCsv } from "../core/csvParse";
-import { SpanTableBuilder, scanRecords, splitRecords, splitRecordsToTable, spansFromTable, addByteOffsets, type RecordSpan, type SplitOptions } from "../core/recordSpans";
+import {
+  SpanTableBuilder,
+  addByteOffsets,
+  freshScanState,
+  scanRecords,
+  spansFromTable,
+  splitRecords,
+  splitRecordsToTable,
+  type RecordSpan,
+  type SplitOptions,
+} from "../core/recordSpans";
 
 function split(text: string, delimiter = ",", quotes = true): RecordSpan[] {
   return splitRecords(text, { delimiter, quotes });
@@ -191,6 +201,73 @@ describe("scanRecords can be resumed", () => {
       }),
       { numRuns: 3000 },
     );
+  });
+
+  it("carrying a ScanState across slices of varying sizes emits exactly splitRecords (property)", () => {
+    fc.assert(
+      fc.property(textArb, optionsArb, fc.array(fc.integer({ min: 1, max: 6 }), { minLength: 1, maxLength: 5 }), (text, opts, sizes) => {
+        const parsed = parseCsv(text, opts);
+        const options: SplitOptions = { delimiter: parsed.delimiter, quotes: parsed.quoting };
+        const builder = new SpanTableBuilder();
+        const state = freshScanState();
+        let pos = 0;
+        for (let call = 0; ; call++) {
+          pos = scanRecords(text, options, builder.push, pos, sizes[call % sizes.length], state);
+          if (pos >= text.length) break;
+        }
+        expect(spansFromTable(builder.finish())).toEqual(splitRecords(text, options));
+      }),
+      { numRuns: 5000 },
+    );
+  });
+
+  it("a final unsliced call with the carried state finishes the scan like one pass (property)", () => {
+    fc.assert(
+      fc.property(textArb, optionsArb, fc.integer({ min: 1, max: 6 }), (text, opts, first) => {
+        const parsed = parseCsv(text, opts);
+        const options: SplitOptions = { delimiter: parsed.delimiter, quotes: parsed.quoting };
+        const builder = new SpanTableBuilder();
+        const state = freshScanState();
+        const pos = scanRecords(text, options, builder.push, 0, first, state);
+        scanRecords(text, options, builder.push, pos, Infinity, state);
+        expect(spansFromTable(builder.finish())).toEqual(splitRecords(text, options));
+      }),
+      { numRuns: 3000 },
+    );
+  });
+
+  it("slicing does not repeat the searches: the same indexOf calls per needle as one pass", () => {
+    const text = Array.from({ length: 2000 }, (_, i) => `${i},v${i},x`).join("\n");
+    const options: SplitOptions = { delimiter: ",", quotes: true };
+    const countNeedles = (scan: () => void): Map<string, number> => {
+      const counts = new Map<string, number>();
+      const original = String.prototype.indexOf;
+      const spy = vi.spyOn(String.prototype, "indexOf").mockImplementation(function (this: string, needle: string, from?: number) {
+        counts.set(needle, (counts.get(needle) ?? 0) + 1);
+        return original.call(this, needle, from);
+      });
+      try {
+        scan();
+      } finally {
+        spy.mockRestore();
+      }
+      return counts;
+    };
+
+    const onePass = countNeedles(() => scanRecords(text, options, () => {}));
+    const sliced = countNeedles(() => {
+      const state = freshScanState();
+      let pos = 0;
+      do {
+        pos = scanRecords(text, options, () => {}, pos, 100, state);
+      } while (pos < text.length);
+    });
+
+    // The text has no CR, so one pass looks for it exactly once.
+    expect(onePass.get("\r")).toBe(1);
+    expect(sliced.get("\r")).toBe(1);
+    expect(sliced.get(",")).toBe(onePass.get(","));
+    expect(sliced.get("\n")).toBe(onePass.get("\n"));
   });
 });
 

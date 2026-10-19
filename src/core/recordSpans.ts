@@ -60,14 +60,28 @@ function indexOrEnd(text: string, needle: string, from: number, end: number): nu
   return at === -1 ? end : at;
 }
 
+// Where the next delimiter and terminators are at or after the scan position (text.length when there is none), -1 when not yet looked up.
+// Pure functions of (text, position), so a resumed scan on the same text can carry them instead of searching to the end of the text again.
+export interface ScanState {
+  nextDelim: number;
+  nextLF: number;
+  nextCR: number;
+}
+
+export function freshScanState(): ScanState {
+  return { nextDelim: -1, nextLF: -1, nextCR: -1 };
+}
+
 // Reproduces Papa's record boundaries only, never field values. Scans from `from` (a record boundary) for at most
-// `maxRecords` records and returns where to resume; text.length means done.
+// `maxRecords` records and returns where to resume; text.length means done. `state`, if given, is read on entry and written back on return;
+// it is only valid for resuming the same text at the returned position.
 export function scanRecords(
   text: string,
   options: SplitOptions,
   emit: (start: number, end: number, eol: number, fieldCount: number) => void,
   from = 0,
   maxRecords = Infinity,
+  state?: ScanState,
 ): number {
   const n = text.length;
   const delimiter = options.delimiter === "" ? "," : options.delimiter;
@@ -76,9 +90,9 @@ export function scanRecords(
   const d0 = delimiter.charCodeAt(0);
 
   let pos = from > 0 ? from : n > 0 && text.charCodeAt(0) === 0xfeff ? 1 : 0;
-  let nextDelim = -1;
-  let nextLF = -1;
-  let nextCR = -1;
+  let nextDelim = state ? state.nextDelim : -1;
+  let nextLF = state ? state.nextLF : -1;
+  let nextCR = state ? state.nextCR : -1;
   let scanned = 0;
 
   while (pos < n && scanned++ < maxRecords) {
@@ -173,6 +187,11 @@ export function scanRecords(
     // Papa's skipEmptyLines: a record that is one empty field is not a row.
     if (!(fieldCount === 1 && singleFieldEmpty)) emit(start, end, eol, fieldCount);
     pos = next;
+  }
+  if (state) {
+    state.nextDelim = nextDelim;
+    state.nextLF = nextLF;
+    state.nextCR = nextCR;
   }
   return pos;
 }
