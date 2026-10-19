@@ -101,18 +101,13 @@ function ruleMatchesRow(row: string[], c: CompiledRule): boolean {
   return cellMatches(row[c.columnIndex] ?? "", c.rule, c.re, c.valueSet);
 }
 
-export function applyFilters(
-  headers: string[],
-  rows: string[][],
-  quickSearch: string,
-  rules: FilterRule[],
-): string[][] {
+function rowPredicate(headers: string[], quickSearch: string, rules: FilterRule[]): (row: string[]) => boolean {
   const activeRules = rules
     .filter((r) => r.enabled && isRuleActive(r, headers))
     .map((r) => compileRule(r, headers));
   const search = foldCase(quickSearch.trim());
 
-  return rows.filter((row) => {
+  return (row) => {
     if (search !== "" && !row.some((cell) => foldCase(cell).includes(search))) {
       return false;
     }
@@ -122,5 +117,22 @@ export function applyFilters(
       if (c.rule.mode === "exclude" && matched) return false;
     }
     return true;
-  });
+  };
+}
+
+// The indexes of the rows that pass, so the worker need not map filtered rows back to their ids.
+export function filterRowIds(headers: string[], rows: string[][], quickSearch: string, rules: FilterRule[]): number[] {
+  const passes = rowPredicate(headers, quickSearch, rules);
+  const ids: number[] = [];
+  for (let i = 0; i < rows.length; i++) if (passes(rows[i])) ids.push(i);
+  return ids;
+}
+
+export function applyFilters(
+  headers: string[],
+  rows: string[][],
+  quickSearch: string,
+  rules: FilterRule[],
+): string[][] {
+  return rows.filter(rowPredicate(headers, quickSearch, rules));
 }

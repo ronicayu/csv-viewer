@@ -328,7 +328,7 @@ describe("delimiter guess on a prefix equals Papa's guess over the whole text", 
     const spy = vi.spyOn(Papa, "parse");
     try {
       expect(parseCsv(text).delimiter).toBe(",");
-      const inputs = spy.mock.calls.map((call) => (call[0] as string).length);
+      const inputs = spy.mock.calls.map((call) => String(call[0]).length);
       expect(inputs).toHaveLength(2);
       expect(inputs[0]).toBeLessThan(200);
       expect(inputs[1]).toBe(text.length);

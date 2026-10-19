@@ -3,7 +3,7 @@ import { applyTextPatches, recordFieldsForWrite, rebaseSpanTable, textPatches, t
 import { parseCsv } from "../core/csvParse";
 import { serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
-import { applyFilters } from "../core/filter";
+import { filterRowIds } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
 import { EOL_TEXT, SpanTableBuilder, addByteOffsets, freshScanState, scanRecords, splitRecordsToTable, type ScanState, type SpanTable } from "../core/recordSpans";
@@ -12,8 +12,6 @@ import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./wo
 
 let headers: string[] = [];
 let rawRows: string[][] = [];
-// applyFilters returns the original row arrays, so reference identity recovers each row's id.
-let idByRowRef = new Map<string[], number>();
 let currentView: number[] | null = null;
 let sortKeyCache = new Map<string, ResolvedCellSortKey[]>();
 let distinctCache = new Map<string, DistinctResult>();
@@ -73,8 +71,6 @@ function onInit(requestId: number, source: string, options: { delimiter?: string
   }
   headers = parsed.headers;
   rawRows = parsed.rows;
-  idByRowRef = new Map();
-  rawRows.forEach((cells, id) => idByRowRef.set(cells, id));
   currentView = null;
   sortKeyCache = new Map();
   distinctCache = new Map();
@@ -149,14 +145,8 @@ function getColumnSortKeys(columnIndex: number, columnName: string): ResolvedCel
 function onQuery(requestId: number, quickSearch: string, filterRules: FilterRule[], sortKeys: SortKey[]): void {
   // queryStarted/filterDone bracket only the filter phase, which is what the regex watchdog times.
   post({ type: "queryStarted", requestId });
-  const filtered = applyFilters(headers, rawRows, quickSearch, filterRules);
+  const ids = filterRowIds(headers, rawRows, quickSearch, filterRules);
   post({ type: "filterDone", requestId });
-
-  const ids: number[] = [];
-  for (const cells of filtered) {
-    const id = idByRowRef.get(cells);
-    if (id !== undefined) ids.push(id);
-  }
 
   const columnIndexByName = new Map(headers.map((h, i) => [h, i]));
   const sortColumns: { direction: SortDirection; keys: ResolvedCellSortKey[] }[] = [];
