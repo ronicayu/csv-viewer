@@ -67,7 +67,7 @@ function onInit(requestId: number, source: string, options: { delimiter?: string
     spansOk = spans.length === expectedRecords;
     if (!spansOk) reportSpanMismatch(spans.length, expectedRecords);
   } else {
-    startSpanJob({ requestId, builder: new SpanTableBuilder(), pos: 0, scan: freshScanState(), channel: new MessageChannel(), expectedRecords });
+    startSpanJob({ requestId, builder: new SpanTableBuilder(source.length), pos: 0, scan: freshScanState(), channel: new MessageChannel(), expectedRecords });
   }
   headers = parsed.headers;
   rawRows = parsed.rows;

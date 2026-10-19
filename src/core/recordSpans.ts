@@ -204,14 +204,25 @@ export function splitRecords(text: string, options: SplitOptions): RecordSpan[] 
   return spans;
 }
 
+// Records are rarely shorter than this many characters, so sizing for it up front avoids the doubling copies on a large text.
+const MIN_RECORD_CHARS = 48;
+
 // Accumulates scan results into typed arrays; usable across several scanRecords calls.
 export class SpanTableBuilder {
-  private capacity = 1024;
-  private start = new Uint32Array(this.capacity);
-  private end = new Uint32Array(this.capacity);
-  private fieldCount = new Uint32Array(this.capacity);
-  private eol = new Uint8Array(this.capacity);
+  private capacity: number;
+  private start: Uint32Array;
+  private end: Uint32Array;
+  private fieldCount: Uint32Array;
+  private eol: Uint8Array;
   private length = 0;
+
+  constructor(textLength = 0) {
+    this.capacity = Math.max(1024, Math.floor(textLength / MIN_RECORD_CHARS));
+    this.start = new Uint32Array(this.capacity);
+    this.end = new Uint32Array(this.capacity);
+    this.fieldCount = new Uint32Array(this.capacity);
+    this.eol = new Uint8Array(this.capacity);
+  }
 
   readonly push = (s: number, e: number, k: number, f: number): void => {
     if (this.length === this.capacity) this.grow();
@@ -235,19 +246,21 @@ export class SpanTableBuilder {
     this.eol = bigger(this.eol);
   }
 
+  // Views over the builder's arrays unless they are more than half empty, so what a table keeps alive stays within twice its size.
   finish(): SpanTable {
+    const trim = <T extends Uint32Array | Uint8Array>(a: T): T => (this.length * 2 >= this.capacity ? (a.subarray(0, this.length) as T) : (a.slice(0, this.length) as T));
     return {
       length: this.length,
-      start: this.start.slice(0, this.length),
-      end: this.end.slice(0, this.length),
-      fieldCount: this.fieldCount.slice(0, this.length),
-      eol: this.eol.slice(0, this.length),
+      start: trim(this.start),
+      end: trim(this.end),
+      fieldCount: trim(this.fieldCount),
+      eol: trim(this.eol),
     };
   }
 }
 
 export function splitRecordsToTable(text: string, options: SplitOptions): SpanTable {
-  const builder = new SpanTableBuilder();
+  const builder = new SpanTableBuilder(text.length);
   scanRecords(text, options, builder.push);
   return builder.finish();
 }
@@ -261,9 +274,10 @@ export function spansFromTable(table: SpanTable): RecordSpan[] {
 }
 
 // UTF-8 offsets for each span, in one pass; exact for valid UTF-8, which editable files are.
-export function addByteOffsets(table: SpanTable, text: string): void {
+// `byteLength`, if the caller knows the file's size in bytes, settles ASCII without a pass over the text: for valid UTF-8 the sizes are equal only then.
+export function addByteOffsets(table: SpanTable, text: string, byteLength?: number): void {
   // Character and byte offsets coincide in ASCII, and checking that is several times cheaper than measuring every span.
-  if (!/[^\x00-\x7f]/.test(text)) {
+  if (byteLength !== undefined ? byteLength === text.length : !/[^\x00-\x7f]/.test(text)) {
     table.byteStart = table.start;
     table.byteEnd = table.end;
     return;

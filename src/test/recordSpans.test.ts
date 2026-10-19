@@ -176,6 +176,54 @@ describe("span tables", () => {
   });
 });
 
+describe("span table sizing and byte lengths", () => {
+  const table = (text: string) => splitRecordsToTable(text, { delimiter: ",", quotes: true });
+
+  it("a builder sized for the text gives the same table as an unsized one, with exact-length arrays", () => {
+    const text = Array.from({ length: 3000 }, (_, i) => `${i},v${i}`).join("\n");
+    for (const sizeFor of [0, 10, text.length, text.length * 100]) {
+      const builder = new SpanTableBuilder(sizeFor);
+      scanRecords(text, { delimiter: ",", quotes: true }, builder.push);
+      const sized = builder.finish();
+      expect(sized.length).toBe(3000);
+      for (const column of [sized.start, sized.end, sized.fieldCount, sized.eol]) expect(column.length).toBe(3000);
+      expect(spansFromTable(sized)).toEqual(split(text));
+    }
+  });
+
+  it("does not keep a mostly empty buffer alive", () => {
+    const builder = new SpanTableBuilder(10_000_000);
+    scanRecords("a,b\n1,2", { delimiter: ",", quotes: true }, builder.push);
+    const small = builder.finish();
+    expect(small.length).toBe(2);
+    expect(small.start.buffer.byteLength).toBeLessThanOrEqual(small.length * 4 * 2);
+  });
+
+  it("byte offsets from a known byte length equal the ones from the text, for ASCII and non-ASCII alike (property)", () => {
+    const encoder = new TextEncoder();
+    fc.assert(
+      fc.property(textArb, (text) => {
+        const without = table(text);
+        const withLength = table(text);
+        addByteOffsets(without, text);
+        addByteOffsets(withLength, text, encoder.encode(text).length);
+        expect(Array.from(withLength.byteStart!)).toEqual(Array.from(without.byteStart!));
+        expect(Array.from(withLength.byteEnd!)).toEqual(Array.from(without.byteEnd!));
+      }),
+      { numRuns: 4000 },
+    );
+  });
+
+  it("a longer byte length than the text means non-ASCII, even when the table is all ASCII-positioned", () => {
+    const text = "a,b\n1,é";
+    const t = table(text);
+    addByteOffsets(t, text, 9);
+    expect(t.byteEnd![1]).toBe(8);
+    expect(t.end[1]).toBe(7);
+    expect(t.byteStart).not.toBe(t.start);
+  });
+});
+
 const ALPHABET = ["a", "b", "1", ",", ";", "|", "\t", '"', '"', " ", "\n", "\r", "é", "€", "😀", " "];
 
 const textArb = fc.array(fc.constantFrom(...ALPHABET), { maxLength: 40 }).map((chars) => chars.join(""));
