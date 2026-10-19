@@ -9,7 +9,10 @@ const CI_SLACK = process.env.CI ? 2 : 1;
 // Strict wall-clock bounds apply only when PERF_TESTS=1; a shared full-suite run gets generous ones.
 const STRICT = process.env.PERF_TESTS === "1";
 const FIRST_RENDER_BOUND_MS = STRICT ? 2_000 * CI_SLACK : 20_000;
-const IN_PAGE_FIRST_RENDER_BOUND_MS = STRICT ? 400 * CI_SLACK : 20_000;
+// A text load pays the harness's own clone of 60 M characters (about 50 ms) before the worker sees it and had 5-15% of headroom at 400 ms; VS Code
+// delivers bytes, which are held to the tighter bound.
+const IN_PAGE_FIRST_RENDER_TEXT_BOUND_MS = STRICT ? 600 * CI_SLACK : 20_000;
+const IN_PAGE_FIRST_RENDER_BYTES_BOUND_MS = STRICT ? 400 * CI_SLACK : 20_000;
 const FILTER_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
 const SORT_BOUND_MS = STRICT ? 500 * CI_SLACK : 10_000;
 const NEXT_PAGE_BOUND_MS = STRICT ? 300 * CI_SLACK : 30_000 * CI_SLACK;
@@ -90,10 +93,14 @@ async function runScale(page: Page, asBytes: boolean): Promise<void> {
   const timings: Array<{ step: string; ms: number }> = [];
 
   await bootShell(page);
-  // Uses performance.memory: enabling CDP metrics slowed every timed step 2-3x.
+  // A collection first, outside any timed step, so a fixture string the page has dropped but not yet freed is not counted as the viewer's; then the
+  // heap's size from the debugger (performance.memory is coarsely quantized, and enabling CDP metrics slowed every timed step 2-3x).
   async function heapMB(): Promise<number> {
-    const bytes = await page.evaluate(() => (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? -1);
-    return bytes < 0 ? -1 : bytes / (1024 * 1024);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("HeapProfiler.collectGarbage");
+    const { usedSize } = await cdp.send("Runtime.getHeapUsage");
+    await cdp.detach();
+    return usedSize / (1024 * 1024);
   }
 
   await generateLoadText(page, { rowCount: ROWS, colCount: COLS });
@@ -106,7 +113,7 @@ async function runScale(page: Page, asBytes: boolean): Promise<void> {
   timings.push({ step: "first render (post load -> table visible)", ms: firstRenderMs });
   timings.push({ step: "first render (in-page, load -> first row)", ms: inPageMs });
   expect(firstRenderMs).toBeLessThan(FIRST_RENDER_BOUND_MS);
-  expect(inPageMs).toBeLessThan(IN_PAGE_FIRST_RENDER_BOUND_MS);
+  expect(inPageMs).toBeLessThan(asBytes ? IN_PAGE_FIRST_RENDER_BYTES_BOUND_MS : IN_PAGE_FIRST_RENDER_TEXT_BOUND_MS);
 
   // The first page is up before the row count is known; the interactions below are timed on a parsed file.
   await expect(page.locator("#status-bar")).toHaveText(`Showing ${ROWS.toLocaleString()} of ${ROWS.toLocaleString()} rows`);
