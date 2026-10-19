@@ -10,7 +10,8 @@ export interface ParseOptionsMsg {
 }
 
 export type WorkerRequest =
-  | { type: "init"; requestId: number; text: string; options: ParseOptionsMsg; floors?: RecordFloor[] }
+  // `byteLength` is the text's UTF-8 size when the sender knows it, which lets the worker skip checking for non-ASCII.
+  | { type: "init"; requestId: number; text: string; byteLength?: number; options: ParseOptionsMsg; floors?: RecordFloor[] }
   | { type: "query"; requestId: number; quickSearch: string; filterRules: FilterRule[]; sortKeys: SortKey[] }
   | { type: "page"; requestId: number; page: number; pageSize: number }
   | { type: "distinct"; requestId: number; column: string }

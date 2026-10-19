@@ -219,6 +219,25 @@ describe("worker spans for large files", () => {
     expect(next.change.record.byteEnd).toBe(utf8Length(patched, 0, next.change.record.charEnd));
   });
 
+  it("a known byte length settles ASCII for the first edit, and is dropped once the text has been patched", async () => {
+    await worker();
+    const ascii = "a,b\n1,2\n3,4\n5,6\n";
+    workerReply({ type: "init", text: ascii, byteLength: ascii.length, options: { firstRowIsHeader: true, quotes: true } }, "initResult");
+    edit(0, 1, "😀é");
+    const rebased = workerReply({ type: "rebase", written: [{ recordIndex: 1, fields: ["1", "😀é"] }] }, "rebased");
+    const patched = applyTextPatches(ascii, rebased.patches);
+    const next = edit(2, 0, "q");
+    expect(next.change.record.byteStart).toBe(utf8Length(patched, 0, next.change.record.charStart));
+    expect(next.change.record.byteEnd).toBe(utf8Length(patched, 0, next.change.record.charEnd));
+
+    const wide = "a,b\né,2\n3,€\n";
+    const bytes = new TextEncoder().encode(wide).length;
+    workerReply({ type: "init", text: wide, byteLength: bytes, options: { firstRowIsHeader: true, quotes: true } }, "initResult");
+    const record = edit(1, 0, "x").change.record;
+    expect(record.byteStart).toBe(utf8Length(wide, 0, record.charStart));
+    expect(record.byteEnd).toBe(utf8Length(wide, 0, record.charEnd));
+  });
+
   it("a rebase without the host's account folds in every edited cell", async () => {
     await worker();
     init("a,b\n1,2\n3,4\n");

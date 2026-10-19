@@ -1,8 +1,9 @@
 import * as assert from "assert";
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { WORKSPACE_ROOT } from "../fixtures";
-import { closeAllEditors, fileKeyFor, getTestApi, openInViewer, waitForRender } from "../helpers";
+import { cellValue, closeAllEditors, fileKeyFor, getTestApi, openInViewer, waitForRender } from "../helpers";
 
 const VIEW_TYPE = "csvViewer.table";
 
@@ -101,6 +102,25 @@ suite("Opening", () => {
     const api = await getTestApi();
     const render = await waitForRender(api, fileKeyFor(uri));
     assert.strictEqual(render.rowCount, 0);
+  });
+
+  test("a file with a BOM, non-ASCII text and CRLF endings renders the same cells whether its bytes or its text crossed over", async () => {
+    const uri = fixture("bom-nonascii-crlf.csv");
+    await openInViewer(uri);
+    const api = await getTestApi();
+    const key = fileKeyFor(uri);
+    const render = await waitForRender(api, key);
+    assert.deepStrictEqual(render.headers, ["name", "note"]);
+    assert.strictEqual(render.rowCount, 2);
+    assert.deepStrictEqual(
+      [(await cellValue(api, key, 0, 0)).value, (await cellValue(api, key, 0, 1)).value, (await cellValue(api, key, 1, 0)).value, (await cellValue(api, key, 1, 1)).value],
+      ["Åsa", "naïve, café", "日本", "😀"],
+    );
+    const load = api.getOutgoing(key).find((m) => m.type === "load");
+    assert.ok(load && load.type === "load");
+    assert.strictEqual(load.text, undefined);
+    assert.strictEqual(load.bytes?.byteLength, fs.statSync(path.join(WORKSPACE_ROOT, "bom-nonascii-crlf.csv")).size);
+    assert.strictEqual(load.editable, true);
   });
 
   test("a non-UTF8 (latin1) file opens without throwing", async () => {

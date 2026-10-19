@@ -346,6 +346,11 @@ function notify(level: "warning" | "error", message: string): void {
   else void vscode.window.showWarningMessage(message);
 }
 
+// What postMessage can ship as a binary attachment; a readFile result can be a view into a larger pooled buffer.
+function arrayBufferOf(bytes: Uint8Array): ArrayBuffer {
+  return (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer) as ArrayBuffer;
+}
+
 function decodeText(bytes: Uint8Array): { text: string; lossy: boolean } {
   try {
     return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), lossy: false };
@@ -631,8 +636,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
   private postLoad(document: CsvDocument): void {
     if (!document.send || !document.bytes) return;
     const fileKey = document.uri.toString();
-    const decoded = decodeText(document.bytes);
-    document.lossy = decoded.lossy;
+    document.lossy = decodeText(document.bytes).lossy;
     const reason = this.readOnlyReason(document);
     const state = this.loadOrCreateState(fileKey);
     document.formatKey = JSON.stringify([state.delimiter, state.firstRowIsHeader, state.quotes]);
@@ -656,7 +660,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     document.send({
       type: "load",
       fileKey,
-      text: decoded.text,
+      bytes: arrayBufferOf(document.bytes),
       state,
       defaultTableColumns: this.defaultTableColumns(),
       defaultDelimiter: this.delimiterFor(document.uri) ?? "",
@@ -890,7 +894,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     const decoded = decodeText(bytes);
     if (decoded.lossy) throw consistency;
     const table = splitRecordsToTable(decoded.text, { delimiter: format.delimiter, quotes: format.quoting });
-    addByteOffsets(table, decoded.text);
+    addByteOffsets(table, decoded.text, bytes.length);
 
     const written: { recordIndex: number; fields: string[]; text: string }[] = [];
     for (const recordIndex of edited) {

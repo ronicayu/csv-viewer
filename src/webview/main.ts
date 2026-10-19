@@ -68,6 +68,8 @@ function delimiterDisplay(d: string): string {
 interface AppState {
   fileKey: string;
   text: string;
+  // The text's size in UTF-8 bytes while it is the file as loaded; unknown (undefined) once a save has patched it.
+  byteLength: number | undefined;
   defaultDelimiter: string;
   headers: string[];
   totalRows: number;
@@ -547,9 +549,13 @@ async function onLoad(message: LoadMessage): Promise<void> {
   await yieldFrame();
   await ensureWorker();
 
+  // Not fatal: for valid UTF-8 this is the string the host decoded, and a file the host found invalid is read-only anyway.
+  const text = message.text ?? new TextDecoder("utf-8", { ignoreBOM: true }).decode(new Uint8Array(message.bytes!));
+
   state = {
     fileKey: message.fileKey,
-    text: message.text,
+    text,
+    byteLength: message.bytes?.byteLength,
     defaultDelimiter: message.defaultDelimiter,
     headers: [],
     totalRows: 0,
@@ -589,7 +595,7 @@ async function onLoad(message: LoadMessage): Promise<void> {
 
   pendingPageAfterQuery = previousPage;
   const delimiterOption = resolveDelimiterOption(view.delimiter, message.defaultDelimiter);
-  beginInit(message.text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader, quotes: view.quotes }, true);
+  beginInit(text, { delimiter: delimiterOption, firstRowIsHeader: view.firstRowIsHeader, quotes: view.quotes }, true);
   const initDone = new Promise<void>((resolve) => {
     initWaiter = resolve;
   });
@@ -629,7 +635,7 @@ function beginInit(text: string, options: ParseOptionsMsg, isFreshParse: boolean
   // Timeout recovery re-parses identical text, so only a fresh parse discards the values picker.
   if (isFreshParse) discardValuesPicker();
   const floors = state ? [...state.recordFloors].map(([recordIndex, floor]) => ({ recordIndex, floor })) : [];
-  postToWorker({ type: "init", requestId, text, options, floors });
+  postToWorker({ type: "init", requestId, text, byteLength: state?.byteLength, options, floors });
 }
 
 function renderColumnsButton(): void {
@@ -3118,6 +3124,7 @@ async function onSaved(msg: SavedMessage): Promise<void> {
   const rebased = await callWorker<Extract<WorkerResponse, { type: "rebased" }>>((requestId) => ({ type: "rebase", requestId, written }));
   if (state !== owner) return;
   owner.text = applyTextPatches(owner.text, rebased.patches);
+  if (rebased.patches.length > 0) owner.byteLength = undefined;
 
   // Cells changed since the write are still edits, now against what was written.
   const headerOffset = owner.view.firstRowIsHeader ? 1 : 0;

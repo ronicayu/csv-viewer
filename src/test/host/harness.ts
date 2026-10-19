@@ -79,6 +79,11 @@ export function workerReply(request: WorkerRequest, type: string): WorkerRespons
   return callWorker(request).find((m) => m.type === type)!;
 }
 
+// The string the webview makes of a load message, decoding its bytes as the webview does.
+export function loadText(message: { text?: string; bytes?: ArrayBuffer }): string {
+  return message.text ?? new TextDecoder("utf-8", { ignoreBOM: true }).decode(new Uint8Array(message.bytes!));
+}
+
 export const token = new fake.CancellationTokenSource().token;
 
 export interface OpenOptions {
@@ -209,10 +214,10 @@ export class Session {
     this.doc.dispose();
   }
 
-  private init(text: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): WorkerResponse {
+  private init(text: string, byteLength: number | undefined, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }): WorkerResponse {
     this.text = text;
     const floors = [...this.recordFloors].map(([recordIndex, floor]) => ({ recordIndex, floor }));
-    return workerReply({ type: "init", text, options, floors }, "initResult");
+    return workerReply({ type: "init", text, byteLength, options, floors }, "initResult");
   }
 
   private onHostMessage(m: HostToWebviewMessage): void {
@@ -222,7 +227,7 @@ export class Session {
         const delimiter = m.state.delimiter || m.defaultDelimiter || this.options.delimiter || undefined;
         this.options = { delimiter, firstRowIsHeader: m.state.firstRowIsHeader, quotes: m.state.quotes };
         this.recordFloors = new Map((m.recordFloors ?? []).map((f) => [f.recordIndex, f.floor]));
-        const init = this.init(m.text, this.options);
+        const init = this.init(loadText(m), m.bytes?.byteLength, this.options);
         this.headers = init.headers;
         this.restore(m.pendingEdits);
         this.send({ type: "synced", baseVersion: m.baseVersion });

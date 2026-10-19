@@ -18,6 +18,7 @@ let distinctCache = new Map<string, DistinctResult>();
 
 // Kept for the document's lifetime: span slicing and the per-commit re-parse need the text the spans describe.
 let text = "";
+let textBytes: number | undefined;
 let spans: SpanTable | null = null;
 let spansOk = false;
 let delimiter = ",";
@@ -49,9 +50,16 @@ function post(message: WorkerResponse): void {
   (self as unknown as Worker).postMessage(message);
 }
 
-function onInit(requestId: number, source: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }, initialFloors: RecordFloor[] | undefined): void {
+function onInit(
+  requestId: number,
+  source: string,
+  byteLength: number | undefined,
+  options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean },
+  initialFloors: RecordFloor[] | undefined,
+): void {
   const parsed = parseCsv(source, options);
   text = source;
+  textBytes = byteLength;
   delimiter = parsed.delimiter;
   quoting = parsed.quoting;
   quotesRequested = options.quotes;
@@ -131,7 +139,7 @@ function ensureSpans(withBytes: boolean): void {
     job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos, Infinity, job.scan);
     finishSpanJob(job);
   }
-  if (withBytes && spans && !spans.byteStart) addByteOffsets(spans, text);
+  if (withBytes && spans && !spans.byteStart) addByteOffsets(spans, text, textBytes);
 }
 
 function getColumnSortKeys(columnIndex: number, columnName: string): ResolvedCellSortKey[] {
@@ -358,6 +366,7 @@ function onRebase(requestId: number, written: WrittenRecord[] | undefined): void
     }
     patches = textPatches(spans, records, delimiter, quoting);
     text = applyTextPatches(text, patches);
+    if (patches.length > 0) textBytes = undefined;
     spans = rebaseSpanTable(spans, records, delimiter, quoting);
     for (const { index, fields } of records) {
       const rowId = index - headerOffset;
@@ -391,7 +400,7 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
   try {
     switch (msg.type) {
       case "init":
-        onInit(msg.requestId, msg.text, msg.options, msg.floors);
+        onInit(msg.requestId, msg.text, msg.byteLength, msg.options, msg.floors);
         break;
       case "query":
         onQuery(msg.requestId, msg.quickSearch, msg.filterRules, msg.sortKeys);

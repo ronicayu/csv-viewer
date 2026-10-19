@@ -175,6 +175,16 @@ export async function pushLoadText(page: Page, data: TextLoad): Promise<void> {
   await page.evaluate((msg) => window.postMessage(msg, "*"), message);
 }
 
+// Plays the host as it really is: the file's bytes cross as an ArrayBuffer and the webview decodes them.
+export async function pushLoadBytes(page: Page, data: Omit<TextLoad, "text"> & { bytes: Uint8Array }): Promise<void> {
+  const { bytes, ...rest } = data;
+  const message = { type: "load" as const, ...toTextLoadMessage({ ...rest, text: "" }), text: undefined };
+  await page.evaluate(
+    ({ msg, values }) => window.postMessage({ ...msg, bytes: new Uint8Array(values).buffer }, "*"),
+    { msg: message, values: Array.from(bytes) },
+  );
+}
+
 export async function bootAndLoad(page: Page, data: FixtureLoad): Promise<void> {
   await bootShell(page);
   await pushLoad(page, data);
