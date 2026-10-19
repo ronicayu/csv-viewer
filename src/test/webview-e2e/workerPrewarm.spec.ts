@@ -14,6 +14,16 @@ test.describe("worker start-up", () => {
     expect(requests).toBe(1);
   });
 
+  test("a failed pre-warm is not remembered: the next load fetches the worker again and renders", async ({ page }) => {
+    let requests = 0;
+    await bootShell(page, { onWorkerRequest: () => requests++, failWorkerRequests: 1 });
+    await expect.poll(() => requests).toBe(1);
+
+    await pushLoadText(page, load);
+    await expect(page.locator("tr.data-row")).toHaveCount(2);
+    expect(requests).toBe(2);
+  });
+
   test("a load that arrives while the worker is still starting waits for it and renders", async ({ page }) => {
     await bootShell(page, { workerDelayMs: 1500 });
     await pushLoadText(page, load);

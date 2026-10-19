@@ -57,14 +57,22 @@ export interface BootOptions {
   // Holds the worker script back, as a slow disk or a busy machine would.
   workerDelayMs?: number;
   onWorkerRequest?: () => void;
+  // Fails this many worker-script requests before letting one through.
+  failWorkerRequests?: number;
 }
 
 export async function bootShell(page: Page, options: BootOptions = {}): Promise<void> {
+  let failuresLeft = options.failWorkerRequests ?? 0;
   page.on("pageerror", (err) => {
     throw new Error(`uncaught error in webview: ${err.message}`);
   });
   await page.route(WORKER_SRC_URL, async (route) => {
     options.onWorkerRequest?.();
+    if (failuresLeft > 0) {
+      failuresLeft--;
+      await route.abort();
+      return;
+    }
     if (options.workerDelayMs) await new Promise((resolve) => setTimeout(resolve, options.workerDelayMs));
     await route.fulfill({
       path: outFile("webview", "worker.js"),

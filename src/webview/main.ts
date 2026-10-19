@@ -387,7 +387,13 @@ function createWorker(blobUrl: string): Worker {
 
 async function ensureWorker(): Promise<Worker> {
   if (!workerPromise) {
-    workerPromise = (async () => createWorker(await getWorkerBlobUrl()))();
+    const starting = (async () => createWorker(await getWorkerBlobUrl()))();
+    workerPromise = starting;
+    // A failed start (including the pre-warm) must not be remembered, or every later load would fail with it.
+    starting.catch(() => {
+      if (workerPromise === starting) workerPromise = null;
+      workerBlobUrlPromise = null;
+    });
   }
   worker = await workerPromise;
   return worker;
