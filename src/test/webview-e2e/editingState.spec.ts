@@ -25,8 +25,7 @@ async function edit(page: Page, rowId: number, columnIndex: number, value: strin
 const queryCount = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __workerQueryCount?: number }).__workerQueryCount ?? 0);
 
 async function lastEdit(page: Page): Promise<Record<string, any>> {
-  const edits = (await posted(page)).filter((m) => m.type === "edit");
-  return edits[edits.length - 1] as Record<string, any>;
+  return (await awaitPosted(page, "edit")) as Record<string, any>;
 }
 
 test.describe("marks and the unchanged view", () => {
@@ -295,7 +294,7 @@ test.describe("flush, lock and load", () => {
   test("dismissing the edit-error banner hides it, and the next successful commit hides it too", async ({ page }) => {
     await boot(page, "name\nalpha\nbeta\n", defaultViewState(), { defaultTableColumns: 1 });
     await cell(page, 0, 0).dblclick();
-    await page.keyboard.press("Control+a");
+    await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.press("Delete");
     await page.keyboard.press("Enter");
     await expect(page.locator("#edit-error-banner")).toBeVisible();
@@ -303,7 +302,7 @@ test.describe("flush, lock and load", () => {
     await expect(page.locator("#edit-error-banner")).toBeHidden();
 
     await cell(page, 0, 0).dblclick();
-    await page.keyboard.press("Control+a");
+    await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.press("Delete");
     await page.keyboard.press("Enter");
     await expect(page.locator("#edit-error-banner")).toBeVisible();

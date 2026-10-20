@@ -303,7 +303,7 @@ test.describe("inline editing", () => {
       defaultTableColumns: 4,
     });
     await cell(page, 0, 0).dblclick();
-    await page.keyboard.press("Control+a");
+    await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.press("Delete");
     await page.keyboard.press("Enter");
     await expect(page.locator("#edit-error-text")).toHaveText("Couldn't edit row 1: an empty value would leave this row empty, which removes it from the file.");
