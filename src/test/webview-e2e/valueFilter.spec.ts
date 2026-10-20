@@ -447,6 +447,11 @@ test.describe("header funnel and values picker", () => {
   test("re-clamps inside the viewport when the window is resized", async ({ page }) => {
     await openPicker(page, "note");
     await page.setViewportSize({ width: 420, height: 500 });
+    // The re-clamp runs from the window's resize event, which can land after setViewportSize returns.
+    await expect.poll(async () => {
+      const b = await picker(page).boundingBox();
+      return b!.x + b!.width;
+    }).toBeLessThanOrEqual(420 - 8 + 0.5);
     const box = await picker(page).boundingBox();
     expect(box!.x).toBeGreaterThanOrEqual(8 - 0.5);
     expect(box!.x + box!.width).toBeLessThanOrEqual(420 - 8 + 0.5);

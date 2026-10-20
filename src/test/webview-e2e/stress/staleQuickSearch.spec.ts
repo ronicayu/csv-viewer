@@ -23,7 +23,7 @@ async function loadWideFixtureInBrowser(
       }
       const text = lines.join("\n");
       window.postMessage(
-        { type: "load", fileKey: "file:///stale-search.csv", text, state, defaultTableColumns: 8, defaultDelimiter: "", testHooks: true, hintsSeen: [] },
+        { type: "load", fileKey: "file:///stale-search.csv", bytes: new TextEncoder().encode(text), state, defaultTableColumns: 8, defaultDelimiter: "", testHooks: true, hintsSeen: [] },
         "*",
       );
     },

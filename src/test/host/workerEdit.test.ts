@@ -4,7 +4,7 @@ import { applyTextPatches, recordFieldsForWrite, spliceBytes } from "../../core/
 import { parseCsv } from "../../core/csvParse";
 import { splitRecords } from "../../core/recordSpans";
 import { utf8Length } from "../../core/csvSerialize";
-import { bootHost, callWorker, workerReply } from "./harness";
+import { bootHost, callWorker, workerMessages, workerReply } from "./harness";
 
 async function worker(): Promise<void> {
   await bootHost();
@@ -169,6 +169,48 @@ describe("worker edit refusals", () => {
   });
 });
 
+describe("worker edits and the rows the sender saw", () => {
+  it("refuse an edit made against a value the cell no longer holds, and accept one made against the value it holds", async () => {
+    await worker();
+    init("a,b\n1,2\n3,4\n");
+    const stale = workerReply({ type: "editCell", rowId: 0, columnIndex: 1, value: "x", expected: "not what is there" }, "editResult");
+    expect(stale).toMatchObject({ ok: false, stale: true });
+    expect(callWorker({ type: "page", page: 1, pageSize: 10 }).find((m) => m.type === "pageResult")!.rows[0].cells).toEqual(["1", "2"]);
+    expect(workerReply({ type: "editCell", rowId: 0, columnIndex: 1, value: "x", expected: "2" }, "editResult")).toMatchObject({ ok: true });
+    // The edit just made is the value the next one is made against.
+    expect(workerReply({ type: "editCell", rowId: 0, columnIndex: 1, value: "y", expected: "x" }, "editResult")).toMatchObject({ ok: true });
+    expect(workerReply({ type: "editCell", rowId: 1, columnIndex: 0, value: "z" }, "editResult")).toMatchObject({ ok: true });
+  });
+
+  it("refuse a value with an unpaired surrogate, which a UTF-8 file cannot hold", async () => {
+    await worker();
+    init("a,b\n1,2\n");
+    for (const value of ["x\ud800", "\udc00y", "\ud83d"]) {
+      const result = edit(0, 1, value);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/unpaired surrogate/);
+    }
+    expect(edit(0, 1, "😀").ok).toBe(true);
+  });
+});
+
+describe("worker column profiles", () => {
+  it("come as profiles up to 1,000 columns and as one verdict byte per column beyond", async () => {
+    await worker();
+    const csv = (columns: number) => Array.from({ length: columns }, (_, i) => `c${i}`).join(",") + "\n" + Array.from({ length: columns }, (_, i) => (i % 3 === 0 ? String(i) : "text")).join(",") + "\n";
+    const few = init(csv(1000));
+    expect(few.columnProfiles).toHaveLength(1000);
+    expect(few.profileVerdicts).toBeUndefined();
+
+    const many = init(csv(1001));
+    expect(many.columnProfiles).toEqual([]);
+    expect(many.profileVerdicts).toHaveLength(1001);
+    expect(many.profileVerdicts[0] & 2).toBe(2);
+    expect(many.profileVerdicts[1] & 2).toBe(0);
+    expect(many.profileVerdicts[1] & 1).toBe(1);
+  });
+});
+
 describe("worker spans for large files", () => {
   it("byte offsets stay exact past an 8 MB ASCII prefix, before and after the background span pass finishes", async () => {
     await worker();
@@ -191,6 +233,26 @@ describe("worker spans for large files", () => {
     expect(next.change.record.byteStart).toBe(utf8Length(patched, 0, next.change.record.charStart));
   }, 60000);
 
+  it("the parse finishes in slices, with spans that agree with the one-shot split", async () => {
+    await worker();
+    const text = "id,v\n" + "1,aaaaaaaaaa\n".repeat(700_000) + "2,é\n" + "3,x\r\n4,y";
+    const result = init(text);
+    expect(result.spansOk).toBeUndefined();
+    const seen = workerMessages().length;
+    const deadline = Date.now() + 30_000;
+    while (!workerMessages().slice(seen).some((m) => m.type === "parseDone") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const done = workerMessages().slice(seen).filter((m) => m.type === "parseDone");
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ requestId: result.requestId, spansOk: true, totalRows: 700_003, rebuilt: false });
+    expect(done[0].headers).toBeUndefined();
+    const last = 700_000 + 2;
+    const record = edit(last, 1, "Z").change.record;
+    const spans = splitRecords(text, { delimiter: ",", quotes: true });
+    expect(record).toMatchObject({ charStart: spans[last + 1].start, charEnd: spans[last + 1].end, fieldCount: 2 });
+  }, 60000);
+
   it("an all-ASCII file that gains a multi-byte character reports exact byte offsets afterwards", async () => {
     await worker();
     init("a,b\n1,2\n3,4\n5,6\n");
@@ -200,6 +262,25 @@ describe("worker spans for large files", () => {
     const next = edit(2, 0, "q");
     expect(next.change.record.byteStart).toBe(utf8Length(patched, 0, next.change.record.charStart));
     expect(next.change.record.byteEnd).toBe(utf8Length(patched, 0, next.change.record.charEnd));
+  });
+
+  it("a known byte length settles ASCII for the first edit, and is dropped once the text has been patched", async () => {
+    await worker();
+    const ascii = "a,b\n1,2\n3,4\n5,6\n";
+    workerReply({ type: "init", text: ascii, byteLength: ascii.length, options: { firstRowIsHeader: true, quotes: true } }, "initResult");
+    edit(0, 1, "😀é");
+    const rebased = workerReply({ type: "rebase", written: [{ recordIndex: 1, fields: ["1", "😀é"] }] }, "rebased");
+    const patched = applyTextPatches(ascii, rebased.patches);
+    const next = edit(2, 0, "q");
+    expect(next.change.record.byteStart).toBe(utf8Length(patched, 0, next.change.record.charStart));
+    expect(next.change.record.byteEnd).toBe(utf8Length(patched, 0, next.change.record.charEnd));
+
+    const wide = "a,b\né,2\n3,€\n";
+    const bytes = new TextEncoder().encode(wide).length;
+    workerReply({ type: "init", text: wide, byteLength: bytes, options: { firstRowIsHeader: true, quotes: true } }, "initResult");
+    const record = edit(1, 0, "x").change.record;
+    expect(record.byteStart).toBe(utf8Length(wide, 0, record.charStart));
+    expect(record.byteEnd).toBe(utf8Length(wide, 0, record.charEnd));
   });
 
   it("a rebase without the host's account folds in every edited cell", async () => {

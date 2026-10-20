@@ -65,6 +65,18 @@ async function measure(label: string, uri: vscode.Uri, bytes: number, opts: { ex
   return m;
 }
 
+// The lowest RSS seen once a second for `seconds` after the render: what is left when the transient copies (the RPC message VS Code builds for the
+// load, ours before it was a view) have been collected. `external` and `arrayBuffers` are what the live backing stores account for.
+async function settledRss(seconds: number): Promise<{ rssMb: number; externalMb: number; arrayBuffersMb: number }> {
+  let lowest = process.memoryUsage();
+  for (let i = 0; i < seconds; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const now = process.memoryUsage();
+    if (now.rss < lowest.rss) lowest = now;
+  }
+  return { rssMb: mb(lowest.rss), externalMb: mb(lowest.external), arrayBuffersMb: mb(lowest.arrayBuffers) };
+}
+
 suite("Large files", function () {
   this.timeout(300000);
 
@@ -118,6 +130,26 @@ suite("Large files", function () {
     assert.strictEqual(m.outcome, "rendered");
     assert.ok(m.rowCount! > 0, "expected at least one parsed row");
 
+    // Generous bounds; the time target is logged, not gated, because shared runners are slow and noisy.
+    const rssGrowthMb = m.memAfterRssMb - m.memBeforeRssMb;
+    const ratio = (growthMb: number): number => Math.round((growthMb / mb(bytes)) * 100) / 100;
+    // eslint-disable-next-line no-console
+    console.log(`[largeFiles] 120MB open: ${m.elapsedMs}ms (target 4000), extHost RSS grew ${rssGrowthMb}MB = ${ratio(rssGrowthMb)}x the file right after render`);
+    assert.ok(m.elapsedMs < 15000, `opening took ${m.elapsedMs}ms`);
+    // About 2x: document.bytes and the copy of it in the RPC message VS Code builds to ship the file.
+    assert.ok(rssGrowthMb < 3 * mb(bytes), `the extension host's RSS grew ${rssGrowthMb}MB for a ${mb(bytes)}MB file`);
+
+    // A guard against a new retained copy on our side, not a memory target. CI measured 1.96x for this file both right after render and settled
+    // (external ~347MB; arrayBuffers reads 0 in this host): document.bytes plus the copy VS Code makes of the outgoing message, which is outside our
+    // control and is not freed by a collection. A third file-sized copy would take the growth to about 3x, so the gate sits between.
+    const settled = await settledRss(5);
+    const settledGrowthMb = settled.rssMb - m.memBeforeRssMb;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[largeFiles] 120MB open, settled: extHost RSS grew ${settledGrowthMb}MB = ${ratio(settledGrowthMb)}x the file (measured 1.96x on CI; gate 2.5x), external ${settled.externalMb}MB, arrayBuffers ${settled.arrayBuffersMb}MB`,
+    );
+    assert.ok(settledGrowthMb < 2.5 * mb(bytes), `the extension host's settled RSS grew ${settledGrowthMb}MB for a ${mb(bytes)}MB file`);
+
     await vscode.commands.executeCommand("workbench.action.files.saveAll");
   });
 
@@ -170,12 +202,14 @@ suite("Large files", function () {
     assert.strictEqual(m.rowCount, 1, "expected exactly one data row");
   });
 
-  // Skipped: a 20MB single line renders far slower than linearly and can hang the whole test host.
-  test.skip("single line, 20MB long: one row (SKIPPED — see BUG comment above; risks hanging the whole test host)", async function () {
-    const { filePath } = await writeSingleLongLineCsv("longline-20mb.csv", 20 * 1024 * 1024);
+  // About two million columns: the Columns, Sort and Filter lists and the row details cap what they build, so this is linear in the file.
+  test("single line, 20MB long: one row, renders within the bound", async function () {
+    this.timeout(60000);
+    const { filePath, bytes } = await writeSingleLongLineCsv("longline-20mb.csv", 20 * 1024 * 1024);
     const uri = vscode.Uri.file(filePath);
-    await openInViewer(uri);
-    const api = await getTestApi();
-    await waitFor(() => api.getMessages(fileKeyFor(uri)).some((m) => m.type === "rendered"), { timeoutMs: 120000 });
+
+    const m = await measure("20MB single line", uri, bytes, { expectRender: true, timeoutMs: 30000 });
+    assert.strictEqual(m.rowCount, 1, "expected exactly one data row");
+    assert.ok(m.elapsedMs < 30000, `rendering took ${m.elapsedMs}ms`);
   });
 });

@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import type { HostToWebviewMessage, SaveStateMessage, WebviewToHostMessage } from "../../core/types";
+import type { HostToWebviewMessage, RenderedMessage, SaveStateMessage, WebviewToHostMessage } from "../../core/types";
 
 export const EXTENSION_ID = "ronica.csv-row-details";
 
@@ -57,12 +57,12 @@ export async function waitForRender(
   fileKey: string,
   minCount = 1,
   opts: { timeoutMs?: number } = {},
-): Promise<{ type: "rendered"; rowCount: number; headers: string[] }> {
+): Promise<RenderedMessage> {
   await waitFor(() => api.getMessages(fileKey).filter((m) => m.type === "rendered").length >= minCount, {
     timeoutMs: opts.timeoutMs,
     message: `never saw ${minCount} "rendered" message(s) for ${fileKey}. Messages so far: ${JSON.stringify(api.getMessages(fileKey))}`,
   });
-  const renders = api.getMessages(fileKey).filter((m): m is { type: "rendered"; rowCount: number; headers: string[] } => m.type === "rendered");
+  const renders = api.getMessages(fileKey).filter((m): m is RenderedMessage => m.type === "rendered");
   return renders[renders.length - 1];
 }
 

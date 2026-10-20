@@ -1,7 +1,17 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { effectiveQuoting, parseCsv } from "../core/csvParse";
-import { SpanTableBuilder, scanRecords, splitRecords, splitRecordsToTable, spansFromTable, addByteOffsets, type RecordSpan, type SplitOptions } from "../core/recordSpans";
+import {
+  SpanTableBuilder,
+  addByteOffsets,
+  freshScanState,
+  scanRecords,
+  spansFromTable,
+  splitRecords,
+  splitRecordsToTable,
+  type RecordSpan,
+  type SplitOptions,
+} from "../core/recordSpans";
 
 function split(text: string, delimiter = ",", quotes = true): RecordSpan[] {
   return splitRecords(text, { delimiter, quotes });
@@ -166,6 +176,65 @@ describe("span tables", () => {
   });
 });
 
+describe("span table sizing and byte lengths", () => {
+  const table = (text: string) => splitRecordsToTable(text, { delimiter: ",", quotes: true });
+
+  it("a builder sized for the text gives the same table as an unsized one, with exact-length arrays", () => {
+    const text = Array.from({ length: 3000 }, (_, i) => `${i},v${i}`).join("\n");
+    for (const sizeFor of [0, 10, text.length, text.length * 100]) {
+      const builder = new SpanTableBuilder(sizeFor);
+      scanRecords(text, { delimiter: ",", quotes: true }, builder.push);
+      const sized = builder.finish();
+      expect(sized.length).toBe(3000);
+      for (const column of [sized.start, sized.end, sized.fieldCount, sized.eol]) expect(column.length).toBe(3000);
+      expect(spansFromTable(sized)).toEqual(split(text));
+    }
+  });
+
+  it("does not presize for more than a million records, however long the text", () => {
+    const before = process.memoryUsage().arrayBuffers;
+    const builder = new SpanTableBuilder(512 * 1024 * 1024);
+    const allocated = process.memoryUsage().arrayBuffers - before;
+    // 512 MB / 48 would be 11 M records and 145 MB.
+    expect(allocated).toBeLessThan(20 * 1024 * 1024);
+    const text = Array.from({ length: 2_000_000 }, () => "a").join("\n");
+    scanRecords(text, { delimiter: ",", quotes: true }, builder.push);
+    expect(builder.finish().length).toBe(2_000_000);
+  });
+
+  it("does not keep a mostly empty buffer alive", () => {
+    const builder = new SpanTableBuilder(10_000_000);
+    scanRecords("a,b\n1,2", { delimiter: ",", quotes: true }, builder.push);
+    const small = builder.finish();
+    expect(small.length).toBe(2);
+    expect(small.start.buffer.byteLength).toBeLessThanOrEqual(small.length * 4 * 2);
+  });
+
+  it("byte offsets from a known byte length equal the ones from the text, for ASCII and non-ASCII alike (property)", () => {
+    const encoder = new TextEncoder();
+    fc.assert(
+      fc.property(textArb, (text) => {
+        const without = table(text);
+        const withLength = table(text);
+        addByteOffsets(without, text);
+        addByteOffsets(withLength, text, encoder.encode(text).length);
+        expect(Array.from(withLength.byteStart!)).toEqual(Array.from(without.byteStart!));
+        expect(Array.from(withLength.byteEnd!)).toEqual(Array.from(without.byteEnd!));
+      }),
+      { numRuns: 4000 },
+    );
+  });
+
+  it("a longer byte length than the text means non-ASCII, even when the table is all ASCII-positioned", () => {
+    const text = "a,b\n1,é";
+    const t = table(text);
+    addByteOffsets(t, text, 9);
+    expect(t.byteEnd![1]).toBe(8);
+    expect(t.end[1]).toBe(7);
+    expect(t.byteStart).not.toBe(t.start);
+  });
+});
+
 const ALPHABET = ["a", "b", "1", ",", ";", "|", "\t", '"', '"', " ", "\n", "\r", "é", "€", "😀", " "];
 
 const textArb = fc.array(fc.constantFrom(...ALPHABET), { maxLength: 40 }).map((chars) => chars.join(""));
@@ -191,6 +260,73 @@ describe("scanRecords can be resumed", () => {
       }),
       { numRuns: 3000 },
     );
+  });
+
+  it("carrying a ScanState across slices of varying sizes emits exactly splitRecords (property)", () => {
+    fc.assert(
+      fc.property(textArb, optionsArb, fc.array(fc.integer({ min: 1, max: 6 }), { minLength: 1, maxLength: 5 }), (text, opts, sizes) => {
+        const parsed = parseCsv(text, opts);
+        const options: SplitOptions = { delimiter: parsed.delimiter, quotes: parsed.quoting };
+        const builder = new SpanTableBuilder();
+        const state = freshScanState();
+        let pos = 0;
+        for (let call = 0; ; call++) {
+          pos = scanRecords(text, options, builder.push, pos, sizes[call % sizes.length], state);
+          if (pos >= text.length) break;
+        }
+        expect(spansFromTable(builder.finish())).toEqual(splitRecords(text, options));
+      }),
+      { numRuns: 5000 },
+    );
+  });
+
+  it("a final unsliced call with the carried state finishes the scan like one pass (property)", () => {
+    fc.assert(
+      fc.property(textArb, optionsArb, fc.integer({ min: 1, max: 6 }), (text, opts, first) => {
+        const parsed = parseCsv(text, opts);
+        const options: SplitOptions = { delimiter: parsed.delimiter, quotes: parsed.quoting };
+        const builder = new SpanTableBuilder();
+        const state = freshScanState();
+        const pos = scanRecords(text, options, builder.push, 0, first, state);
+        scanRecords(text, options, builder.push, pos, Infinity, state);
+        expect(spansFromTable(builder.finish())).toEqual(splitRecords(text, options));
+      }),
+      { numRuns: 3000 },
+    );
+  });
+
+  it("slicing does not repeat the searches: the same indexOf calls per needle as one pass", () => {
+    const text = Array.from({ length: 2000 }, (_, i) => `${i},v${i},x`).join("\n");
+    const options: SplitOptions = { delimiter: ",", quotes: true };
+    const countNeedles = (scan: () => void): Map<string, number> => {
+      const counts = new Map<string, number>();
+      const original = String.prototype.indexOf;
+      const spy = vi.spyOn(String.prototype, "indexOf").mockImplementation(function (this: string, needle: string, from?: number) {
+        counts.set(needle, (counts.get(needle) ?? 0) + 1);
+        return original.call(this, needle, from);
+      });
+      try {
+        scan();
+      } finally {
+        spy.mockRestore();
+      }
+      return counts;
+    };
+
+    const onePass = countNeedles(() => scanRecords(text, options, () => {}));
+    const sliced = countNeedles(() => {
+      const state = freshScanState();
+      let pos = 0;
+      do {
+        pos = scanRecords(text, options, () => {}, pos, 100, state);
+      } while (pos < text.length);
+    });
+
+    // The text has no CR, so one pass looks for it exactly once.
+    expect(onePass.get("\r")).toBe(1);
+    expect(sliced.get("\r")).toBe(1);
+    expect(sliced.get(",")).toBe(onePass.get(","));
+    expect(sliced.get("\n")).toBe(onePass.get("\n"));
   });
 });
 

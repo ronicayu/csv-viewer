@@ -1,4 +1,6 @@
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { looksLikeJsonObjectOrArray } from "../core/json";
 import { MARKDOWN_MAX_CHARS, looksLikeMarkdown } from "../core/markdownDetect";
 
 describe("looksLikeMarkdown: strong signals (any one suffices)", () => {
@@ -97,5 +99,44 @@ describe("looksLikeMarkdown: things that must stay plain", () => {
     const head = "x".repeat(MARKDOWN_MAX_CHARS + 10);
     expect(looksLikeMarkdown(`${head}\n# late heading`)).toBe(false);
     expect(looksLikeMarkdown(`# early heading\n${head}`)).toBe(true);
+  });
+});
+
+// The detector without the cheap pre-test, as it was.
+function looksLikeMarkdownOld(value: string): boolean {
+  if (value === "") return false;
+  const text = value.length > MARKDOWN_MAX_CHARS ? value.slice(0, MARKDOWN_MAX_CHARS) : value;
+  if (looksLikeJsonObjectOrArray(value)) return false;
+  const count = (re: RegExp) => text.match(re)?.length ?? 0;
+  if (/^#{1,6} \S/m.test(text) || /^ {0,3}(?:```|~~~)/m.test(text) || /\[[^\]\n]+\]\((?:https?:\/\/|mailto:)[^)\s]+\)/i.test(text)) return true;
+  if (/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$/m.test(text)) return true;
+  let weak = 0;
+  if (/\*\*\S(?:[^*\n]*\S)?\*\*|__\S(?:[^_\n]*\S)?__/.test(text)) weak++;
+  if (count(/^[ \t]*[-*+] \S/gm) >= 2) weak++;
+  if (count(/^[ \t]*\d+\. \S/gm) >= 2) weak++;
+  if (/^ {0,3}> \S/m.test(text)) weak++;
+  if (/`[^`\n]+`/.test(text)) weak++;
+  return weak >= 2;
+}
+
+describe("looksLikeMarkdown: the signal-character pre-test changes no answer", () => {
+  const piece = fc.constantFrom("#", "##", " ", "\n", "a", "1", "1.", ". ", "-", "---", "|", ":", "*", "**", "_", "__", "+", ">", "`", "```", "~~~", "[", "](", "x", "https://a.b", ")", "{", "}", "\t", "é");
+
+  it("agrees with the plain detector on arbitrary strings built from Markdown's own characters (property)", () => {
+    fc.assert(
+      fc.property(fc.array(piece, { maxLength: 24 }).map((p) => p.join("")), (value) => {
+        expect(looksLikeMarkdown(value)).toBe(looksLikeMarkdownOld(value));
+      }),
+      { numRuns: 20000 },
+    );
+  });
+
+  it("agrees on arbitrary Unicode strings and on plain short cells", () => {
+    fc.assert(
+      fc.property(fc.oneof(fc.string({ maxLength: 20 }), fc.string({ unit: "binary", maxLength: 20 }), fc.constantFrom("xxxxxxxxx", "123", "2024-01-02", "a b c", "")), (value) => {
+        expect(looksLikeMarkdown(value)).toBe(looksLikeMarkdownOld(value));
+      }),
+      { numRuns: 5000 },
+    );
   });
 });

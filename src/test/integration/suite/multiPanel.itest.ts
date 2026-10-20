@@ -121,7 +121,7 @@ suite("Side-by-side, multiple viewers, and openAsText", () => {
     const posted = api.postToWebview(keyA, {
       type: "load",
       fileKey: keyA,
-      text: textA,
+      bytes: new TextEncoder().encode(textA),
       state: { columnVisibility: {}, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: ";", quotes: true, markdownColumns: {} },
       defaultTableColumns: 8,
       defaultDelimiter: "",

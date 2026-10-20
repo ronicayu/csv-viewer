@@ -59,6 +59,8 @@ export interface ViewState {
   delimiter: string;
   quotes: boolean;
   markdownColumns: ColumnFlagMap;
+  // What "All in Table" / "All in Details" chose for a file with more than MANY_COLUMNS columns, in place of a key per header; absent otherwise.
+  columnDefault?: boolean;
 }
 
 export function createDefaultViewState(): ViewState {
@@ -118,8 +120,11 @@ export interface RecordFloor {
 export interface LoadMessage {
   type: "load";
   fileKey: string;
-  // Unparsed on purpose: the webview parses it, so a large file crosses postMessage once as one string.
-  text: string;
+  // Unparsed on purpose: the webview parses it. The host sends the file as bytes, because VS Code ships binary data as an attachment but
+  // JSON-escapes a string; the webview decodes it as UTF-8, replacing invalid sequences. The host posts a plain Uint8Array over the memory readFile
+  // returned (a Node Buffer, which would be JSON-ed instead of attached, and a view into a larger buffer), so a receiver honours byteOffset and
+  // byteLength and never copies it into a fresh array.
+  bytes: Uint8Array | ArrayBuffer;
   state: ViewState;
   defaultTableColumns: number;
   defaultDelimiter: string;
@@ -201,6 +206,11 @@ export interface TestEditCellMessage {
   value: string;
 }
 
+// Starts the init a worker respawn would, without the respawn.
+export interface TestReinitMessage {
+  type: "testReinit";
+}
+
 export interface TestOpenEditorMessage {
   type: "testOpenEditor";
   rowId: number;
@@ -234,7 +244,9 @@ export interface HintSeenMessage {
 export interface RenderedMessage {
   type: "rendered";
   rowCount: number;
+  // Only the first MANY_COLUMNS headers of a file with more.
   headers: string[];
+  headerCount: number;
 }
 
 export interface EditMessage {
@@ -286,6 +298,7 @@ export type HostToWebviewMessage =
   | EditRefusedMessage
   | FlushEditsMessage
   | TestEditCellMessage
+  | TestReinitMessage
   | TestOpenEditorMessage
   | TestGetCellMessage;
 

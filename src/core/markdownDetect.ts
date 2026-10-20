@@ -15,6 +15,9 @@ const ORDERED_LINE = /^[ \t]*\d+\. \S/gm;
 const BLOCKQUOTE = /^ {0,3}> \S/m;
 const INLINE_CODE = /`[^`\n]+`/;
 
+// Every signal below needs one of these characters, so a value without any is not Markdown and skips the regexes.
+const SIGNAL_CHARACTER = /[#`~[\-*_+>]|\d\. /;
+
 function countMatches(re: RegExp, text: string): number {
   return text.match(re)?.length ?? 0;
 }
@@ -22,6 +25,7 @@ function countMatches(re: RegExp, text: string): number {
 export function looksLikeMarkdown(value: string): boolean {
   if (value === "") return false;
   const text = value.length > MARKDOWN_MAX_CHARS ? value.slice(0, MARKDOWN_MAX_CHARS) : value;
+  if (!SIGNAL_CHARACTER.test(text)) return false;
   if (looksLikeJsonObjectOrArray(value)) return false;
 
   if (HEADING.test(text) || FENCE.test(text) || LINK.test(text) || TABLE_DELIMITER_ROW.test(text)) return true;

@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseCsv } from "../core/csvParse";
-import { needsQuotes, serializeField, serializeRecord, utf8Length } from "../core/csvSerialize";
+import { isWellFormedUtf16, needsQuotes, serializeField, serializeRecord, utf8Length } from "../core/csvSerialize";
 
 describe("needsQuotes", () => {
   it("quotes a field with the delimiter, a quote, or a line break", () => {
@@ -98,5 +98,31 @@ describe("round trip through parseCsv (property)", () => {
       }),
       { numRuns: 4000 },
     );
+  });
+});
+
+describe("isWellFormedUtf16", () => {
+  it("is true exactly when the string survives UTF-8 (property)", () => {
+    const piece = fc.constantFrom("a", "é", "😀", "\ud800", "\udbff", "\udc00", "\udfff", "\ud83d", "\ude00", ",", "");
+    fc.assert(
+      fc.property(fc.array(piece, { maxLength: 8 }).map((p) => p.join("")), (s) => {
+        const roundTrips = new TextDecoder("utf-8", { ignoreBOM: true }).decode(new TextEncoder().encode(s)) === s;
+        expect(isWellFormedUtf16(s)).toBe(roundTrips);
+      }),
+      { numRuns: 5000 },
+    );
+  });
+
+  it("checks without String.prototype.isWellFormed too", () => {
+    const original = (String.prototype as { isWellFormed?: unknown }).isWellFormed;
+    (String.prototype as { isWellFormed?: unknown }).isWellFormed = undefined;
+    try {
+      expect(isWellFormedUtf16("a😀b")).toBe(true);
+      expect(isWellFormedUtf16("a\ud800")).toBe(false);
+      expect(isWellFormedUtf16("\udc00a")).toBe(false);
+      expect(isWellFormedUtf16("\ude00\ud83d")).toBe(false);
+    } finally {
+      (String.prototype as { isWellFormed?: unknown }).isWellFormed = original;
+    }
   });
 });

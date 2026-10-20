@@ -1,5 +1,7 @@
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { applyFilters, isRuleActive, isValidRule } from "../core/filter";
+import { foldCase } from "../core/caseFold";
+import { applyFilters, filterRowIds, isRuleActive, isValidRule } from "../core/filter";
 import type { FilterRule } from "../core/types";
 
 const headers = ["name", "age", "city"];
@@ -313,5 +315,66 @@ describe("isRuleActive for the in operator", () => {
     const r = inRule({ column: "city", values: ["NYC"] });
     expect(isRuleActive(r, headers)).toBe(true);
     expect(applyFilters(headers, rows, "", [r])).toEqual([["Alice", "30", "NYC"]]);
+  });
+});
+
+describe("filterRowIds", () => {
+  const cell = fc.constantFrom("", "a", "A", "ab", "NYC", "10", "2.5", "x y", "ß", "SS", "İ", "i̇");
+  const headersArb = fc.constantFrom<string[]>(["name", "age", "city"], ["a", "b"], ["x"]);
+  const rulesArb = fc.array(
+    fc.record({
+      id: fc.string(),
+      column: fc.option(fc.constantFrom("name", "age", "city", "a", "b", "x", "ghost"), { nil: null }),
+      operator: fc.constantFrom<FilterRule["operator"]>("contains", "equals", "startsWith", "endsWith", "regex", "isEmpty", "gt", "lt", "gte", "lte", "in"),
+      value: fc.constantFrom("", "a", "ss", "10", "NYC", "^a", "(", "i"),
+      values: fc.option(fc.array(cell, { maxLength: 3 }), { nil: undefined }),
+      mode: fc.constantFrom<FilterRule["mode"]>("include", "exclude"),
+      caseSensitive: fc.boolean(),
+      enabled: fc.boolean(),
+    }),
+    { maxLength: 4 },
+  );
+
+  // Row by row from first principles: quick search, then each active rule on its own.
+  function expectedIds(headers: string[], tableRows: string[][], quickSearch: string, rules: FilterRule[]): number[] {
+    const search = foldCase(quickSearch.trim());
+    const active = rules.filter((r) => r.enabled && isRuleActive(r, headers));
+    return tableRows.flatMap((row, i) => {
+      if (search !== "" && !row.some((c) => foldCase(c).includes(search))) return [];
+      const keep = active.every((r) => {
+        const matched = applyFilters(headers, [row], "", [{ ...r, mode: "include", enabled: true }]).length === 1;
+        return r.mode === "include" ? matched : !matched;
+      });
+      return keep ? [i] : [];
+    });
+  }
+
+  it("returns exactly the indexes of the rows applyFilters returns, and in order (property)", () => {
+    fc.assert(
+      fc.property(
+        headersArb,
+        fc.array(fc.array(cell, { maxLength: 4 }), { maxLength: 25 }),
+        fc.constantFrom("", "a", " NYC ", "ss", "I", "10"),
+        rulesArb,
+        (headers, tableRows, quickSearch, rules) => {
+          const ids = filterRowIds(headers, tableRows, quickSearch, rules);
+          expect(ids.map((i) => tableRows[i])).toEqual(applyFilters(headers, tableRows, quickSearch, rules));
+          expect(ids).toEqual(expectedIds(headers, tableRows, quickSearch, rules));
+          expect(ids).toEqual([...ids].sort((a, b) => a - b));
+        },
+      ),
+      { numRuns: 3000 },
+    );
+  });
+
+  it("applyFilters hands back the original row arrays, not copies", () => {
+    const result = applyFilters(headers, rows, "", [rule({ operator: "contains", value: "a" })]);
+    expect(result.length).toBeGreaterThan(0);
+    for (const row of result) expect(rows.includes(row)).toBe(true);
+  });
+
+  it("gives the ids of equal rows separately", () => {
+    const twin = ["same", "1", "x"];
+    expect(filterRowIds(headers, [twin, ["other", "2", "y"], [...twin]], "same", [])).toEqual([0, 2]);
   });
 });

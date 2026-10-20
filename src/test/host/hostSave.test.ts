@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseCsv } from "../../core/csvParse";
 import * as fake from "./fakeVscode";
-import { callWorker, openSession, Session, tick, workerReply } from "./harness";
+import { callWorker, loadText, openSession, Session, tick, workerReply } from "./harness";
 
 const text = (path: string): string => fake.readFileText(path);
 
@@ -9,7 +9,8 @@ describe("save", () => {
   it("splices only the edited records, rebases, and a later edit lands on the right record", async () => {
     const original = '﻿id,name,note\r\n1,"Smith, A",hello\n\n2,Bob\r\n3,"multi\nline",x';
     const s = await openSession("/h/a.csv", original);
-    expect(s.of("load")[0]).toMatchObject({ editable: true, baseVersion: 1, text: original });
+    expect(s.of("load")[0]).toMatchObject({ editable: true, baseVersion: 1 });
+    expect(loadText(s.of("load")[0])).toBe(original);
 
     s.edit(0, 1, "Smith B");
     s.edit(1, 2, "added");
@@ -324,7 +325,8 @@ describe("disk changes", () => {
     const watcher = fake.world.watchers.filter((w) => !w.disposed).pop()!;
     watcher.change.fire(s.doc.uri);
     await tick(450);
-    expect(s.of("load")[1]).toMatchObject({ baseVersion: 2, text: "id,name\n1,Alice\n2,Bob\n" });
+    expect(s.of("load")[1]).toMatchObject({ baseVersion: 2 });
+    expect(loadText(s.of("load")[1])).toBe("id,name\n1,Alice\n2,Bob\n");
 
     fake.world.files.delete("/h/d3.csv");
     watcher.del.fire(s.doc.uri);

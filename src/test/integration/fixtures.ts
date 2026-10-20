@@ -32,6 +32,7 @@ export async function prepareWorkspaceFixtures(): Promise<Record<string, string>
   await write("UPPER.CSV", SMALL_CSV);
   await write("empty.csv", "");
   await write("latin1.csv", Buffer.from("name,note\ncaf\xe9,clich\xe9\nna\xefve,ok\n", "latin1"));
+  await write("bom-nonascii-crlf.csv", Buffer.from('\u{feff}name,note\r\nÅsa,"naïve, café"\r\n日本,😀\r\n', "utf8"));
   await write("weird names/na me #1 100% ünïçode ✓.csv", SMALL_CSV);
   await write("renameme.csv", SMALL_CSV);
   await write("fileA.csv", "id,name\n1,Alice\n2,Bob\n3,Carol\n4,Dave\n");

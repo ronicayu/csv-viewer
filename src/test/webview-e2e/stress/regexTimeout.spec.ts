@@ -103,7 +103,7 @@ async function loadRaceFixture(page: Page, state: ViewState): Promise<void> {
       }
       const text = lines.join("\n");
       window.postMessage(
-        { type: "load", fileKey: "file:///regex-race.csv", text, state, defaultTableColumns: 8, defaultDelimiter: "" },
+        { type: "load", fileKey: "file:///regex-race.csv", bytes: new TextEncoder().encode(text), state, defaultTableColumns: 8, defaultDelimiter: "" },
         "*",
       );
     },

@@ -4,6 +4,7 @@ import { isRecordEdited, recordFieldsForWrite, spliceBytes } from "./core/csvEdi
 import { serializeRecord } from "./core/csvSerialize";
 import { normalizePageSize } from "./core/paging";
 import { addByteOffsets, splitRecordsToTable } from "./core/recordSpans";
+import { isValidUtf8 } from "./core/utf8";
 import {
   createDefaultViewState,
   type EditMessage,
@@ -346,6 +347,12 @@ function notify(level: "warning" | "error", message: string): void {
   else void vscode.window.showWarningMessage(message);
 }
 
+// The same memory as a plain Uint8Array. readFile returns a Node Buffer in the extension host, and VS Code's message serializer runs inside
+// JSON.stringify, which calls Buffer.prototype.toJSON first: a Buffer goes out as {"type":"Buffer","data":[...]}, not as a binary attachment.
+function plainView(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
 function decodeText(bytes: Uint8Array): { text: string; lossy: boolean } {
   try {
     return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), lossy: false };
@@ -631,8 +638,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
   private postLoad(document: CsvDocument): void {
     if (!document.send || !document.bytes) return;
     const fileKey = document.uri.toString();
-    const decoded = decodeText(document.bytes);
-    document.lossy = decoded.lossy;
+    document.lossy = !isValidUtf8(document.bytes);
     const reason = this.readOnlyReason(document);
     const state = this.loadOrCreateState(fileKey);
     document.formatKey = JSON.stringify([state.delimiter, state.firstRowIsHeader, state.quotes]);
@@ -656,7 +662,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     document.send({
       type: "load",
       fileKey,
-      text: decoded.text,
+      bytes: plainView(document.bytes),
       state,
       defaultTableColumns: this.defaultTableColumns(),
       defaultDelimiter: this.delimiterFor(document.uri) ?? "",
@@ -890,7 +896,7 @@ class CsvEditorProvider implements vscode.CustomEditorProvider<CsvDocument> {
     const decoded = decodeText(bytes);
     if (decoded.lossy) throw consistency;
     const table = splitRecordsToTable(decoded.text, { delimiter: format.delimiter, quotes: format.quoting });
-    addByteOffsets(table, decoded.text);
+    addByteOffsets(table, decoded.text, bytes.length);
 
     const written: { recordIndex: number; fields: string[]; text: string }[] = [];
     for (const recordIndex of edited) {

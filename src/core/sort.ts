@@ -4,6 +4,8 @@ import { parseNumber } from "./number";
 import type { SortDirection, SortKey } from "./types";
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+// The collator's own bound function: no closure or property lookup per comparison.
+const compare = collator.compare;
 
 export type CellSortKind = "empty" | "numeric" | "text";
 
@@ -13,8 +15,22 @@ export interface CellSortKey {
   text: string;
 }
 
+// What String.prototype.trim removes: WhiteSpace and LineTerminator. Tested by char code, because trimming allocates a string for every padded cell.
+function isTrimmable(code: number): boolean {
+  if (code <= 32) return code === 32 || (code >= 9 && code <= 13);
+  if (code < 0xa0) return false;
+  return (
+    code === 0xa0 || code === 0x1680 || (code >= 0x2000 && code <= 0x200a) || code === 0x2028 || code === 0x2029 || code === 0x202f || code === 0x205f || code === 0x3000 || code === 0xfeff
+  );
+}
+
+export function isBlank(value: string): boolean {
+  for (let i = 0; i < value.length; i++) if (!isTrimmable(value.charCodeAt(i))) return false;
+  return true;
+}
+
 export function cellSortKey(value: string): CellSortKey {
-  if (value.trim() === "") return { kind: "empty", num: 0, text: "" };
+  if (isBlank(value)) return { kind: "empty", num: 0, text: "" };
   const num = parseNumber(value);
   if (num !== null) return { kind: "numeric", num, text: "" };
   return { kind: "text", num: 0, text: value };
@@ -30,7 +46,7 @@ export function compareCellSortKeys(a: CellSortKey, b: CellSortKey, direction: S
     return direction === "desc" ? -cmp : cmp;
   }
   if (a.kind === "text" && b.kind === "text") {
-    const cmp = collator.compare(a.text, b.text);
+    const cmp = compare(a.text, b.text);
     return direction === "desc" ? -cmp : cmp;
   }
   const cmp = a.kind === "numeric" ? -1 : 1;
@@ -76,12 +92,12 @@ export function buildColumnSortKeys(rows: string[][], columnIndex: number): Reso
   }
 
   if (fewDistinct) {
-    const sortedText = Array.from(distinctText).sort((a, b) => collator.compare(a, b));
+    const sortedText = Array.from(distinctText).sort(compare);
     // Collator-equal values (e.g. "a" and "A") share a rank so they tie and fall through to later keys.
     const rankOf = new Map<string, number>();
     let rank = 0;
     sortedText.forEach((text, i) => {
-      if (i > 0 && collator.compare(sortedText[i - 1], text) !== 0) rank++;
+      if (i > 0 && compare(sortedText[i - 1], text) !== 0) rank++;
       rankOf.set(text, rank);
     });
     for (const k of cells) k.rank = k.kind === "text" ? (rankOf.get(k.text) as number) : 0;
@@ -93,10 +109,10 @@ export function buildColumnSortKeys(rows: string[][], columnIndex: number): Reso
     if (cells[i].kind === "text") textIndexes.push(i);
     else cells[i].rank = 0;
   }
-  textIndexes.sort((x, y) => collator.compare(cells[x].text, cells[y].text));
+  textIndexes.sort((x, y) => compare(cells[x].text, cells[y].text));
   let rank = 0;
   for (let j = 0; j < textIndexes.length; j++) {
-    if (j > 0 && collator.compare(cells[textIndexes[j - 1]].text, cells[textIndexes[j]].text) !== 0) rank++;
+    if (j > 0 && compare(cells[textIndexes[j - 1]].text, cells[textIndexes[j]].text) !== 0) rank++;
     cells[textIndexes[j]].rank = rank;
   }
   return cells;

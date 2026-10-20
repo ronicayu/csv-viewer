@@ -60,14 +60,28 @@ function indexOrEnd(text: string, needle: string, from: number, end: number): nu
   return at === -1 ? end : at;
 }
 
+// Where the next delimiter and terminators are at or after the scan position (text.length when there is none), -1 when not yet looked up.
+// Pure functions of (text, position), so a resumed scan on the same text can carry them instead of searching to the end of the text again.
+export interface ScanState {
+  nextDelim: number;
+  nextLF: number;
+  nextCR: number;
+}
+
+export function freshScanState(): ScanState {
+  return { nextDelim: -1, nextLF: -1, nextCR: -1 };
+}
+
 // Reproduces Papa's record boundaries only, never field values. Scans from `from` (a record boundary) for at most
-// `maxRecords` records and returns where to resume; text.length means done.
+// `maxRecords` records and returns where to resume; text.length means done. `state`, if given, is read on entry and written back on return;
+// it is only valid for resuming the same text at the returned position.
 export function scanRecords(
   text: string,
   options: SplitOptions,
   emit: (start: number, end: number, eol: number, fieldCount: number) => void,
   from = 0,
   maxRecords = Infinity,
+  state?: ScanState,
 ): number {
   const n = text.length;
   const delimiter = options.delimiter === "" ? "," : options.delimiter;
@@ -76,9 +90,9 @@ export function scanRecords(
   const d0 = delimiter.charCodeAt(0);
 
   let pos = from > 0 ? from : n > 0 && text.charCodeAt(0) === 0xfeff ? 1 : 0;
-  let nextDelim = -1;
-  let nextLF = -1;
-  let nextCR = -1;
+  let nextDelim = state ? state.nextDelim : -1;
+  let nextLF = state ? state.nextLF : -1;
+  let nextCR = state ? state.nextCR : -1;
   let scanned = 0;
 
   while (pos < n && scanned++ < maxRecords) {
@@ -174,6 +188,11 @@ export function scanRecords(
     if (!(fieldCount === 1 && singleFieldEmpty)) emit(start, end, eol, fieldCount);
     pos = next;
   }
+  if (state) {
+    state.nextDelim = nextDelim;
+    state.nextLF = nextLF;
+    state.nextCR = nextCR;
+  }
   return pos;
 }
 
@@ -185,14 +204,27 @@ export function splitRecords(text: string, options: SplitOptions): RecordSpan[] 
   return spans;
 }
 
+// Records are rarely shorter than this many characters, so sizing for it up front avoids the doubling copies on a large text.
+const MIN_RECORD_CHARS = 48;
+// Long records mean far fewer than one per 48 characters; this bounds what a guess can over-allocate (13 MB) before doubling takes over.
+const MAX_PRESIZED_RECORDS = 1 << 20;
+
 // Accumulates scan results into typed arrays; usable across several scanRecords calls.
 export class SpanTableBuilder {
-  private capacity = 1024;
-  private start = new Uint32Array(this.capacity);
-  private end = new Uint32Array(this.capacity);
-  private fieldCount = new Uint32Array(this.capacity);
-  private eol = new Uint8Array(this.capacity);
+  private capacity: number;
+  private start: Uint32Array;
+  private end: Uint32Array;
+  private fieldCount: Uint32Array;
+  private eol: Uint8Array;
   private length = 0;
+
+  constructor(textLength = 0) {
+    this.capacity = Math.min(MAX_PRESIZED_RECORDS, Math.max(1024, Math.floor(textLength / MIN_RECORD_CHARS)));
+    this.start = new Uint32Array(this.capacity);
+    this.end = new Uint32Array(this.capacity);
+    this.fieldCount = new Uint32Array(this.capacity);
+    this.eol = new Uint8Array(this.capacity);
+  }
 
   readonly push = (s: number, e: number, k: number, f: number): void => {
     if (this.length === this.capacity) this.grow();
@@ -216,19 +248,21 @@ export class SpanTableBuilder {
     this.eol = bigger(this.eol);
   }
 
+  // Views over the builder's arrays unless they are more than half empty, so what a table keeps alive stays within twice its size.
   finish(): SpanTable {
+    const trim = <T extends Uint32Array | Uint8Array>(a: T): T => (this.length * 2 >= this.capacity ? (a.subarray(0, this.length) as T) : (a.slice(0, this.length) as T));
     return {
       length: this.length,
-      start: this.start.slice(0, this.length),
-      end: this.end.slice(0, this.length),
-      fieldCount: this.fieldCount.slice(0, this.length),
-      eol: this.eol.slice(0, this.length),
+      start: trim(this.start),
+      end: trim(this.end),
+      fieldCount: trim(this.fieldCount),
+      eol: trim(this.eol),
     };
   }
 }
 
 export function splitRecordsToTable(text: string, options: SplitOptions): SpanTable {
-  const builder = new SpanTableBuilder();
+  const builder = new SpanTableBuilder(text.length);
   scanRecords(text, options, builder.push);
   return builder.finish();
 }
@@ -242,9 +276,10 @@ export function spansFromTable(table: SpanTable): RecordSpan[] {
 }
 
 // UTF-8 offsets for each span, in one pass; exact for valid UTF-8, which editable files are.
-export function addByteOffsets(table: SpanTable, text: string): void {
+// `byteLength`, if the caller knows the file's size in bytes, settles ASCII without a pass over the text: for valid UTF-8 the sizes are equal only then.
+export function addByteOffsets(table: SpanTable, text: string, byteLength?: number): void {
   // Character and byte offsets coincide in ASCII, and checking that is several times cheaper than measuring every span.
-  if (!/[^\x00-\x7f]/.test(text)) {
+  if (byteLength !== undefined ? byteLength === text.length : !/[^\x00-\x7f]/.test(text)) {
     table.byteStart = table.start;
     table.byteEnd = table.end;
     return;

@@ -22,9 +22,10 @@ export function regexErrorMessage(value: string): string | null {
 }
 
 // An inactive rule is ignored rather than matching nothing, so a stale rule cannot hide every row.
-export function isRuleActive(rule: FilterRule, headers: string[]): boolean {
+// `indexByHeader`, if the caller keeps one, replaces the linear scan for the rule's column, which matters with very many columns.
+export function isRuleActive(rule: FilterRule, headers: string[], indexByHeader?: ReadonlyMap<string, number>): boolean {
   if (!isValidRule(rule)) return false;
-  if (rule.column !== null && headers.indexOf(rule.column) === -1) return false;
+  if (rule.column !== null && (indexByHeader ? !indexByHeader.has(rule.column) : headers.indexOf(rule.column) === -1)) return false;
   if (rule.operator === "in") {
     return rule.column !== null && Array.isArray(rule.values) && rule.values.length > 0;
   }
@@ -101,18 +102,13 @@ function ruleMatchesRow(row: string[], c: CompiledRule): boolean {
   return cellMatches(row[c.columnIndex] ?? "", c.rule, c.re, c.valueSet);
 }
 
-export function applyFilters(
-  headers: string[],
-  rows: string[][],
-  quickSearch: string,
-  rules: FilterRule[],
-): string[][] {
+function rowPredicate(headers: string[], quickSearch: string, rules: FilterRule[]): (row: string[]) => boolean {
   const activeRules = rules
     .filter((r) => r.enabled && isRuleActive(r, headers))
     .map((r) => compileRule(r, headers));
   const search = foldCase(quickSearch.trim());
 
-  return rows.filter((row) => {
+  return (row) => {
     if (search !== "" && !row.some((cell) => foldCase(cell).includes(search))) {
       return false;
     }
@@ -122,5 +118,31 @@ export function applyFilters(
       if (c.rule.mode === "exclude" && matched) return false;
     }
     return true;
-  });
+  };
+}
+
+// What decides which rows pass: the quick search and the rules that take part, nothing about the sort. Two calls with the same key over the same rows
+// return the same ids, so the worker can keep the last result.
+export function filterCacheKey(headers: string[], quickSearch: string, rules: FilterRule[]): string {
+  const active = rules
+    .filter((r) => r.enabled && isRuleActive(r, headers))
+    .map((r) => [r.column, r.operator, r.value, r.operator === "in" ? r.values : undefined, r.mode, r.caseSensitive]);
+  return JSON.stringify([quickSearch, active]);
+}
+
+// The indexes of the rows that pass, so the worker need not map filtered rows back to their ids.
+export function filterRowIds(headers: string[], rows: string[][], quickSearch: string, rules: FilterRule[]): number[] {
+  const passes = rowPredicate(headers, quickSearch, rules);
+  const ids: number[] = [];
+  for (let i = 0; i < rows.length; i++) if (passes(rows[i])) ids.push(i);
+  return ids;
+}
+
+export function applyFilters(
+  headers: string[],
+  rows: string[][],
+  quickSearch: string,
+  rules: FilterRule[],
+): string[][] {
+  return rows.filter(rowPredicate(headers, quickSearch, rules));
 }

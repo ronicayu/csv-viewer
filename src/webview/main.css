@@ -337,6 +337,15 @@ body.vscode-reduce-motion .working-indicator::before {
   background: var(--vscode-list-hoverBackground);
 }
 
+.column-row-more {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.column-row-more:hover {
+  background: transparent;
+}
+
 .input-error-box {
   display: inline-flex;
   align-items: center;
@@ -792,7 +801,8 @@ tr.detail-row > td {
   color: var(--vscode-descriptionForeground);
 }
 
-.show-all-btn {
+.show-all-btn,
+.detail-show-all-fields {
   display: block;
   margin-top: 4px;
   font-size: 0.85em;

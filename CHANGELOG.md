@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.8.1
+
+**Fixed**
+- Files with a very large number of columns (a 20 MB single-line file has about two
+  million) no longer hang the viewer: the Columns, Sort and Filter lists show the first
+  1,000 columns with a note, and row details show the first 1,000 fields with a **Show
+  all fields** button.
+- The background pass that finishes a large file's row map after it opens is several
+  times faster (a 200,000-row file: 0.9 s to 0.12 s), so sorting and paging right
+  after opening are held up far less.
+- "All in Table" and "All in Details" on a file with thousands of columns no longer
+  freeze the viewer or save a setting per column: the table shows the first 1,000 of the
+  columns chosen for it, with a note, and the rest are in the row details.
+- On files with more than 1,000 columns, column choices saved by 0.8.0 that match the
+  defaults are no longer pinned (those columns follow the default rule), and "All in
+  Table" / "All in Details" replace any per-column choices, including ones made under
+  another separator.
+- A pasted value containing an unpaired surrogate character is refused with a message
+  instead of being written to the file as a replacement character.
+
+**Changed**
+- Large files show their first page as soon as it is parsed; the row count follows.
+- The viewer keeps the file as bytes, so very large files use less memory in the window.
+- Large files open faster and use less memory in the extension host: the file is handed
+  to the viewer as bytes instead of text, the separator is detected from the start of
+  the file rather than all of it, and the first page is drawn without an extra layout
+  pass. Expanding a row with hundreds of fields takes a fraction of a second instead of
+  several.
+- Files read through a remote or virtual file system are no longer copied once more in
+  the extension host before they are sent to the viewer. (Local files were not affected,
+  and the extension host's memory for them is unchanged.)
+- Changing the sort of a filtered or searched file no longer filters it again, and
+  building a column's sort order skips a string copy per cell.
+
 ## 0.8.0
 
 **Added**

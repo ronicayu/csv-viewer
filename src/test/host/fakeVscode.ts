@@ -119,7 +119,11 @@ export const workspace = {
     async readFile(u: Uri) {
       const f = world.files.get(u.path);
       if (!f) throw notFound(u.path);
-      return f.data.slice();
+      // What the Node extension host returns: a Buffer that is a view into a larger buffer (offset 9, as in VS Code's RPC message); every consumer
+      // must honour byteOffset, and none may hand the Buffer itself to postMessage.
+      const backing = Buffer.alloc(f.data.length + 25);
+      backing.set(f.data, 9);
+      return backing.subarray(9, 9 + f.data.length);
     },
     async writeFile(u: Uri, data: Uint8Array) {
       if (world.beforeWrite) {

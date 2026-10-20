@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import Papa from "papaparse";
 import { expect, type Page } from "@playwright/test";
+import type { ParseTuning } from "../../webview/workerProtocol";
 import type { HostToWebviewMessage, LoadMessage, PendingRecordEdit, ReadOnlyReason, RecordFloor, ViewState } from "../../core/types";
 
 export const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -53,11 +54,29 @@ export async function awaitPosted(page: Page, type: string): Promise<Record<stri
   return matches[matches.length - 1];
 }
 
-export async function bootShell(page: Page): Promise<void> {
+export interface BootOptions {
+  // Holds the worker script back, as a slow disk or a busy machine would.
+  workerDelayMs?: number;
+  onWorkerRequest?: () => void;
+  // Fails this many worker-script requests before letting one through.
+  failWorkerRequests?: number;
+  // Cuts the worker's parse into slices of this many records and waits this long between them (with testHooks on), so a test can act mid-parse.
+  parseTuning?: ParseTuning;
+}
+
+export async function bootShell(page: Page, options: BootOptions = {}): Promise<void> {
+  let failuresLeft = options.failWorkerRequests ?? 0;
   page.on("pageerror", (err) => {
     throw new Error(`uncaught error in webview: ${err.message}`);
   });
   await page.route(WORKER_SRC_URL, async (route) => {
+    options.onWorkerRequest?.();
+    if (failuresLeft > 0) {
+      failuresLeft--;
+      await route.abort();
+      return;
+    }
+    if (options.workerDelayMs) await new Promise((resolve) => setTimeout(resolve, options.workerDelayMs));
     await route.fulfill({
       path: outFile("webview", "worker.js"),
       contentType: "application/javascript",
@@ -72,6 +91,7 @@ export async function bootShell(page: Page): Promise<void> {
   await page.addStyleTag({ content: codiconCss() });
   await page.addStyleTag({ path: outFile("webview", "main.css") });
   await page.addScriptTag({ content: VSCODE_API_STUB });
+  if (options.parseTuning) await page.addScriptTag({ content: `window.__csvParseTuning = ${JSON.stringify(options.parseTuning)};` });
   await page.addScriptTag({ path: outFile("webview", "main.js") });
   await awaitPosted(page, "ready");
   await clearPosted(page);
@@ -122,7 +142,7 @@ export interface TextLoad {
   recordFloors?: RecordFloor[];
 }
 
-function editingFields(data: FixtureLoad | TextLoad): Pick<LoadMessage, "baseVersion" | "editable" | "readOnlyReason" | "pendingEdits" | "recordFloors"> {
+function editingFields(data: FixtureLoad | Omit<TextLoad, "text">): Pick<LoadMessage, "baseVersion" | "editable" | "readOnlyReason" | "pendingEdits" | "recordFloors"> {
   const editable = data.editable ?? true;
   return {
     baseVersion: data.baseVersion ?? 1,
@@ -133,11 +153,12 @@ function editingFields(data: FixtureLoad | TextLoad): Pick<LoadMessage, "baseVer
   };
 }
 
-function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
-  const text = Papa.unparse({ fields: data.headers, data: data.rows });
+// A load message without its file: the page encodes the text itself, so the encoding happens before any clock a spec might have started.
+type LoadEnvelope = Omit<LoadMessage, "type" | "bytes">;
+
+function toLoadMessage(data: FixtureLoad): LoadEnvelope {
   return {
     fileKey: data.fileKey,
-    text,
     state: data.state,
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
@@ -147,10 +168,9 @@ function toLoadMessage(data: FixtureLoad): Omit<LoadMessage, "type"> {
   };
 }
 
-function toTextLoadMessage(data: TextLoad): Omit<LoadMessage, "type"> {
+function toTextLoadMessage(data: Omit<TextLoad, "text">): LoadEnvelope {
   return {
     fileKey: data.fileKey,
-    text: data.text,
     state: data.state,
     defaultTableColumns: data.defaultTableColumns,
     defaultDelimiter: data.defaultDelimiter ?? "",
@@ -165,14 +185,30 @@ export async function postFromHost(page: Page, message: HostToWebviewMessage): P
   await page.evaluate((msg) => window.postMessage(msg, "*"), message);
 }
 
+// Plays the host as it really is: the file crosses as bytes, a view that sits inside a larger buffer (readFile's result is not at offset 0).
+async function postLoad(page: Page, envelope: LoadEnvelope, file: { text: string } | { values: number[] }): Promise<void> {
+  await page.evaluate(
+    ({ msg, source }) => {
+      const encoded = "text" in source ? new TextEncoder().encode(source.text) : Uint8Array.from(source.values);
+      const backing = new Uint8Array(encoded.length + 9);
+      backing.set(encoded, 9);
+      window.postMessage({ type: "load", ...msg, bytes: backing.subarray(9) }, "*");
+    },
+    { msg: envelope, source: file },
+  );
+}
+
 export async function pushLoad(page: Page, data: FixtureLoad): Promise<void> {
-  const message = { type: "load" as const, ...toLoadMessage(data) };
-  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
+  await postLoad(page, toLoadMessage(data), { text: Papa.unparse({ fields: data.headers, data: data.rows }) });
 }
 
 export async function pushLoadText(page: Page, data: TextLoad): Promise<void> {
-  const message = { type: "load" as const, ...toTextLoadMessage(data) };
-  await page.evaluate((msg) => window.postMessage(msg, "*"), message);
+  await postLoad(page, toTextLoadMessage(data), { text: data.text });
+}
+
+export async function pushLoadBytes(page: Page, data: Omit<TextLoad, "text"> & { bytes: Uint8Array }): Promise<void> {
+  const { bytes, ...rest } = data;
+  await postLoad(page, toTextLoadMessage(rest), { values: Array.from(bytes) });
 }
 
 export async function bootAndLoad(page: Page, data: FixtureLoad): Promise<void> {

@@ -157,7 +157,7 @@ test.describe("stored choice and Raw-mode links", () => {
     await page.evaluate(
       (text) => {
         const state = { columnVisibility: { id: true, body: false }, filterRules: [], quickSearch: "", sortKeys: [], firstRowIsHeader: true, pageSize: 100, delimiter: "", quotes: true };
-        window.postMessage({ type: "load", fileKey: "file:///old.csv", text, state, defaultTableColumns: 8, defaultDelimiter: "", hintsSeen: [] }, "*");
+        window.postMessage({ type: "load", fileKey: "file:///old.csv", bytes: new TextEncoder().encode(text), state, defaultTableColumns: 8, defaultDelimiter: "", hintsSeen: [] }, "*");
       },
       toCsvText(["id", "body"], [["1", MD_RICH]]),
     );
@@ -376,7 +376,7 @@ test.describe("column names and persistence", () => {
           quotes: true,
           markdownColumns: JSON.parse(savedJson),
         };
-        window.postMessage({ type: "load", fileKey: "file:///md.csv", text, state, defaultTableColumns: 8, defaultDelimiter: "", hintsSeen: [] }, "*");
+        window.postMessage({ type: "load", fileKey: "file:///md.csv", bytes: new TextEncoder().encode(text), state, defaultTableColumns: 8, defaultDelimiter: "", hintsSeen: [] }, "*");
       },
       { text, savedJson },
     );

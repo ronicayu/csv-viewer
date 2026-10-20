@@ -1,95 +1,162 @@
-import { profileColumns } from "../core/columns";
-import { applyTextPatches, recordFieldsForWrite, rebaseSpanTable, textPatches, type EditedRecord } from "../core/csvEdit";
+import { MANY_COLUMNS, PROFILE_SAMPLE_ROWS, profileColumns, profileVerdicts, type ColumnProfile } from "../core/columns";
+import { applyTextPatches, recordFieldsForWrite, type ByteReplacement, rebaseSpanTable, textPatches, type EditedRecord } from "../core/csvEdit";
 import { parseCsv } from "../core/csvParse";
-import { serializeField, serializeRecord } from "../core/csvSerialize";
+import { PARSE_SLICE_RECORDS, ProgressiveParse } from "../core/progressiveParse";
+import { isWellFormedUtf16, serializeField, serializeRecord } from "../core/csvSerialize";
 import { distinctValues, type DistinctResult } from "../core/distinct";
-import { applyFilters } from "../core/filter";
+import { filterCacheKey, filterRowIds } from "../core/filter";
 import { buildColumnSortKeys, sortRowIdsByCachedKeys, type ResolvedCellSortKey } from "../core/sort";
 import { pageSlice } from "../core/paging";
-import { EOL_TEXT, SpanTableBuilder, addByteOffsets, scanRecords, splitRecordsToTable, type SpanTable } from "../core/recordSpans";
+import { EOL_TEXT, addByteOffsets, type SpanTable } from "../core/recordSpans";
 import type { CellChange, FilterRule, RecordFloor, SortDirection, SortKey, WrittenRecord } from "../core/types";
-import type { CellValue, RowBaseline, WorkerRequest, WorkerResponse } from "./workerProtocol";
+import type { CellValue, FirstPageRequest, ParseOptionsMsg, ParseTuning, RowBaseline, WorkerRequest, WorkerResponse, WorkerRow } from "./workerProtocol";
 
 let headers: string[] = [];
 let rawRows: string[][] = [];
-// applyFilters returns the original row arrays, so reference identity recovers each row's id.
-let idByRowRef = new Map<string[], number>();
 let currentView: number[] | null = null;
+// Built the first time a sort asks for a column by name; with very many columns that is too slow to do on every query.
+let columnIndexByName: Map<string, number> | null = null;
 let sortKeyCache = new Map<string, ResolvedCellSortKey[]>();
 let distinctCache = new Map<string, DistinctResult>();
+// The ids that passed the last query's filter, so a sort-only change does not filter again. Never mutated: sorting works on a copy.
+let filterCache: { key: string; ids: number[] } | null = null;
 
 // Kept for the document's lifetime: span slicing and the per-commit re-parse need the text the spans describe.
 let text = "";
+let textBytes: number | undefined;
 let spans: SpanTable | null = null;
 let spansOk = false;
 let delimiter = ",";
 let quoting = true;
 let quotesRequested = true;
+let firstRowIsHeader = true;
 // Smallest field count a record may be written with: its count when first touched, which survives saves so an undo can shrink a record back.
 let floors = new Map<number, number>();
 let headerOffset = 0;
 // Baseline value of every cell that differs from the file; an entry is dropped when the cell returns to it.
 let originals = new Map<number, Map<number, string>>();
 
-// Past this size the span pass would hold up the first render, so it runs in slices after the initial queries and edits finish it on demand.
-const SYNC_SPANS_MAX_CHARS = 8 * 1024 * 1024;
-const SPAN_SLICE_MS = 8;
-const SPAN_SLICE_RECORDS = 1024;
+const PARSE_STEP_MS = 8;
 
-interface SpanJob {
+// The rest of a file whose first slice has been shown: the remaining slices run between messages, and anything that needs the whole table
+// finishes them first (ensureParsed).
+interface ParseJob {
   requestId: number;
-  builder: SpanTableBuilder;
-  pos: number;
-  expectedRecords: number;
+  parse: ProgressiveParse;
+  channel: MessageChannel;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  // What the main thread has been told, to say what changed at the end.
+  reportedHeaders: string[];
+  profiledRows: number;
 }
 
-let spanJob: SpanJob | null = null;
+let parseJob: ParseJob | null = null;
+let sliceRecords = PARSE_SLICE_RECORDS;
+let sliceDelayMs = 0;
+let latestInitRequestId = -1;
 
-function post(message: WorkerResponse): void {
-  (self as unknown as Worker).postMessage(message);
+function post(message: WorkerResponse, transfer: Transferable[] = []): void {
+  (self as unknown as Worker).postMessage(message, transfer);
 }
 
-function onInit(requestId: number, source: string, options: { delimiter?: string; firstRowIsHeader: boolean; quotes: boolean }, initialFloors: RecordFloor[] | undefined): void {
-  const parsed = parseCsv(source, options);
-  text = source;
-  delimiter = parsed.delimiter;
-  quoting = parsed.quoting;
+const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+
+interface InitSource {
+  text?: string;
+  bytes?: Uint8Array;
+  byteLength?: number;
+}
+
+function onInit(
+  requestId: number,
+  source: InitSource,
+  options: ParseOptionsMsg,
+  initialFloors: RecordFloor[] | undefined,
+  firstPage: FirstPageRequest | undefined,
+  tuning: ParseTuning | undefined,
+): void {
+  // Not fatal: the host has already decided whether the file is valid UTF-8, and this is the string it would have sent.
+  text = source.text ?? decoder.decode(source.bytes!);
+  textBytes = source.bytes ? source.bytes.byteLength : source.byteLength;
+  beginParse(requestId, options, initialFloors, firstPage, tuning, source.bytes);
+}
+
+// A format change re-parses the text this worker already holds, so nothing crosses the thread again.
+function onReparse(requestId: number, options: ParseOptionsMsg, initialFloors: RecordFloor[] | undefined, firstPage: FirstPageRequest | undefined, tuning: ParseTuning | undefined): void {
+  beginParse(requestId, options, initialFloors, firstPage, tuning, undefined);
+}
+
+function beginParse(
+  requestId: number,
+  options: ParseOptionsMsg,
+  initialFloors: RecordFloor[] | undefined,
+  firstPage: FirstPageRequest | undefined,
+  tuning: ParseTuning | undefined,
+  bytes: Uint8Array | undefined,
+): void {
+  endParseJob();
+  sliceRecords = tuning?.sliceRecords ?? PARSE_SLICE_RECORDS;
+  sliceDelayMs = tuning?.sliceDelayMs ?? 0;
+  latestInitRequestId = requestId;
+  const parse = new ProgressiveParse(text, options, sliceRecords, tuning?.rebuildAfterSlices);
+  parse.step();
+  delimiter = parse.delimiter;
+  quoting = parse.quoting;
   quotesRequested = options.quotes;
+  firstRowIsHeader = options.firstRowIsHeader;
   originals = new Map();
   floors = new Map((initialFloors ?? []).map((f) => [f.recordIndex, f.floor]));
-  headerOffset = options.firstRowIsHeader && parsed.headers.length > 0 ? 1 : 0;
+  headers = parse.headers();
+  rawRows = parse.rows;
+  headerOffset = options.firstRowIsHeader && headers.length > 0 ? 1 : 0;
   spans = null;
   spansOk = false;
-  spanJob = null;
-  const expectedRecords = parsed.rows.length + headerOffset;
-  if (source.length <= SYNC_SPANS_MAX_CHARS) {
-    spans = splitRecordsToTable(source, { delimiter, quotes: quoting });
-    spansOk = spans.length === expectedRecords;
-    if (!spansOk) reportSpanMismatch(spans.length, expectedRecords);
-  } else {
-    const job: SpanJob = { requestId, builder: new SpanTableBuilder(), pos: 0, expectedRecords };
-    spanJob = job;
-    setTimeout(() => stepSpanJob(job), 0);
-  }
-  headers = parsed.headers;
-  rawRows = parsed.rows;
-  idByRowRef = new Map();
-  rawRows.forEach((cells, id) => idByRowRef.set(cells, id));
   currentView = null;
+  columnIndexByName = null;
   sortKeyCache = new Map();
   distinctCache = new Map();
+  filterCache = null;
 
-  post({
-    type: "initResult",
-    requestId,
-    headers,
-    detectedDelimiter: parsed.delimiter,
-    quoteProblems: parsed.quoteProblems,
-    totalRows: rawRows.length,
-    columnProfiles: profileColumns(headers, rawRows),
-    quoting,
-    spansOk: spanJob ? undefined : spansOk,
-  });
+  let page: { page: number; rows: WorkerRow[] } | undefined;
+  if (parse.done) {
+    finishSpans(parse);
+  } else {
+    const job: ParseJob = { requestId, parse, channel: new MessageChannel(), timer: undefined, reportedHeaders: headers, profiledRows: Math.min(PROFILE_SAMPLE_ROWS, rawRows.length) };
+    parseJob = job;
+    if (firstPage && firstPage.page === 1 && rawRows.length >= firstPage.pageSize) {
+      page = { page: 1, rows: rawRows.slice(0, firstPage.pageSize).map((cells, id) => ({ id, cells })) };
+    }
+    job.channel.port1.onmessage = () => stepParseJob(job);
+  }
+
+  const answer = (): void => {
+    if (latestInitRequestId !== requestId) return;
+    post(
+      {
+        type: "initResult",
+        requestId,
+        headers,
+        detectedDelimiter: parse.delimiter,
+        quoteProblems: parse.quoteProblems(),
+        totalRows: rawRows.length,
+        ...profilesForMain(),
+        quoting,
+        spansOk: parseJob ? undefined : spansOk,
+        parsing: parseJob ? true : undefined,
+        firstPage: page,
+        bytes,
+      },
+      bytes ? [bytes.buffer as ArrayBuffer] : [],
+    );
+    if (parseJob) scheduleStep(parseJob);
+  };
+  if (tuning?.initResultDelayMs) setTimeout(answer, tuning.initResultDelayMs);
+  else answer();
+}
+
+function profilesForMain(): { columnProfiles: ColumnProfile[]; profileVerdicts?: Uint8Array } {
+  const profiles = profileColumns(headers, rawRows);
+  return headers.length > MANY_COLUMNS ? { columnProfiles: [], profileVerdicts: profileVerdicts(profiles) } : { columnProfiles: profiles };
 }
 
 function reportSpanMismatch(found: number, expected: number): void {
@@ -97,32 +164,73 @@ function reportSpanMismatch(found: number, expected: number): void {
   console.error(`csv-viewer: record splitter found ${found} records but the parser found ${expected}; editing is disabled`);
 }
 
-function finishSpanJob(job: SpanJob): void {
-  spans = job.builder.finish();
-  spansOk = spans.length === job.expectedRecords;
-  spanJob = null;
-  if (!spansOk) reportSpanMismatch(spans.length, job.expectedRecords);
-  post({ type: "spansReady", requestId: job.requestId, spansOk });
+function finishSpans(parse: ProgressiveParse): void {
+  spans = parse.spans();
+  const expected = parse.rows.length + headerOffset;
+  spansOk = spans.length === expected;
+  if (!spansOk) reportSpanMismatch(spans.length, expected);
 }
 
-function stepSpanJob(job: SpanJob): void {
-  if (spanJob !== job) return;
-  const deadline = performance.now() + SPAN_SLICE_MS;
+// Slices are chained through a MessageChannel: unlike setTimeout it is not clamped to 4 ms, and unlike a microtask it lets queued requests run between slices.
+function scheduleStep(job: ParseJob): void {
+  if (sliceDelayMs > 0) job.timer = setTimeout(() => stepParseJob(job), sliceDelayMs);
+  else job.channel.port2.postMessage(null);
+}
+
+function endParseJob(): void {
+  if (!parseJob) return;
+  if (parseJob.timer !== undefined) clearTimeout(parseJob.timer);
+  parseJob.channel.port1.close();
+  parseJob = null;
+}
+
+function stepParseJob(job: ParseJob): void {
+  if (parseJob !== job) return;
+  const deadline = performance.now() + PARSE_STEP_MS;
+  let done = false;
   do {
-    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos, SPAN_SLICE_RECORDS);
-  } while (job.pos < text.length && performance.now() < deadline);
-  if (job.pos < text.length) setTimeout(() => stepSpanJob(job), 0);
-  else finishSpanJob(job);
+    done = job.parse.step();
+  } while (!done && sliceDelayMs === 0 && performance.now() < deadline);
+  filterCache = null;
+  if (done) finishParseJob(job);
+  else scheduleStep(job);
 }
 
-// Anything that needs the spans before the background pass is done finishes it in one go.
+function finishParseJob(job: ParseJob): void {
+  const { parse } = job;
+  endParseJob();
+  filterCache = null;
+  rawRows = parse.rows;
+  const finalHeaders = parse.headers();
+  const changed = parse.rebuilt || finalHeaders.length !== job.reportedHeaders.length || finalHeaders.some((h, i) => h !== job.reportedHeaders[i]);
+  const resample = job.profiledRows < Math.min(PROFILE_SAMPLE_ROWS, rawRows.length);
+  headers = finalHeaders;
+  headerOffset = firstRowIsHeader && headers.length > 0 ? 1 : 0;
+  delimiter = parse.delimiter;
+  quoting = parse.quoting;
+  finishSpans(parse);
+  post({
+    type: "parseDone",
+    requestId: job.requestId,
+    totalRows: rawRows.length,
+    quoteProblems: parse.quoteProblems(),
+    spansOk,
+    rebuilt: parse.rebuilt,
+    ...(changed || resample ? { headers, ...profilesForMain() } : {}),
+  });
+}
+
+// Anything that needs every row finishes the parse in one go.
+function ensureParsed(): void {
+  const job = parseJob;
+  if (!job) return;
+  job.parse.runToEnd();
+  finishParseJob(job);
+}
+
 function ensureSpans(withBytes: boolean): void {
-  const job = spanJob;
-  if (job) {
-    job.pos = scanRecords(text, { delimiter, quotes: quoting }, job.builder.push, job.pos);
-    finishSpanJob(job);
-  }
-  if (withBytes && spans && !spans.byteStart) addByteOffsets(spans, text);
+  ensureParsed();
+  if (withBytes && spans && !spans.byteStart) addByteOffsets(spans, text, textBytes);
 }
 
 function getColumnSortKeys(columnIndex: number, columnName: string): ResolvedCellSortKey[] {
@@ -134,20 +242,18 @@ function getColumnSortKeys(columnIndex: number, columnName: string): ResolvedCel
 }
 
 function onQuery(requestId: number, quickSearch: string, filterRules: FilterRule[], sortKeys: SortKey[]): void {
+  ensureParsed();
   // queryStarted/filterDone bracket only the filter phase, which is what the regex watchdog times.
   post({ type: "queryStarted", requestId });
-  const filtered = applyFilters(headers, rawRows, quickSearch, filterRules);
+  const key = filterCacheKey(headers, quickSearch, filterRules);
+  const filterCached = filterCache?.key === key;
+  if (!filterCached) filterCache = { key, ids: filterRowIds(headers, rawRows, quickSearch, filterRules) };
+  const ids = filterCache!.ids;
   post({ type: "filterDone", requestId });
 
-  const ids: number[] = [];
-  for (const cells of filtered) {
-    const id = idByRowRef.get(cells);
-    if (id !== undefined) ids.push(id);
-  }
-
-  const columnIndexByName = new Map(headers.map((h, i) => [h, i]));
   const sortColumns: { direction: SortDirection; keys: ResolvedCellSortKey[] }[] = [];
   for (const key of sortKeys) {
+    columnIndexByName ??= new Map(headers.map((h, i) => [h, i]));
     const ci = columnIndexByName.get(key.column);
     if (ci === undefined) continue; // stale key, e.g. after a separator change
     sortColumns.push({ direction: key.direction, keys: getColumnSortKeys(ci, key.column) });
@@ -155,10 +261,11 @@ function onQuery(requestId: number, quickSearch: string, filterRules: FilterRule
 
   const sortedIds = sortRowIdsByCachedKeys(ids, sortColumns);
   currentView = sortedIds;
-  post({ type: "queryResult", requestId, filteredCount: sortedIds.length });
+  post({ type: "queryResult", requestId, filteredCount: sortedIds.length, filterCached });
 }
 
 function onDistinct(requestId: number, column: string): void {
+  ensureParsed();
   let result = distinctCache.get(column);
   if (!result) {
     const columnIndex = headers.indexOf(column);
@@ -201,7 +308,9 @@ function noteBaseline(rowId: number, columnIndex: number, previous: string, next
   changed.set(columnIndex, baseline);
 }
 
+// A cell changed: the keys and distinct values of its column are stale, and so are the ids that passed a filter.
 function invalidateColumn(columnIndex: number): void {
+  filterCache = null;
   const name = headers[columnIndex];
   sortKeyCache.delete(name);
   distinctCache.delete(name);
@@ -231,10 +340,12 @@ function parseRecord(recordText: string): string[][] {
 }
 
 const NUL = "\u0000";
+const UNPAIRED_SURROGATE_SENTENCE = "a value can't contain an unpaired surrogate character, which a UTF-8 file cannot hold";
 
 // An edit is accepted only if the record's text still parses to its baseline and the new record parses back to what we mean to write.
 function rejectionReason(rowId: number, columnIndex: number, value: string): string | null {
   if (!spans || !spansOk) return "this file's rows couldn't be matched to its text";
+  if (!isWellFormedUtf16(value)) return UNPAIRED_SURROGATE_SENTENCE;
   const recordIndex = rowId + headerOffset;
   if (recordIndex >= spans.length) return "the row's text couldn't be matched exactly";
   const eol = EOL_TEXT[spans.eol[recordIndex]];
@@ -263,7 +374,7 @@ function rejectionReason(rowId: number, columnIndex: number, value: string): str
   return null;
 }
 
-function onEditCell(requestId: number, rowId: number, columnIndex: number, value: string): void {
+function onEditCell(requestId: number, rowId: number, columnIndex: number, value: string, expected: string | undefined): void {
   ensureSpans(true);
   const row = rawRows[rowId];
   if (!row || columnIndex < 0 || columnIndex >= headers.length) {
@@ -271,6 +382,11 @@ function onEditCell(requestId: number, rowId: number, columnIndex: number, value
     return;
   }
   const oldValue = row[columnIndex];
+  // The row the sender saw may not be the row with this id any more (the rows were parsed again under it).
+  if (expected !== undefined && oldValue !== expected) {
+    post({ type: "editResult", requestId, ok: false, reason: "the file was read again while you were editing", stale: true });
+    return;
+  }
   if (oldValue === value) {
     post({ type: "editResult", requestId, ok: true, change: null });
     return;
@@ -311,6 +427,7 @@ function onEditCell(requestId: number, rowId: number, columnIndex: number, value
 }
 
 function onSetCells(requestId: number, cells: CellValue[], verify: RowBaseline[] | undefined): void {
+  ensureParsed();
   if (verify) ensureSpans(false);
   const rejected = new Set<number>();
   for (const check of verify ?? []) {
@@ -344,8 +461,10 @@ function editedRecords(): WrittenRecord[] {
 // The host says what it wrote; cells edited since are still edits against that file.
 function onRebase(requestId: number, written: WrittenRecord[] | undefined): void {
   ensureSpans(true);
+  filterCache = null;
   const records: EditedRecord[] = (written ?? editedRecords()).map((w) => ({ index: w.recordIndex, fields: w.fields })).sort((a, b) => a.index - b.index);
   let patches: ReturnType<typeof textPatches> = [];
+  let bytePatches: ByteReplacement[] = [];
   if (spans) {
     const hostFloors = new Map((written ?? []).map((w) => [w.recordIndex, w.floor]));
     for (const { index } of records) {
@@ -354,6 +473,10 @@ function onRebase(requestId: number, written: WrittenRecord[] | undefined): void
       else if (!floors.has(index)) floors.set(index, spans.fieldCount[index]);
     }
     patches = textPatches(spans, records, delimiter, quoting);
+    // The same replacements in bytes, for the thread that holds the file as bytes (offsets exist: ensureSpans(true)).
+    const encoder = new TextEncoder();
+    bytePatches = patches.map((patch, i) => ({ byteStart: spans!.byteStart![records[i].index], byteEnd: spans!.byteEnd![records[i].index], bytes: encoder.encode(patch.text) }));
+    if (textBytes !== undefined) for (const b of bytePatches) textBytes += b.bytes.length - (b.byteEnd - b.byteStart);
     text = applyTextPatches(text, patches);
     spans = rebaseSpanTable(spans, records, delimiter, quoting);
     for (const { index, fields } of records) {
@@ -369,10 +492,12 @@ function onRebase(requestId: number, written: WrittenRecord[] | undefined): void
       else originals.delete(rowId);
     }
   }
-  post({ type: "rebased", requestId, patches });
+  post({ type: "rebased", requestId, patches, bytePatches });
 }
 
 function onPage(requestId: number, page: number, pageSize: number): void {
+  // A page asked for while the parse is still going is served from the rows so far only if they cover it.
+  if (currentView === null && page * pageSize > rawRows.length) ensureParsed();
   const view = currentView ?? rawRows.map((_, id) => id);
   const { start, end } = pageSlice(view.length, page, pageSize);
   const rows: { id: number; cells: string[] }[] = [];
@@ -388,7 +513,10 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
   try {
     switch (msg.type) {
       case "init":
-        onInit(msg.requestId, msg.text, msg.options, msg.floors);
+        onInit(msg.requestId, { text: msg.text, bytes: msg.bytes, byteLength: msg.byteLength }, msg.options, msg.floors, msg.firstPage, msg.tuning);
+        break;
+      case "reparse":
+        onReparse(msg.requestId, msg.options, msg.floors, msg.firstPage, msg.tuning);
         break;
       case "query":
         onQuery(msg.requestId, msg.quickSearch, msg.filterRules, msg.sortKeys);
@@ -400,7 +528,7 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
         onDistinct(msg.requestId, msg.column);
         break;
       case "editCell":
-        onEditCell(msg.requestId, msg.rowId, msg.columnIndex, msg.value);
+        onEditCell(msg.requestId, msg.rowId, msg.columnIndex, msg.value, msg.expected);
         break;
       case "setCells":
         onSetCells(msg.requestId, msg.cells, msg.verify);
